@@ -21,8 +21,9 @@ func TestLoadConfigWithTargetsAndEnvOverrides(t *testing.T) {
 			filepath.Join(root, "imports"),
 			filepath.Join(root, "shared-imports"),
 		},
-		"lock_path":  filepath.Join(root, "custom-lock.json"),
-		"skills_bin": "skills-custom",
+		"lock_path":     filepath.Join(root, "custom-lock.json"),
+		"skills_bin":    "skills-custom",
+		"source_ignore": []string{"custom-ignore", "overlays", ""},
 		"sources": map[string]any{
 			"core": map[string]string{"source": "owner/repo", "ref": "main"},
 		},
@@ -36,6 +37,7 @@ func TestLoadConfigWithTargetsAndEnvOverrides(t *testing.T) {
 	t.Setenv("UPSKILL_HOME", filepath.Join(root, "home"))
 	t.Setenv("UPSKILL_CONFIG", configPath)
 	t.Setenv("UPSKILL_STORE_DIR", filepath.Join(root, "store-override"))
+	t.Setenv("UPSKILL_SOURCE_IGNORE", "env-ignore,,drafts")
 
 	cfg, err := Load()
 	if err != nil {
@@ -64,6 +66,55 @@ func TestLoadConfigWithTargetsAndEnvOverrides(t *testing.T) {
 	}
 	if cfg.Sources["core"].Ref != "main" {
 		t.Fatalf("sources = %#v", cfg.Sources)
+	}
+	if !hasString(cfg.SourceIgnore, ".obsidian") || !hasString(cfg.SourceIgnore, "custom-ignore") || !hasString(cfg.SourceIgnore, "env-ignore") {
+		t.Fatalf("source ignore = %#v", cfg.SourceIgnore)
+	}
+	if countString(cfg.SourceIgnore, "drafts") != 1 {
+		t.Fatalf("source ignore did not dedupe defaults/env: %#v", cfg.SourceIgnore)
+	}
+}
+
+func TestSaveConfig(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{
+		Home:         filepath.Join(root, "home"),
+		StoreDir:     filepath.Join(root, "store"),
+		OverlaysDir:  filepath.Join(root, "vault", "overlays"),
+		DraftsDir:    filepath.Join(root, "vault", "drafts"),
+		ImportsDir:   filepath.Join(root, "vault", "imports"),
+		ImportDirs:   []string{filepath.Join(root, "vault", "imports")},
+		RenderedDir:  filepath.Join(root, "rendered"),
+		SourceIgnore: []string{".git", "overlays"},
+		ConfigPath:   filepath.Join(root, "config.json"),
+		LockPath:     filepath.Join(root, "lock.json"),
+		SkillsBin:    "skills",
+		Sources:      map[string]Source{"vault": {Name: "vault", Source: filepath.Join(root, "vault", "source")}},
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("UPSKILL_HOME", cfg.Home)
+	t.Setenv("UPSKILL_CONFIG", cfg.ConfigPath)
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.OverlaysDir != cfg.OverlaysDir || loaded.Sources["vault"].Source != cfg.Sources["vault"].Source {
+		t.Fatalf("loaded = %#v", loaded)
+	}
+	if !hasString(loaded.SourceIgnore, "overlays") {
+		t.Fatalf("source ignore = %#v", loaded.SourceIgnore)
+	}
+
+	if err := os.WriteFile(cfg.ConfigPath, []byte(`{"source_ignore": 42}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid source_ignore unexpectedly loaded")
+	}
+	if err := SaveConfig(Config{ConfigPath: root}); err == nil {
+		t.Fatal("SaveConfig with directory path unexpectedly succeeded")
 	}
 }
 
@@ -161,6 +212,25 @@ func TestDiscoverSkills(t *testing.T) {
 	if len(skills) != 1 || skills[0] != "redis" {
 		t.Fatalf("skills = %#v", skills)
 	}
+}
+
+func hasString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func countString(values []string, needle string) int {
+	count := 0
+	for _, value := range values {
+		if value == needle {
+			count++
+		}
+	}
+	return count
 }
 
 func TestLoadDefaultsAndWellKnownDetection(t *testing.T) {

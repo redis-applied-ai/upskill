@@ -142,6 +142,9 @@ func UpsertFile(cfg config.Config, opts WriteOptions) (string, error) {
 			return "", err
 		}
 	}
+	if opts.Operation == "template" && looksLikeJSON(content) {
+		return "", fmt.Errorf("template overlays must contain Jinja template content in a .j2 file; JSON variable maps are not supported")
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return "", err
 	}
@@ -217,6 +220,14 @@ func validateOverlayRel(rel string) error {
 
 func safeOverlayJoin(root string, rel string) (string, error) {
 	return filepath.Join(root, filepath.Clean(rel)), nil
+}
+
+func looksLikeJSON(content []byte) bool {
+	trimmed := strings.TrimSpace(string(content))
+	if trimmed == "" {
+		return false
+	}
+	return json.Valid([]byte(trimmed)) && (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "["))
 }
 
 func fileCount(root string, skipAgents bool) (int, error) {

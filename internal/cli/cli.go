@@ -28,9 +28,48 @@ var (
 	cliOsWriteFile  = os.WriteFile
 )
 
+const (
+	helpAdd          = "usage: upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]"
+	helpUse          = "usage: upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]"
+	helpList         = "usage: upskill list|ls [--json] [--agent AGENT]"
+	helpFind         = "usage: upskill find [query] [--json] [--limit N]"
+	helpRemove       = "usage: upskill remove|rm <skill-name>... [--delete-overlays]"
+	helpUpdate       = "usage: upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]"
+	helpSync         = "usage: upskill sync [--agent AGENT]"
+	helpInit         = "usage: upskill init [name] [--dir DIR]"
+	helpWorkon       = "usage: upskill workon <skill-name> [--from SKILL] [--template NAME]"
+	helpSourceList   = "usage: upskill source list [--json]"
+	helpSourceAdd    = "usage: upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]"
+	helpSourceRemove = "usage: upskill source remove <name>"
+	helpVaultInit    = "usage: upskill vault init <path> [--name NAME] [--source-dir DIR] [--no-config]"
+	helpVaultStatus  = "usage: upskill vault status [--name NAME] [--json]"
+	helpDraftList    = "usage: upskill draft list [--json]"
+	helpDraftCreate  = "usage: upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME]"
+	helpDraftPath    = "usage: upskill draft path <skill-name>"
+	helpDraftFiles   = "usage: upskill draft files <skill-name> [--json]"
+	helpDraftRead    = "usage: upskill draft read <skill-name> [--file PATH]"
+	helpDraftAddFile = "usage: upskill draft add-file <skill-name> <local-path> --path PATH"
+	helpDraftRender  = "usage: upskill draft render <skill-name> [--agent AGENT] [--copy=false] [--apply-overlays]"
+	helpDraftDiff    = "usage: upskill draft diff <skill-name>"
+	helpDraftRebase  = "usage: upskill draft rebase <skill-name>"
+	helpDraftPromote = "usage: upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]"
+	helpDraftRemove  = "usage: upskill draft remove <skill-name>"
+	helpOverlayList  = "usage: upskill overlay list [--skill NAME] [--agent AGENT] [--json]"
+	helpOverlayAdd   = "usage: upskill overlay add <skill-name> [--agent AGENT] [--path]"
+	helpOverlayDiff  = "usage: upskill overlay diff <skill-name> [--agent AGENT]"
+	helpRender       = "usage: upskill render [skill-name] [--agent AGENT] [--copy=false] [--print] [--base-only]"
+	helpMCP          = "usage: upskill mcp"
+	helpStatus       = "usage: upskill status"
+	helpDoctor       = "usage: upskill doctor"
+	helpDraftImport  = `usage:
+  upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect]
+  upskill draft import <skill-name> --archive-url URL --sha256 SHA256 [--strip-components N] [--inspect]
+  upskill draft import <skill-name> --file PATH --path DEST [--sha256 SHA256]
+  upskill draft import <skill-name> --file-url URL --path DEST --sha256 SHA256`
+)
+
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
-	if len(args) == 0 || isHelp(args[0]) {
-		printHelp(stdout)
+	if printRequestedHelp(args, stdout) {
 		return 0
 	}
 
@@ -61,6 +100,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runWorkon(cfg, args[1:], stdout, stderr)
 	case "source":
 		return runSource(cfg, args[1:], stdout, stderr)
+	case "vault":
+		return runVault(cfg, args[1:], stdout, stderr)
 	case "draft":
 		return runDraft(cfg, args[1:], stdout, stderr)
 	case "overlay":
@@ -81,7 +122,7 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "usage: upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]")
+		printUsage(stdout, helpAdd)
 		return 0
 	}
 	source := args[0]
@@ -111,7 +152,7 @@ func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 
 func runUse(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "usage: upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]")
+		printUsage(stdout, helpUse)
 		return 0
 	}
 	input := args[0]
@@ -234,13 +275,30 @@ func runRemove(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 func runUpdate(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
 	agent := ""
 	noRender := false
+	check := false
+	diff := false
 	positionals := []string{}
 	if err := parseFlags(args, map[string]func(string) error{
 		"--agent":     func(v string) error { agent = v; return nil },
 		"--no-render": func(_ string) error { noRender = true; return nil },
+		"--check":     func(_ string) error { check = true; return nil },
+		"--diff": func(_ string) error {
+			check = true
+			diff = true
+			return nil
+		},
 	}, &positionals); err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 2
+	}
+	if check {
+		previews, err := library.PreviewUpdates(cfg, positionals, diff)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		printUpdatePreviews(stdout, previews, diff)
+		return 0
 	}
 	updated, err := library.UpdateSkills(cfg, positionals)
 	if err != nil {
@@ -377,9 +435,159 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 	}
 }
 
+type vaultStatus struct {
+	Name            string `json:"name"`
+	Root            string `json:"root"`
+	SourceDir       string `json:"source_dir"`
+	OverlaysDir     string `json:"overlays_dir"`
+	DraftsDir       string `json:"drafts_dir"`
+	ImportsDir      string `json:"imports_dir"`
+	InstalledSkills int    `json:"installed_skills"`
+	SourceSkills    int    `json:"source_skills"`
+	Overlays        int    `json:"overlays"`
+	Drafts          int    `json:"drafts"`
+}
+
+func runVault(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+	if len(args) == 0 || isHelp(args[0]) {
+		printVaultHelp(stdout)
+		return 0
+	}
+	switch args[0] {
+	case "init":
+		name := ""
+		sourceDirName := "source"
+		noConfig := false
+		positionals := []string{}
+		if err := parseFlags(args[1:], map[string]func(string) error{
+			"--name":       func(v string) error { name = v; return nil },
+			"--source-dir": func(v string) error { sourceDirName = v; return nil },
+			"--no-config":  func(_ string) error { noConfig = true; return nil },
+		}, &positionals); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		if len(positionals) == 0 {
+			fmt.Fprintln(stderr, "upskill: vault init requires <path>")
+			return 2
+		}
+		root, _ := filepath.Abs(positionals[0])
+		sourceDir, err := pathutil.SafeJoin(root, sourceDirName)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		layout := map[string]string{
+			"source":   sourceDir,
+			"overlays": filepath.Join(root, "overlays"),
+			"drafts":   filepath.Join(root, "drafts"),
+			"imports":  filepath.Join(root, "imports"),
+		}
+		for _, dir := range layout {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+		}
+		if name == "" {
+			name = defaultSourceName(root)
+		}
+		if !noConfig {
+			cfg.OverlaysDir = layout["overlays"]
+			cfg.DraftsDir = layout["drafts"]
+			cfg.ImportsDir = layout["imports"]
+			cfg.ImportDirs = appendUnique(cfg.ImportDirs, layout["imports"])
+			cfg.SourceIgnore = appendUnique(config.DefaultSourceIgnore, cfg.SourceIgnore...)
+			if cfg.Sources == nil {
+				cfg.Sources = map[string]config.Source{}
+			}
+			cfg.Sources[name] = config.Source{Name: name, Source: sourceDir}
+			if err := config.SaveConfig(cfg); err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+		}
+		fmt.Fprintf(stdout, "initialized vault %s\n", root)
+		fmt.Fprintf(stdout, "source %s -> %s\n", name, sourceDir)
+		return 0
+	case "status":
+		name := ""
+		jsonOut := false
+		if err := parseFlags(args[1:], map[string]func(string) error{
+			"--name": func(v string) error { name = v; return nil },
+			"--json": func(_ string) error {
+				jsonOut = true
+				return nil
+			},
+		}); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		status, err := buildVaultStatus(cfg, name)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		if jsonOut {
+			data, _ := json.MarshalIndent(status, "", "  ")
+			fmt.Fprintln(stdout, string(data))
+			return 0
+		}
+		fmt.Fprintf(stdout, "name: %s\nroot: %s\nsource: %s\ninstalled skills: %d\nsource skills: %d\noverlays: %d\ndrafts: %d\n", status.Name, status.Root, status.SourceDir, status.InstalledSkills, status.SourceSkills, status.Overlays, status.Drafts)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "upskill: unknown vault command: %s\n", args[0])
+		return 2
+	}
+}
+
+func buildVaultStatus(cfg config.Config, name string) (vaultStatus, error) {
+	sourceName := name
+	if sourceName == "" {
+		names := sortedSourceNames(cfg.Sources)
+		if len(names) == 0 {
+			return vaultStatus{}, fmt.Errorf("no sources configured")
+		}
+		sourceName = names[0]
+	}
+	sourceDir, err := library.ResolveLocalSourceDestination(cfg, sourceName)
+	if err != nil {
+		return vaultStatus{}, err
+	}
+	root := filepath.Dir(sourceDir)
+	installed, err := library.ListInstalled(cfg)
+	if err != nil {
+		return vaultStatus{}, err
+	}
+	sourceSkills, err := library.DiscoverSkillsWithIgnore(sourceDir, "", cfg.SourceIgnore)
+	if err != nil {
+		return vaultStatus{}, err
+	}
+	overlays, err := overlay.List(cfg, "", "")
+	if err != nil {
+		return vaultStatus{}, err
+	}
+	drafts, err := draft.List(cfg)
+	if err != nil {
+		return vaultStatus{}, err
+	}
+	return vaultStatus{
+		Name:            sourceName,
+		Root:            root,
+		SourceDir:       sourceDir,
+		OverlaysDir:     cfg.OverlaysDir,
+		DraftsDir:       cfg.DraftsDir,
+		ImportsDir:      cfg.ImportsDir,
+		InstalledSkills: len(installed),
+		SourceSkills:    len(sourceSkills),
+		Overlays:        len(overlays),
+		Drafts:          len(drafts),
+	}, nil
+}
+
 func runWorkon(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "usage: upskill workon <skill-name> [--from SKILL] [--template NAME]")
+		printUsage(stdout, helpWorkon)
 		return 0
 	}
 	name := args[0]
@@ -662,15 +870,25 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 			return 2
 		}
 		toPath := ""
+		toSource := ""
 		dryRun := false
 		if err := parseFlags(args[2:], map[string]func(string) error{
-			"--to":      func(v string) error { toPath = v; return nil },
-			"--dry-run": func(_ string) error { dryRun = true; return nil },
+			"--to":        func(v string) error { toPath = v; return nil },
+			"--to-source": func(v string) error { toSource = v; return nil },
+			"--dry-run":   func(_ string) error { dryRun = true; return nil },
 		}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 2
 		}
-		result, err := draft.Promote(cfg, args[1], draft.PromoteOptions{ToPath: toPath, DryRun: dryRun})
+		if toSource != "" {
+			dest, err := library.ResolveLocalSourceDestination(cfg, toSource)
+			if err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+			toPath = dest
+		}
+		result, err := draft.Promote(cfg, args[1], draft.PromoteOptions{ToPath: toPath, ToSource: toSource, DryRun: dryRun})
 		if err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
@@ -1025,6 +1243,30 @@ func printInstalled(w io.Writer, installed []library.InstalledSkill, verb string
 	}
 }
 
+func printUpdatePreviews(w io.Writer, previews []library.UpdatePreview, includeDiff bool) {
+	if len(previews) == 0 {
+		fmt.Fprintln(w, "no locked skills")
+		return
+	}
+	changed := false
+	for _, preview := range previews {
+		status := "unchanged"
+		if preview.Changed {
+			status = "changed"
+			changed = true
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s -> %s\n", preview.StoreName, status, preview.CurrentHash, preview.NewHash)
+		if includeDiff {
+			for _, line := range preview.Diff {
+				fmt.Fprintln(w, line)
+			}
+		}
+	}
+	if !changed {
+		fmt.Fprintln(w, "no updates available")
+	}
+}
+
 func printResults(w io.Writer, results []render.Result) {
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].Skill != results[j].Skill {
@@ -1052,6 +1294,23 @@ func sortedSourceNames(sources map[string]config.Source) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func appendUnique(values []string, extra ...string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values)+len(extra))
+	for _, value := range append(append([]string{}, values...), extra...) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func defaultSourceName(source string) string {
@@ -1103,7 +1362,7 @@ func parseFlagsWithValues(args []string, handlers map[string]func(string) error,
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to":
+	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--source-dir":
 		return true
 	default:
 		return false
@@ -1121,62 +1380,179 @@ func isHelp(arg string) bool {
 	return arg == "help" || arg == "--help" || arg == "-h"
 }
 
+func printRequestedHelp(args []string, w io.Writer) bool {
+	if len(args) == 0 || isHelp(args[0]) {
+		printHelp(w)
+		return true
+	}
+	switch args[0] {
+	case "add":
+		return printDirectHelp(args, w, helpAdd)
+	case "use":
+		return printDirectHelp(args, w, helpUse)
+	case "list", "ls":
+		return printDirectHelp(args, w, helpList)
+	case "find":
+		return printDirectHelp(args, w, helpFind)
+	case "remove", "rm":
+		return printDirectHelp(args, w, helpRemove)
+	case "update":
+		return printDirectHelp(args, w, helpUpdate)
+	case "sync":
+		return printDirectHelp(args, w, helpSync)
+	case "init":
+		return printDirectHelp(args, w, helpInit)
+	case "workon":
+		return printDirectHelp(args, w, helpWorkon)
+	case "source":
+		return printNestedHelp(args[1:], w, printSourceHelp, map[string]string{
+			"list":   helpSourceList,
+			"add":    helpSourceAdd,
+			"remove": helpSourceRemove,
+		})
+	case "vault":
+		return printNestedHelp(args[1:], w, printVaultHelp, map[string]string{
+			"init":   helpVaultInit,
+			"status": helpVaultStatus,
+		})
+	case "draft":
+		return printNestedHelp(args[1:], w, printDraftHelp, map[string]string{
+			"list":     helpDraftList,
+			"create":   helpDraftCreate,
+			"path":     helpDraftPath,
+			"files":    helpDraftFiles,
+			"read":     helpDraftRead,
+			"add-file": helpDraftAddFile,
+			"import":   helpDraftImport,
+			"render":   helpDraftRender,
+			"diff":     helpDraftDiff,
+			"rebase":   helpDraftRebase,
+			"promote":  helpDraftPromote,
+			"remove":   helpDraftRemove,
+		})
+	case "overlay":
+		return printNestedHelp(args[1:], w, printOverlayHelp, map[string]string{
+			"list": helpOverlayList,
+			"add":  helpOverlayAdd,
+			"diff": helpOverlayDiff,
+		})
+	case "render":
+		return printDirectHelp(args, w, helpRender)
+	case "mcp":
+		return printDirectHelp(args, w, helpMCP)
+	case "status":
+		return printDirectHelp(args, w, helpStatus)
+	case "doctor":
+		return printDirectHelp(args, w, helpDoctor)
+	default:
+		return false
+	}
+}
+
+func printDirectHelp(args []string, w io.Writer, usage string) bool {
+	if len(args) > 1 && isHelp(args[1]) {
+		printUsage(w, usage)
+		return true
+	}
+	return false
+}
+
+func printNestedHelp(args []string, w io.Writer, parent func(io.Writer), usages map[string]string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if isHelp(args[0]) {
+		parent(w)
+		return true
+	}
+	if len(args) > 1 && isHelp(args[1]) {
+		usage, ok := usages[args[0]]
+		if !ok {
+			return false
+		}
+		printUsage(w, usage)
+		return true
+	}
+	return false
+}
+
+func printUsage(w io.Writer, usage string) {
+	fmt.Fprintln(w, strings.TrimRight(usage, "\n"))
+}
+
 func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage: upskill <command> [args]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "library:")
-	fmt.Fprintln(w, "  add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]")
-	fmt.Fprintln(w, "  use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]")
-	fmt.Fprintln(w, "  list|ls [--json] [--agent AGENT]")
-	fmt.Fprintln(w, "  find [query] [--json] [--limit N]")
-	fmt.Fprintln(w, "  remove|rm <skill-name>... [--delete-overlays]")
-	fmt.Fprintln(w, "  update [skill-name...] [--agent AGENT] [--no-render]")
-	fmt.Fprintln(w, "  sync [--agent AGENT]")
-	fmt.Fprintln(w, "  init [name] [--dir DIR]")
-	fmt.Fprintln(w, "  workon <skill-name> [--from SKILL] [--template NAME]")
-	fmt.Fprintln(w, "  status")
-	fmt.Fprintln(w, "  doctor")
+	fmt.Fprintln(w, "commands:")
+	fmt.Fprintln(w, "  add      Install skills from a source")
+	fmt.Fprintln(w, "  use      Print a source or installed skill")
+	fmt.Fprintln(w, "  list     List installed skills")
+	fmt.Fprintln(w, "  find     Search installed skills")
+	fmt.Fprintln(w, "  remove   Remove installed skills")
+	fmt.Fprintln(w, "  update   Update installed skills from their locked sources")
+	fmt.Fprintln(w, "  sync     Update skills and render overlays")
+	fmt.Fprintln(w, "  init     Create a new skill bundle")
+	fmt.Fprintln(w, "  workon   Create or open a mutable draft")
+	fmt.Fprintln(w, "  source   Manage named skill sources")
+	fmt.Fprintln(w, "  vault    Manage filesystem skill vaults")
+	fmt.Fprintln(w, "  draft    Manage mutable skill drafts")
+	fmt.Fprintln(w, "  overlay  Manage skill overlays")
+	fmt.Fprintln(w, "  render   Render skills with overlays")
+	fmt.Fprintln(w, "  mcp      Run the MCP server")
+	fmt.Fprintln(w, "  status   Show local upskill state")
+	fmt.Fprintln(w, "  doctor   Check and create local directories")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "sources:")
-	fmt.Fprintln(w, "  source list [--json]")
-	fmt.Fprintln(w, "  source add <source> [--name NAME] [--ref REF] [--subpath PATH]")
-	fmt.Fprintln(w, "  source remove <name>")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "drafts:")
-	fmt.Fprintln(w, "  draft list [--json]")
-	fmt.Fprintln(w, "  draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME]")
-	fmt.Fprintln(w, "  draft path <skill-name>")
-	fmt.Fprintln(w, "  draft files <skill-name> [--json]")
-	fmt.Fprintln(w, "  draft read <skill-name> [--file PATH]")
-	fmt.Fprintln(w, "  draft add-file <skill-name> <local-path> --path PATH")
-	fmt.Fprintln(w, "  draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect]")
-	fmt.Fprintln(w, "  draft import <skill-name> --archive-url URL --sha256 SHA256 [--strip-components N] [--inspect]")
-	fmt.Fprintln(w, "  draft import <skill-name> --file PATH --path DEST [--sha256 SHA256]")
-	fmt.Fprintln(w, "  draft import <skill-name> --file-url URL --path DEST --sha256 SHA256")
-	fmt.Fprintln(w, "  draft render <skill-name> [--agent AGENT] [--copy=false] [--apply-overlays]")
-	fmt.Fprintln(w, "  draft diff <skill-name>")
-	fmt.Fprintln(w, "  draft rebase <skill-name>")
-	fmt.Fprintln(w, "  draft promote <skill-name> --to PATH [--dry-run]")
-	fmt.Fprintln(w, "  draft remove <skill-name>")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "overlays:")
-	fmt.Fprintln(w, "  overlay list [--skill NAME] [--agent AGENT] [--json]")
-	fmt.Fprintln(w, "  overlay add <skill-name> [--agent AGENT] [--path]")
-	fmt.Fprintln(w, "  overlay diff <skill-name> [--agent AGENT]")
-	fmt.Fprintln(w, "  render [skill-name] [--agent AGENT] [--copy=false] [--print] [--base-only]")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "server:")
-	fmt.Fprintln(w, "  mcp")
+	fmt.Fprintln(w, `Run "upskill <command> --help" for command help.`)
 }
 
 func printOverlayHelp(w io.Writer) {
-	fmt.Fprintln(w, "usage: upskill overlay <list|add|diff> [args]")
+	fmt.Fprintln(w, "usage: upskill overlay <command> [args]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "commands:")
+	fmt.Fprintln(w, "  list  List overlays")
+	fmt.Fprintln(w, "  add   Create an overlay directory")
+	fmt.Fprintln(w, "  diff  Show rendered overlay changes")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, `Run "upskill overlay <command> --help" for command help.`)
 }
 
 func printSourceHelp(w io.Writer) {
-	fmt.Fprintln(w, "usage: upskill source <list|add|remove> [args]")
+	fmt.Fprintln(w, "usage: upskill source <command> [args]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "commands:")
+	fmt.Fprintln(w, "  list    List named sources")
+	fmt.Fprintln(w, "  add     Add or update a named source")
+	fmt.Fprintln(w, "  remove  Remove a named source")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, `Run "upskill source <command> --help" for command help.`)
+}
+
+func printVaultHelp(w io.Writer) {
+	fmt.Fprintln(w, "usage: upskill vault <command> [args]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "commands:")
+	fmt.Fprintln(w, "  init    Create a vault layout and configure it as a local source")
+	fmt.Fprintln(w, "  status  Show vault source, overlay, draft, and import state")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, `Run "upskill vault <command> --help" for command help.`)
 }
 
 func printDraftHelp(w io.Writer) {
-	fmt.Fprintln(w, "usage: upskill draft <list|create|path|files|read|add-file|import|render|diff|rebase|promote|remove> [args]")
+	fmt.Fprintln(w, "usage: upskill draft <command> [args]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "commands:")
+	fmt.Fprintln(w, "  list      List drafts")
+	fmt.Fprintln(w, "  create    Create a draft")
+	fmt.Fprintln(w, "  path      Print a draft path")
+	fmt.Fprintln(w, "  files     List draft files")
+	fmt.Fprintln(w, "  read      Print a draft file")
+	fmt.Fprintln(w, "  add-file  Add a local file to a draft")
+	fmt.Fprintln(w, "  import    Import files into a draft")
+	fmt.Fprintln(w, "  render    Render a draft")
+	fmt.Fprintln(w, "  diff      Show draft changes")
+	fmt.Fprintln(w, "  rebase    Rebase a version draft")
+	fmt.Fprintln(w, "  promote   Copy a draft into an upstream checkout")
+	fmt.Fprintln(w, "  remove    Remove a draft")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, `Run "upskill draft <command> --help" for command help.`)
 }

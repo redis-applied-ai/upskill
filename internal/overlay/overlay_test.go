@@ -272,6 +272,7 @@ func TestUpsertOverlayValidation(t *testing.T) {
 		{Skill: "redis"},
 		{Skill: "redis", Operation: "unknown", Path: "SKILL.md"},
 		{Skill: "redis", Operation: "template", Path: "SKILL.md"},
+		{Skill: "redis", Operation: "template", Path: "SKILL.md.j2", Content: `{"tone":"casual"}`},
 		{Skill: "redis", Operation: "patch", Path: "metadata.txt"},
 		{Skill: "redis", Operation: "append", Path: "../SKILL.md"},
 		{Skill: "redis", Operation: "append", Path: "/tmp/SKILL.md"},
@@ -300,5 +301,8 @@ func TestUpsertOverlayValidation(t *testing.T) {
 	}
 	if _, err := UpsertFile(blockerCfg, WriteOptions{Skill: "redis", Path: "SKILL.md", Content: "x"}); err == nil {
 		t.Fatal("upsert with file overlay root unexpectedly succeeded")
+	}
+	if looksLikeJSON(nil) || looksLikeJSON([]byte("plain")) || !looksLikeJSON([]byte(`[1]`)) {
+		t.Fatal("looksLikeJSON branches failed")
 	}
 }

@@ -32,32 +32,49 @@ type Source struct {
 }
 
 type Config struct {
-	Home        string
-	StoreDir    string
-	OverlaysDir string
-	DraftsDir   string
-	ImportsDir  string
-	ImportDirs  []string
-	RenderedDir string
-	ConfigPath  string
-	LockPath    string
-	SkillsBin   string
-	Targets     []Target
-	Sources     map[string]Source
+	Home         string
+	StoreDir     string
+	OverlaysDir  string
+	DraftsDir    string
+	ImportsDir   string
+	ImportDirs   []string
+	RenderedDir  string
+	SourceIgnore []string
+	ConfigPath   string
+	LockPath     string
+	SkillsBin    string
+	Targets      []Target
+	Sources      map[string]Source
 }
 
 type rawConfig struct {
-	StoreDir    string          `json:"store_dir"`
-	OverlaysDir string          `json:"overlays_dir"`
-	DraftsDir   string          `json:"drafts_dir"`
-	ImportsDir  string          `json:"imports_dir"`
-	ImportDirs  json.RawMessage `json:"import_dirs"`
-	RenderedDir string          `json:"rendered_dir"`
-	LockPath    string          `json:"lock_path"`
-	SkillsBin   string          `json:"skills_bin"`
-	Agents      json.RawMessage `json:"agents"`
-	Targets     json.RawMessage `json:"targets"`
-	Sources     json.RawMessage `json:"sources"`
+	StoreDir     string          `json:"store_dir"`
+	OverlaysDir  string          `json:"overlays_dir"`
+	DraftsDir    string          `json:"drafts_dir"`
+	ImportsDir   string          `json:"imports_dir"`
+	ImportDirs   json.RawMessage `json:"import_dirs"`
+	RenderedDir  string          `json:"rendered_dir"`
+	SourceIgnore json.RawMessage `json:"source_ignore"`
+	LockPath     string          `json:"lock_path"`
+	SkillsBin    string          `json:"skills_bin"`
+	Agents       json.RawMessage `json:"agents"`
+	Targets      json.RawMessage `json:"targets"`
+	Sources      json.RawMessage `json:"sources"`
+}
+
+var DefaultSourceIgnore = []string{
+	".git",
+	"node_modules",
+	"dist",
+	"build",
+	"__pycache__",
+	".obsidian",
+	".trash",
+	".upskill",
+	"overlays",
+	"drafts",
+	"imports",
+	"rendered",
 }
 
 func Load() (Config, error) {
@@ -99,6 +116,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	sourceIgnore, err := parseSourceIgnore(raw.SourceIgnore, os.Getenv("UPSKILL_SOURCE_IGNORE"))
+	if err != nil {
+		return Config{}, err
+	}
 	lockPath, err := expandPath(envDefault("UPSKILL_LOCK", defaultString(raw.LockPath, filepath.Join(home, "upskill-lock.json"))))
 	if err != nil {
 		return Config{}, err
@@ -117,18 +138,19 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Home:        home,
-		StoreDir:    storeDir,
-		OverlaysDir: overlaysDir,
-		DraftsDir:   draftsDir,
-		ImportsDir:  importsDir,
-		ImportDirs:  importDirs,
-		RenderedDir: renderedDir,
-		ConfigPath:  configPath,
-		LockPath:    lockPath,
-		SkillsBin:   envDefault("UPSKILL_SKILLS_BIN", defaultString(raw.SkillsBin, "skills")),
-		Targets:     targets,
-		Sources:     sources,
+		Home:         home,
+		StoreDir:     storeDir,
+		OverlaysDir:  overlaysDir,
+		DraftsDir:    draftsDir,
+		ImportsDir:   importsDir,
+		ImportDirs:   importDirs,
+		RenderedDir:  renderedDir,
+		SourceIgnore: sourceIgnore,
+		ConfigPath:   configPath,
+		LockPath:     lockPath,
+		SkillsBin:    envDefault("UPSKILL_SKILLS_BIN", defaultString(raw.SkillsBin, "skills")),
+		Targets:      targets,
+		Sources:      sources,
 	}, nil
 }
 
@@ -200,12 +222,39 @@ func SaveSources(cfg Config, sources map[string]Source) error {
 	}
 	data, _ := json.Marshal(sources)
 	raw.Sources = data
-	out, _ := json.MarshalIndent(raw, "", "  ")
-	out = append(out, '\n')
-	if err := makeDirAll(filepath.Dir(cfg.ConfigPath), 0o755); err != nil {
+	return writeRawConfig(cfg.ConfigPath, raw)
+}
+
+func SaveConfig(cfg Config) error {
+	raw, err := readRawConfig(cfg.ConfigPath)
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfg.ConfigPath, out, 0o644)
+	raw.StoreDir = cfg.StoreDir
+	raw.OverlaysDir = cfg.OverlaysDir
+	raw.DraftsDir = cfg.DraftsDir
+	raw.ImportsDir = cfg.ImportsDir
+	raw.RenderedDir = cfg.RenderedDir
+	raw.LockPath = cfg.LockPath
+	raw.SkillsBin = cfg.SkillsBin
+	raw.ImportDirs = mustMarshal(cfg.ImportDirs)
+	raw.SourceIgnore = mustMarshal(cfg.SourceIgnore)
+	raw.Sources = mustMarshal(cfg.Sources)
+	return writeRawConfig(cfg.ConfigPath, raw)
+}
+
+func writeRawConfig(path string, raw rawConfig) error {
+	out, _ := json.MarshalIndent(raw, "", "  ")
+	out = append(out, '\n')
+	if err := makeDirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
+func mustMarshal(value any) json.RawMessage {
+	data, _ := json.Marshal(value)
+	return data
 }
 
 func firstRaw(values ...json.RawMessage) json.RawMessage {
@@ -322,6 +371,40 @@ func parseImportDirs(data json.RawMessage, fallback string) ([]string, error) {
 		dirs = append(dirs, fallback)
 	}
 	return dirs, nil
+}
+
+func parseSourceIgnore(data json.RawMessage, env string) ([]string, error) {
+	values := append([]string{}, DefaultSourceIgnore...)
+	if len(data) > 0 && string(data) != "null" {
+		var configured []string
+		if err := json.Unmarshal(data, &configured); err != nil {
+			return nil, err
+		}
+		values = append(values, configured...)
+	}
+	if env != "" {
+		for _, item := range strings.Split(env, ",") {
+			values = append(values, strings.TrimSpace(item))
+		}
+	}
+	return uniqueNonEmpty(values), nil
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func detectWellKnownTargets() []Target {

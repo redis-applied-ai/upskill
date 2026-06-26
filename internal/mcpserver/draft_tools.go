@@ -17,6 +17,7 @@ import (
 
 var (
 	mcpCopyDir     = fsutil.CopyDir
+	mcpDraftRemove = draft.Remove
 	mcpOsRemoveAll = os.RemoveAll
 	mcpOsStat      = os.Stat
 	mcpOsWriteFile = os.WriteFile
@@ -25,11 +26,12 @@ var (
 func draftToolList() []map[string]any {
 	return []map[string]any{
 		tool("create_skill_draft", "Create a mutable draft skill. Existing base skills create version drafts by default; unknown names create new-skill drafts.", map[string]any{
-			"skill_name":     stringProp("Draft skill name."),
-			"from_skill":     stringProp("Optional installed base skill to copy into a version draft."),
-			"from_rendered":  boolProp("Create the draft from rendered output instead of base files."),
-			"template":       stringProp("Optional template label for new draft skeletons."),
-			"allow_existing": boolProp("Return an existing draft instead of failing when it already exists."),
+			"skill_name":       stringProp("Draft skill name."),
+			"from_skill":       stringProp("Optional installed base skill to copy into a version draft."),
+			"from_rendered":    boolProp("Create the draft from rendered output instead of base files."),
+			"template":         stringProp("Optional template label for new draft skeletons."),
+			"allow_existing":   boolProp("Return an existing draft only when it matches the requested draft kind."),
+			"replace_existing": boolProp("Delete an existing same-named draft before creating the requested draft."),
 		}, []string{"skill_name"}),
 		tool("list_skill_drafts", "List mutable skill drafts.", map[string]any{
 			"query": stringProp("Optional search text."),
@@ -62,6 +64,11 @@ func draftToolList() []map[string]any {
 			"draft_id": stringProp("Draft identifier, for example draft:redis."),
 			"path":     stringProp("Relative file path."),
 		}, []string{"draft_id", "path"}),
+		tool("delete_skill_draft", "Delete one mutable draft bundle. This never deletes base skills.", map[string]any{
+			"draft_id":   stringProp("Draft identifier, for example draft:redis."),
+			"skill_id":   stringProp("Alias for draft_id."),
+			"skill_name": stringProp("Alias for draft name."),
+		}, []string{}),
 		tool("import_skill_draft_archive", "Import a zip or tar.gz skill bundle into a draft from an allowed local path or URL.", map[string]any{
 			"draft_id":         stringProp("Draft identifier, for example draft:redis."),
 			"archive_path":     stringProp("Local archive path. MCP calls must use configured import directories."),
@@ -91,11 +98,14 @@ func draftToolList() []map[string]any {
 		tool("rebase_skill_draft", "Check whether a version draft can be rebased onto the current base skill.", map[string]any{
 			"draft_id": stringProp("Draft identifier, for example draft:redis."),
 		}, []string{"draft_id"}),
-		tool("promote_skill_draft", "Copy a draft into a local upstream checkout. Dry-run is true by default.", map[string]any{
-			"draft_id": stringProp("Draft identifier, for example draft:redis."),
-			"to_path":  stringProp("Local upstream checkout or skill directory destination."),
-			"dry_run":  boolProp("Preview planned writes without changing files. Defaults to true."),
-		}, []string{"draft_id", "to_path"}),
+		tool("promote_skill_draft", "Copy a draft into a local upstream checkout or named local source. Dry-run is true by default. Managed upskill store, rendered, overlay, draft, and import directories are rejected.", map[string]any{
+			"draft_id":   stringProp("Draft identifier, for example draft:redis."),
+			"skill_id":   stringProp("Alias for draft_id."),
+			"skill_name": stringProp("Alias for draft name."),
+			"to_path":    stringProp("Local upstream checkout or skill directory destination."),
+			"to_source":  stringProp("Configured local source name to promote into."),
+			"dry_run":    boolProp("Preview planned writes without changing files. Defaults to true."),
+		}, []string{}),
 	}
 }
 
@@ -153,14 +163,25 @@ func createSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("skill_name is required")
 	}
 	if draft.Exists(cfg, name) {
-		if boolArg(args, "allow_existing", false) {
+		if boolArg(args, "replace_existing", false) {
+			if err := mcpDraftRemove(cfg, name); err != nil {
+				return nil, err
+			}
+		} else if boolArg(args, "allow_existing", false) {
 			item, err := draft.Read(cfg, name)
 			if err != nil {
 				return nil, err
 			}
-			return draftSummary(item), nil
+			desiredType, desiredParent := requestedDraftShape(cfg, name, strArg(args, "from_skill"), boolArg(args, "from_rendered", false))
+			if !draftMatchesRequest(item, desiredType, desiredParent) {
+				return nil, fmt.Errorf("existing draft %s is a %s draft; requested %s draft%s. Use delete_skill_draft or replace_existing to replace it", item.ID, item.Metadata.Type, desiredType, requestedParentSuffix(desiredParent))
+			}
+			summary := draftSummary(item)
+			summary["existing"] = true
+			return summary, nil
+		} else {
+			return nil, fmt.Errorf("draft already exists: %s", draft.MakeID(name))
 		}
-		return nil, fmt.Errorf("draft already exists: %s", draft.MakeID(name))
 	}
 	item, err := createDraftForMCP(cfg, name, strArg(args, "from_skill"), boolArg(args, "from_rendered", false), strArg(args, "template"))
 	if err != nil {
@@ -293,6 +314,17 @@ func deleteSkillDraftFile(cfg config.Config, args map[string]any) (any, error) {
 	return map[string]any{"draft_id": item.ID, "path": filepath.ToSlash(filepath.Clean(path)), "deleted": true, "base_mutated": false}, nil
 }
 
+func deleteSkillDraft(cfg config.Config, args map[string]any) (any, error) {
+	item, err := draftFromArgs(cfg, args)
+	if err != nil {
+		return nil, err
+	}
+	if err := mcpDraftRemove(cfg, item.StoreName); err != nil {
+		return nil, err
+	}
+	return map[string]any{"draft_id": item.ID, "deleted": true, "base_mutated": false}, nil
+}
+
 func importSkillDraftArchive(cfg config.Config, args map[string]any) (any, error) {
 	item, err := draftFromArgs(cfg, args)
 	if err != nil {
@@ -356,9 +388,27 @@ func promoteSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	toSource := strArg(args, "to_source")
+	toPath := strArg(args, "to_path")
+	if toSource != "" {
+		if toPath != "" {
+			return nil, fmt.Errorf("use only one of to_path or to_source")
+		}
+		toPath, err = library.ResolveLocalSourceDestination(cfg, toSource)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if toPath == "" {
+		return nil, fmt.Errorf("promotion destination is required")
+	}
+	if err := rejectManagedPromotionDestination(cfg, toPath); err != nil {
+		return nil, err
+	}
 	return draft.Promote(cfg, item.StoreName, draft.PromoteOptions{
-		ToPath: strArg(args, "to_path"),
-		DryRun: boolArg(args, "dry_run", true),
+		ToPath:   toPath,
+		ToSource: toSource,
+		DryRun:   boolArg(args, "dry_run", true),
 	})
 }
 
@@ -376,6 +426,12 @@ func draftFromArgs(cfg config.Config, args map[string]any) (draft.Draft, error) 
 	id := strArg(args, "draft_id")
 	if id == "" {
 		id = strArg(args, "skill_id")
+	}
+	if id == "" {
+		name := strArg(args, "skill_name")
+		if name != "" {
+			return draft.Read(cfg, name)
+		}
 	}
 	return draftFromID(cfg, id)
 }
@@ -492,6 +548,73 @@ func parentMetadataForMCP(cfg config.Config, sourceName string, baseDir string) 
 func storeSkillExistsForMCP(cfg config.Config, name string) bool {
 	info, err := mcpOsStat(filepath.Join(cfg.StoreDir, library.NormalizeName(name)))
 	return err == nil && info.IsDir()
+}
+
+func requestedDraftShape(cfg config.Config, name string, from string, fromRendered bool) (string, string) {
+	storeName := library.NormalizeName(name)
+	sourceName := library.NormalizeName(from)
+	if sourceName == "" && storeSkillExistsForMCP(cfg, storeName) {
+		sourceName = storeName
+	}
+	if sourceName != "" || fromRendered {
+		if sourceName == "" {
+			sourceName = storeName
+		}
+		return draft.TypeVersion, sourceName
+	}
+	return draft.TypeNew, ""
+}
+
+func draftMatchesRequest(item draft.Draft, desiredType string, desiredParent string) bool {
+	if item.Metadata.Type != desiredType {
+		return false
+	}
+	if desiredType == draft.TypeVersion && desiredParent != "" && item.Metadata.ParentSkill != desiredParent {
+		return false
+	}
+	return true
+}
+
+func requestedParentSuffix(parent string) string {
+	if parent == "" {
+		return ""
+	}
+	return " of " + parent
+}
+
+func rejectManagedPromotionDestination(cfg config.Config, path string) error {
+	managed := []struct {
+		name string
+		path string
+	}{
+		{"store", cfg.StoreDir},
+		{"rendered", cfg.RenderedDir},
+		{"overlays", cfg.OverlaysDir},
+		{"drafts", cfg.DraftsDir},
+		{"imports", cfg.ImportsDir},
+	}
+	for _, dir := range cfg.ImportDirs {
+		managed = append(managed, struct {
+			name string
+			path string
+		}{name: "import", path: dir})
+	}
+	for _, item := range managed {
+		if item.path == "" {
+			continue
+		}
+		if isInsidePath(path, item.path) {
+			return fmt.Errorf("promotion destination is inside managed %s directory: %s", item.name, item.path)
+		}
+	}
+	return nil
+}
+
+func isInsidePath(path string, root string) bool {
+	absPath, _ := filepath.Abs(path)
+	absRoot, _ := filepath.Abs(root)
+	rel, _ := filepath.Rel(absRoot, absPath)
+	return rel == "." || rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func readFileFromRoot(root string, args map[string]any) (any, error) {

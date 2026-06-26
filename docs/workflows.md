@@ -1,0 +1,599 @@
+# upskill Workflows
+
+This guide shows the common workflows for using `upskill` as a local skill
+manager and MCP skill server. The examples use GitHub-style sources, but every
+source command also accepts local paths.
+
+Build the binary first when working from this repo:
+
+```bash
+make
+```
+
+## Configure Outputs
+
+`upskill` stores synced base skills under `~/.skills/store`, overlays under
+`~/.skills/overlays`, drafts under `~/.skills/drafts`, and generated output
+under `~/.skills/rendered`.
+
+Configure agent output directories in `~/.skills/config.json`:
+
+```json
+{
+  "agents": {
+    "codex": "~/.codex/skills",
+    "claude-code": "~/.claude/skills"
+  },
+  "imports_dir": "~/.skills/imports",
+  "import_dirs": ["~/.skills/imports"]
+}
+```
+
+When a command prints a rendered path, use that path as the source of truth.
+If agents are configured, render output is agent-specific, such as
+`~/.skills/rendered/codex/<skill-name>`.
+
+## Use An Obsidian Or Filesystem Vault
+
+Use a vault when you want skills to live in normal editable files while
+`upskill` still treats installed base skills as synced copies.
+
+```bash
+upskill vault init ~/SkillVault --name personal
+```
+
+This creates:
+
+```text
+~/SkillVault/
+  source/
+  overlays/
+  drafts/
+  imports/
+```
+
+Put skill bundles under `source/`:
+
+```text
+~/SkillVault/source/redis/SKILL.md
+~/SkillVault/source/redis/references/guide.md
+```
+
+Install from the named source:
+
+```bash
+upskill add personal --skill redis --agent codex
+```
+
+Check vault state:
+
+```bash
+upskill vault status --name personal
+```
+
+`source/` is the local upstream. `store/` is still the installed immutable copy.
+Overlays and drafts are local working state and are ignored during source
+discovery.
+
+## Migrate From A Memory-Server Skills Directory
+
+If an existing memory server stores skill bundles as ordinary directories, move
+or copy those bundles into the vault source directory:
+
+```bash
+upskill vault init ~/SkillVault --name personal
+cp -R ~/Obsidian/Skills/* ~/SkillVault/source/
+upskill add personal --agent codex
+```
+
+After migration:
+
+- The vault `source/` directory is the local upstream skill source.
+- `~/.skills/store` is the installed copy and should not be edited directly.
+- Local customizations belong in overlays.
+- Rapid skill creation and upstream revisions belong in drafts.
+- Agents should use the `upskill` MCP draft and overlay tools instead of
+  writing base skills directly.
+
+Known limits in this version:
+
+- Remote registry search is not implemented.
+- Promotion writes files into a local checkout or named local source; it does
+  not create branches, commits, pushes, or PRs.
+- `sync` updates locked skills. It does not discover newly promoted skills
+  until `upskill add <source> --skill <name>` installs them once.
+- Template overlays are Jinja files, not JSON/YAML variable maps.
+
+## Add One Skill
+
+Install one skill from a repo or local checkout with `--skill`:
+
+```bash
+upskill add redis-applied-ai/skills --skill redis --agent codex
+```
+
+What happens:
+
+- `upskill` discovers skill directories containing `SKILL.md`.
+- Only the selected skill is copied into the read-only base store.
+- The lock file records the source and hash.
+- The effective skill is rendered and copied to the configured `codex` output.
+
+Use `--no-render` when you only want to populate the base store:
+
+```bash
+upskill add ./skills-repo --skill redis --no-render
+```
+
+## Add All Skills From A Repo
+
+Omit `--skill` to install every discovered skill:
+
+```bash
+upskill add redis-applied-ai/skills --agent codex
+```
+
+For a repo that keeps skills under a subdirectory:
+
+```bash
+upskill add redis-applied-ai/skills --subpath skills --agent codex
+```
+
+You can also save a source shortcut:
+
+```bash
+upskill source add redis-applied-ai/skills --name team-skills
+upskill add team-skills --agent codex
+```
+
+## Change A Skill With An Agent Using An Overlay
+
+Use overlays for local behavior changes after a run, especially when the base
+skill should stay upstream-managed.
+
+Example user instruction to an agent connected to the `upskill` MCP server:
+
+```text
+The last run of the redis skill was too verbose. Use upskill to find the redis
+skill, read the rendered skill, add a Codex-specific overlay that tells it to
+answer concisely, render it, then read the rendered skill again to verify the
+overlay is present.
+```
+
+The agent should use MCP tools in this shape:
+
+```json
+{"name": "find_skills", "arguments": {"query": "redis", "limit": 5}}
+```
+
+```json
+{
+  "name": "read_skill",
+  "arguments": {
+    "skill_id": "redis",
+    "agent": "codex",
+    "rendered": true,
+    "include_files": true
+  }
+}
+```
+
+```json
+{
+  "name": "upsert_skill_overlay_file",
+  "arguments": {
+    "skill_id": "redis",
+    "agent": "codex",
+    "operation": "root_append",
+    "path": "SKILL.md",
+    "content": "\nFor Codex, prefer concise answers and include only the commands needed.\n"
+  }
+}
+```
+
+```json
+{
+  "name": "render_skill",
+  "arguments": {
+    "skill_id": "redis",
+    "agent": "codex",
+    "copy": true
+  }
+}
+```
+
+Then the agent should call `read_skill` again with `rendered: true` and confirm
+the overlay text appears. MCP writes are overlay-only; agents cannot overwrite
+base skills through the MCP server.
+
+The equivalent CLI inspection command is:
+
+```bash
+upskill render redis --print --agent codex
+```
+
+## Check For Updates
+
+Use `update --check` to compare locked skills against their recorded sources
+without writing to `store/`, `rendered/`, or agent outputs:
+
+```bash
+upskill update --check
+upskill update redis --check
+```
+
+Example output:
+
+```text
+redis   changed sha256:old -> sha256:new
+```
+
+If everything is current, `upskill` prints the unchanged rows and then:
+
+```text
+no updates available
+```
+
+## Preview Diffs And Apply Updates
+
+Use `--diff` to preview incoming file changes. It is also read-only:
+
+```bash
+upskill update redis --diff
+```
+
+The diff output is simple and file-oriented:
+
+```text
+redis   changed sha256:old -> sha256:new
+diff SKILL.md
+-old file body
++new file body
+```
+
+Apply updates with `update`:
+
+```bash
+upskill update redis --agent codex
+```
+
+Update every locked skill and render/copy final outputs with:
+
+```bash
+upskill sync --agent codex
+```
+
+`sync` always applies overlays. There is no `--without-overlays` mode because
+sync publishes the effective local skill state. To inspect the base skill
+without overlays:
+
+```bash
+upskill render redis --print --base-only
+```
+
+## Search For Skills
+
+Current search is local only. `upskill` does not yet provide remote registry
+search or search across common public sources.
+
+Search installed skills:
+
+```bash
+upskill find redis
+upskill find redis --json
+```
+
+Search through MCP:
+
+```json
+{"name": "find_skills", "arguments": {"query": "redis", "limit": 10}}
+```
+
+If you want to inspect a known source without installing it:
+
+```bash
+upskill use redis-applied-ai/skills --skill redis
+```
+
+If you want to make a common source easy to reuse, add it as a named source:
+
+```bash
+upskill source add redis-applied-ai/skills --name team-skills
+upskill add team-skills --skill redis
+```
+
+## Instruct An LLM To Use upskill MCP
+
+Run the server:
+
+```bash
+upskill mcp
+```
+
+Add it to your MCP client as a stdio server using the command path for your
+installed binary. A generic MCP configuration looks like this:
+
+```json
+{
+  "mcpServers": {
+    "upskill": {
+      "command": "/absolute/path/to/upskill",
+      "args": ["mcp"],
+      "env": {
+        "UPSKILL_HOME": "/Users/you/.skills"
+      }
+    }
+  }
+}
+```
+
+Copy `prompts/AGENTS.md` into the agent or project instructions. The important
+rules are:
+
+- Use `find_skills`, `read_skill`, `list_skill_files`, and `read_skill_file`
+  for skill retrieval.
+- Treat base skills as read-only.
+- Use overlay tools for local customization.
+- Use draft tools for new skills and upstream revisions.
+
+Example prompt:
+
+```text
+Use the upskill MCP server for skill work. Find skills related to Redis, read
+the rendered Redis skill for Codex, then follow that skill's instructions for
+this task. Do not use built-in skill storage for skill edits.
+```
+
+Expected MCP sequence:
+
+```json
+{"name": "find_skills", "arguments": {"query": "redis"}}
+```
+
+```json
+{"name": "read_skill", "arguments": {"skill_id": "redis", "agent": "codex", "rendered": true}}
+```
+
+The agent then uses the returned `SKILL.md` body and any listed resource files
+as its working instructions.
+
+## Draft A New Skill With An LLM Over MCP
+
+Use drafts when the skill itself is new or when you want a full editable bundle
+with support files.
+
+Example prompt:
+
+```text
+Create a new skill named gamma-tool using upskill. Include a SKILL.md, a
+scripts/gamma.sh helper, and a references/gamma.md reference file. Render the
+draft so I can inspect it.
+```
+
+Expected MCP calls:
+
+```json
+{"name": "create_skill_draft", "arguments": {"skill_name": "gamma-tool", "allow_existing": true}}
+```
+
+```json
+{
+  "name": "upsert_skill_draft_file",
+  "arguments": {
+    "draft_id": "draft:gamma-tool",
+    "path": "SKILL.md",
+    "content": "---\nname: Gamma Tool\ndescription: gamma workflow helper\n---\n\n# Gamma Tool\n\nUse `scripts/gamma.sh` for checks.\n"
+  }
+}
+```
+
+```json
+{
+  "name": "upsert_skill_draft_file",
+  "arguments": {
+    "draft_id": "draft:gamma-tool",
+    "path": "scripts/gamma.sh",
+    "content": "#!/bin/sh\necho gamma\n"
+  }
+}
+```
+
+```json
+{
+  "name": "upsert_skill_draft_file",
+  "arguments": {
+    "draft_id": "draft:gamma-tool",
+    "path": "references/gamma.md",
+    "content": "# Gamma Reference\n\nExtra guidance.\n"
+  }
+}
+```
+
+Verify:
+
+```json
+{"name": "list_skill_draft_files", "arguments": {"draft_id": "draft:gamma-tool", "recursive": true}}
+```
+
+```json
+{"name": "render_skill_draft", "arguments": {"draft_id": "draft:gamma-tool", "agent": "codex", "copy": false}}
+```
+
+For larger bundles, have the agent write a `.zip` or `.tar.gz` into an allowed
+import directory, then import it by path:
+
+```json
+{
+  "name": "import_skill_draft_archive",
+  "arguments": {
+    "draft_id": "draft:gamma-tool",
+    "archive_path": "/Users/you/.skills/imports/gamma-tool.zip",
+    "sha256": "..."
+  }
+}
+```
+
+Local MCP imports must be inside `import_dirs`.
+
+## Turn A Draft Into A PR
+
+`upskill` has a helper for copying a finished draft into a local upstream
+checkout. It does not create branches, push, or open pull requests directly.
+Use `git` and `gh` for that part.
+
+Start a branch in the upstream checkout:
+
+```bash
+cd ~/src/skills
+git checkout -b add-gamma-tool
+```
+
+Preview the promotion:
+
+```bash
+upskill draft promote gamma-tool --to ~/src/skills/skills --dry-run
+```
+
+Apply it:
+
+```bash
+upskill draft promote gamma-tool --to ~/src/skills/skills
+```
+
+Commit and open the PR:
+
+```bash
+cd ~/src/skills
+git status --short
+git add skills/gamma-tool
+git commit -m "Add gamma tool skill"
+git push -u origin add-gamma-tool
+gh pr create --fill
+```
+
+Through MCP, use `promote_skill_draft` first with `dry_run: true`, then with
+`dry_run: false` after reviewing the planned writes.
+
+If the destination is a named local source, prefer `--to-source`:
+
+```bash
+upskill draft promote gamma-tool --to-source personal --dry-run
+upskill draft promote gamma-tool --to-source personal
+upskill add personal --skill gamma-tool
+```
+
+Through MCP, pass `to_source: "personal"`. Promotion writes to the source but
+does not install the skill. Run `add` for a new skill or `update` for an
+already locked skill after the source change is ready.
+
+## New Skill Lifecycle
+
+The lifecycle for a new skill is:
+
+1. Create a local draft with `create_skill_draft` or `upskill draft create`.
+2. Add or import `SKILL.md` and support files.
+3. Render the draft and iterate until the agent can use it successfully.
+4. Promote the draft into an upstream checkout or named local source.
+5. Open and merge a PR in that skill repo.
+6. Install the merged skill with `upskill add <source> --skill <name>`.
+7. After the skill is locked locally, future changes arrive through
+   `upskill update`, `upskill update --check`, and `upskill sync`.
+
+Important detail: `sync` updates locked skills. It does not discover brand-new
+skills that were not already installed. After a new skill PR merges, run
+`upskill add <source> --skill <new-skill>` once.
+
+## Advanced Jinja Template Overlays
+
+Jinja rendering is enabled only for files ending in `.j2`. Non-`.j2` files are
+literal files.
+
+### Author A Skill With Blocks
+
+Skill discovery still requires `SKILL.md`. If the rendered entrypoint should be
+templated, include a minimal `SKILL.md` for discovery and a `SKILL.md.j2` for
+rendering:
+
+```text
+skills/redis/
+  SKILL.md
+  SKILL.md.j2
+```
+
+Example `SKILL.md.j2`:
+
+```jinja
+# Redis Skill
+
+{% block guidance %}
+Base Redis guidance.
+{% endblock %}
+
+{% block examples %}
+Base examples.
+{% endblock %}
+```
+
+The rendered output strips `.j2`, so `SKILL.md.j2` renders to `SKILL.md`.
+
+### User Override With `super()`
+
+Create a template overlay:
+
+```text
+~/.skills/overlays/redis/templates/SKILL.md.j2
+```
+
+Use `parent/<path>` to extend the previous layer:
+
+```jinja
+{% extends "parent/SKILL.md.j2" %}
+
+{% block guidance %}
+{{ super() }}
+
+Local guidance: prefer concise answers and include exact commands.
+{% endblock %}
+```
+
+Render and inspect:
+
+```bash
+upskill render redis --copy=false
+upskill render redis --print
+```
+
+For agent-specific template overrides, place the file under:
+
+```text
+~/.skills/overlays/redis/agents/codex/templates/SKILL.md.j2
+```
+
+### Full Replacement When Blocks Are Not Enough
+
+Use `replace/` for a complete file replacement:
+
+```text
+~/.skills/overlays/redis/replace/SKILL.md
+```
+
+Use `append/` or root append shorthand for additive text:
+
+```text
+~/.skills/overlays/redis/SKILL.append.md
+```
+
+Use JSON Patch only for JSON files:
+
+```text
+~/.skills/overlays/redis/patches/metadata.json
+```
+
+```json
+{
+  "target": "metadata.json",
+  "operations": [
+    {"op": "add", "path": "/tags/-", "value": "codex"}
+  ]
+}
+```

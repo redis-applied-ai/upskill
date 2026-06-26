@@ -17,6 +17,7 @@ import (
 	"upskill/internal/config"
 	"upskill/internal/draft"
 	"upskill/internal/library"
+	"upskill/internal/render"
 )
 
 type errWriter struct{}
@@ -187,8 +188,12 @@ func TestToolCallsReadAndOverlayOnlyWrites(t *testing.T) {
 	if _, err := callTool(cfg, "render_skill", map[string]any{"skill_id": "redis", "agent": "codex", "copy": false}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := callTool(cfg, "sync_skills", map[string]any{"agent": "codex"}); err != nil {
+	synced, err := callTool(cfg, "sync_skills", map[string]any{"agent": "codex"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(synced), `"updated":[]`) || !strings.Contains(mustJSON(synced), `"rendered_count":1`) {
+		t.Fatalf("synced = %#v", synced)
 	}
 	overlays, err := callTool(cfg, "list_skill_overlays", map[string]any{"skill_id": "redis", "agent": "codex"})
 	if err != nil {
@@ -392,6 +397,81 @@ func TestMCPNewDraftWorkflow(t *testing.T) {
 	}
 }
 
+func TestMCPTranscriptRegressionWorkflow(t *testing.T) {
+	cfg := testConfig(t)
+	createdNew, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "team-greeting-demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(createdNew), `"type":"new"`) {
+		t.Fatalf("createdNew = %#v", createdNew)
+	}
+	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "team-greeting-demo", "from_skill": "redis", "allow_existing": true}); err == nil {
+		t.Fatal("conflicting allow_existing draft unexpectedly succeeded")
+	}
+	replaced, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "team-greeting-demo", "from_skill": "redis", "replace_existing": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(replaced), `"type":"version"`) {
+		t.Fatalf("replaced = %#v", replaced)
+	}
+	deleted, err := callTool(cfg, "delete_skill_draft", map[string]any{"skill_name": "team-greeting-demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(deleted), `"deleted":true`) {
+		t.Fatalf("deleted = %#v", deleted)
+	}
+	if draft.Exists(cfg, "team-greeting-demo") {
+		t.Fatal("draft still exists after delete")
+	}
+
+	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := filepath.Join(t.TempDir(), "vault", "source")
+	cfg.Sources["vault"] = config.Source{Name: "vault", Source: sourceRoot}
+	promoted, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "vault", "dry_run": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(promoted), `"source":"vault"`) || !strings.Contains(readFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md")), "Base.") {
+		t.Fatalf("promoted = %#v", promoted)
+	}
+	if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_path": cfg.StoreDir}); err == nil {
+		t.Fatal("managed store promotion unexpectedly succeeded")
+	}
+	if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_path": sourceRoot, "to_source": "vault"}); err == nil {
+		t.Fatal("to_path plus to_source unexpectedly succeeded")
+	}
+	cfg.Sources["remote"] = config.Source{Name: "remote", Source: "owner/repo"}
+	if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "remote"}); err == nil {
+		t.Fatal("remote source promotion unexpectedly succeeded")
+	}
+
+	if _, err := callTool(cfg, "upsert_skill_overlay_file", map[string]any{
+		"skill_id":  "redis",
+		"operation": "template",
+		"path":      "SKILL.md.j2",
+		"content":   `{"tone":"casual"}`,
+	}); err == nil {
+		t.Fatal("JSON template overlay unexpectedly succeeded")
+	}
+	template, err := callTool(cfg, "upsert_skill_overlay_file", map[string]any{
+		"skill_id":  "redis",
+		"operation": "template",
+		"path":      "SKILL.md.j2",
+		"content":   `{% extends "base/SKILL.md.j2" %}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(template), `"updated":true`) {
+		t.Fatalf("template = %#v", template)
+	}
+}
+
 func TestMCPDraftSafetyErrors(t *testing.T) {
 	cfg := testConfig(t)
 	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
@@ -418,6 +498,7 @@ func TestMCPDraftSafetyErrors(t *testing.T) {
 		{"upsert_skill_draft_file", map[string]any{"draft_id": "draft:redis", "path": ".upskill-draft.json", "content": "bad"}},
 		{"delete_skill_draft_file", map[string]any{"draft_id": "draft:redis", "path": ".upskill-draft.json"}},
 		{"delete_skill_draft_file", map[string]any{"draft_id": "draft:redis", "path": "missing.md"}},
+		{"delete_skill_draft", map[string]any{"draft_id": "draft:missing"}},
 		{"import_skill_draft_archive", map[string]any{"draft_id": "draft:redis"}},
 		{"import_skill_draft_file", map[string]any{"draft_id": "draft:redis", "source_path": outside, "path": "outside.txt"}},
 		{"render_skill_draft", map[string]any{}},
@@ -531,6 +612,9 @@ func TestMCPDraftAdditionalBranches(t *testing.T) {
 	if _, err := promoteSkillDraft(cfg, map[string]any{}); err == nil {
 		t.Fatal("promoteSkillDraft without draft unexpectedly succeeded")
 	}
+	if _, err := deleteSkillDraft(cfg, map[string]any{}); err == nil {
+		t.Fatal("deleteSkillDraft without draft unexpectedly succeeded")
+	}
 	if _, err := callTool(cfg, "read_skill", map[string]any{"skill_id": "draft:missing"}); err == nil {
 		t.Fatal("read_skill missing draft unexpectedly succeeded")
 	}
@@ -583,11 +667,13 @@ func TestMCPDraftAdditionalBranches(t *testing.T) {
 	oldMCPWriteFile := mcpOsWriteFile
 	oldMCPRemoveAll := mcpOsRemoveAll
 	oldMCPCopyDir := mcpCopyDir
+	oldMCPDraftRemove := mcpDraftRemove
 	t.Cleanup(func() {
 		mcpOsStat = oldMCPStat
 		mcpOsWriteFile = oldMCPWriteFile
 		mcpOsRemoveAll = oldMCPRemoveAll
 		mcpCopyDir = oldMCPCopyDir
+		mcpDraftRemove = oldMCPDraftRemove
 	})
 	blockedParent := filepath.Join(t.TempDir(), "blocked-parent")
 	writeFile(t, blockedParent, "file")
@@ -627,6 +713,14 @@ func TestMCPDraftAdditionalBranches(t *testing.T) {
 		t.Fatal("createVersionDraftForMCP copy error unexpectedly succeeded")
 	}
 	mcpCopyDir = oldMCPCopyDir
+	mcpDraftRemove = func(config.Config, string) error { return errors.New("remove draft failed") }
+	if _, err := createSkillDraft(cfg, map[string]any{"skill_name": "redis", "replace_existing": true}); err == nil {
+		t.Fatal("replace_existing remove error unexpectedly succeeded")
+	}
+	if _, err := deleteSkillDraft(cfg, map[string]any{"draft_id": "draft:redis"}); err == nil {
+		t.Fatal("delete draft remove error unexpectedly succeeded")
+	}
+	mcpDraftRemove = oldMCPDraftRemove
 	badLockCfg := cfg
 	badLockCfg.LockPath = filepath.Join(t.TempDir(), "lock.json")
 	writeFile(t, badLockCfg.LockPath, "{bad")
@@ -761,6 +855,17 @@ func TestToolArgumentErrors(t *testing.T) {
 	if _, err := callTool(config.Config{LockPath: filepath.Join(t.TempDir(), "missing", "lock.json")}, "sync_skills", map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
+	emptyCfg := config.Config{StoreDir: filepath.Join(t.TempDir(), "empty"), RenderedDir: filepath.Join(t.TempDir(), "rendered"), LockPath: filepath.Join(t.TempDir(), "lock.json")}
+	emptySync, err := callTool(emptyCfg, "sync_skills", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(emptySync), `"warnings"`) || !strings.Contains(mustJSON(emptySync), `"rendered":[]`) {
+		t.Fatalf("emptySync = %#v", emptySync)
+	}
+	if len(nonNilInstalled([]library.InstalledSkill{{StoreName: "x"}})) != 1 || len(nonNilRendered([]render.Result{{Skill: "x"}})) != 1 {
+		t.Fatal("nonNil helper passthrough failed")
+	}
 	badLock := filepath.Join(t.TempDir(), "lock.json")
 	writeFile(t, badLock, "{bad")
 	if _, err := callTool(config.Config{LockPath: badLock}, "sync_skills", map[string]any{}); err == nil {
@@ -803,6 +908,29 @@ func TestToolArgumentErrors(t *testing.T) {
 	}
 	if boolArg(map[string]any{"b": "bad"}, "b", true) != true {
 		t.Fatal("boolArg fallback failed")
+	}
+	if err := rejectManagedPromotionDestination(config.Config{}, filepath.Join(t.TempDir(), "x")); err != nil {
+		t.Fatal(err)
+	}
+	if isInsidePath(filepath.Join(t.TempDir(), "child"), t.TempDir()) {
+		t.Fatal("unrelated inside path reported true")
+	}
+	if typ, parent := requestedDraftShape(cfg, "redis", "", false); typ != draft.TypeVersion || parent != "redis" {
+		t.Fatalf("implicit requested shape = %s %s", typ, parent)
+	}
+	if typ, parent := requestedDraftShape(config.Config{StoreDir: filepath.Join(t.TempDir(), "store")}, "fresh", "", true); typ != draft.TypeVersion || parent != "fresh" {
+		t.Fatalf("rendered requested shape = %s %s", typ, parent)
+	}
+	if draftMatchesRequest(draft.Draft{Metadata: draft.Metadata{Type: draft.TypeVersion, ParentSkill: "redis"}}, draft.TypeVersion, "other") {
+		t.Fatal("parent mismatch unexpectedly matched")
+	}
+	if requestedParentSuffix("") != "" {
+		t.Fatal("empty parent suffix failed")
+	}
+	badStore := filepath.Join(t.TempDir(), "store-file")
+	writeFile(t, badStore, "file")
+	if _, err := syncSkillsTool(config.Config{StoreDir: badStore, RenderedDir: filepath.Join(t.TempDir(), "rendered"), LockPath: filepath.Join(t.TempDir(), "lock.json")}, map[string]any{}); err == nil {
+		t.Fatal("sync render error unexpectedly succeeded")
 	}
 }
 

@@ -17,6 +17,8 @@ discovery by `SKILL.md`, and agent-aware installation.
   skills CLI.
 - Install skills from local paths, Git URLs, GitHub shorthand, and configured
   sources.
+- Support a filesystem or Obsidian-style vault as a local source of immutable
+  base skills plus sibling local overlay, draft, and import directories.
 - Track installed skill source metadata in a deterministic lock file.
 - Update installed skills from their recorded sources.
 - Render base skills plus global and agent-specific overlays into effective
@@ -67,7 +69,7 @@ upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subp
 upskill list|ls [--json] [--agent AGENT]
 upskill find [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
-upskill update [skill-name...] [--agent AGENT] [--no-render]
+upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
 upskill init [name] [--dir DIR]
 upskill workon <skill-name> [--from SKILL] [--template NAME]
@@ -75,6 +77,9 @@ upskill workon <skill-name> [--from SKILL] [--template NAME]
 upskill source list [--json]
 upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
 upskill source remove <name>
+
+upskill vault init <path> [--name NAME] [--source-dir DIR] [--no-config]
+upskill vault status [--name NAME] [--json]
 
 upskill draft list [--json]
 upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME]
@@ -89,7 +94,7 @@ upskill draft import <skill-name> --file-url URL --path DEST --sha256 SHA256
 upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-overlays]
 upskill draft diff <skill-name>
 upskill draft rebase <skill-name>
-upskill draft promote <skill-name> --to PATH [--dry-run]
+upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
 upskill draft remove <skill-name>
 
 upskill overlay list [--skill NAME] [--agent AGENT] [--json]
@@ -198,6 +203,7 @@ UPSKILL_IMPORTS_DIR
 UPSKILL_RENDERED_DIR
 UPSKILL_CONFIG
 UPSKILL_LOCK
+UPSKILL_SOURCE_IGNORE
 ```
 
 ## Configuration
@@ -222,6 +228,13 @@ Draft and import directories may be configured explicitly:
   "import_dirs": [
     "~/.skills/imports",
     "~/Desktop/upskill-imports"
+  ],
+  "source_ignore": [
+    ".obsidian",
+    "overlays",
+    "drafts",
+    "imports",
+    "rendered"
   ]
 }
 ```
@@ -238,6 +251,32 @@ Rules:
 - MCP imports from local paths must resolve inside one of the configured import
   directories. This prevents an agent from using import tools to read arbitrary
   local files.
+- `source_ignore` extends the built-in source discovery ignore list. Built-ins
+  include `.git`, `node_modules`, `dist`, `build`, `__pycache__`, `.obsidian`,
+  `.trash`, `.upskill`, `overlays`, `drafts`, `imports`, and `rendered`.
+  `UPSKILL_SOURCE_IGNORE` appends comma-separated names.
+
+### Vault-backed local sources
+
+`upskill vault init <path>` creates this layout and, unless `--no-config` is
+used, writes it into `config.json`:
+
+```text
+<path>/
+  source/    # local upstream skill bundles; copied into store by add/update
+  overlays/  # local overlay definitions
+  drafts/    # mutable draft bundles
+  imports/   # shared MCP-safe import inbox
+```
+
+The vault `source/` directory is treated like any other local source. `store/`
+remains the immutable installed copy used by render and MCP reads. Draft and
+overlay writes stay local to the configured `drafts/` and `overlays/`
+directories.
+
+For Obsidian use, keep skill bundles under the vault `source/` folder and let
+notes, attachments, overlays, drafts, and import inboxes remain outside source
+or under ignored names. This avoids discovering local working files as skills.
 
 If no output directories are configured, `upskill` may auto-detect well-known
 directories that already exist:
@@ -325,6 +364,13 @@ unless `--delete-overlays` is provided.
 skills when no names are provided, from recorded sources. It renders by default
 unless `--no-render` is used.
 
+`--check` materializes the recorded sources, compares their hashes against the
+local lock file, and prints changed or unchanged rows without writing to
+`store/`, `rendered/`, the lock file, or agent outputs.
+
+`--diff` implies `--check` and also prints simple file-oriented diffs for
+changed skills. It is read-only.
+
 ### `sync`
 
 `upskill sync` is equivalent to:
@@ -345,6 +391,16 @@ Creates a new local skill skeleton with `SKILL.md` and frontmatter.
 
 `source` commands manage named source shortcuts in `config.json`. Named sources
 are optional conveniences for repeated `add` calls.
+
+### `vault`
+
+`vault init` creates a filesystem-backed skill vault and configures it as a
+named local source. It also points overlays, drafts, imports, and local import
+allowlist entries at sibling vault directories.
+
+`vault status` reports the named local source path, configured overlay/draft/
+import paths, installed skill count, source skill count, overlay count, and
+draft count.
 
 ### `workon`
 
@@ -442,11 +498,18 @@ Draft promotion:
 
 - `upskill draft promote <skill-name> --to PATH` copies the draft bundle into a
   local upstream checkout.
+- `upskill draft promote <skill-name> --to-source NAME` resolves a configured
+  local source and promotes into that source. This is the preferred path for a
+  vault-backed source.
 - For version drafts, the destination path is inferred from parent metadata
   when possible; otherwise the command asks for or requires the skill subpath.
 - For new-skill drafts, the destination path must be provided or inferred from
   the checkout's skill discovery layout.
 - `--dry-run` prints the file operations and diff without writing.
+- Promotion results include `base_mutated: false`, `overwrite`, and
+  `next_steps`. Promoting into a source does not install the skill by itself:
+  use `upskill add <source> --skill <skill>` for a new skill, or
+  `upskill update <skill>` after the promoted source change is merged or ready.
 - Promotion never deletes the local draft automatically.
 
 ## Draft Bundle and Resource Import
@@ -739,19 +802,20 @@ sync_skills(agent?)
 upsert_skill_overlay_file(skill_id, path, content?, base64_content?, agent?, operation="append")
 delete_skill_overlay_file(skill_id, path, agent?, operation="append")
 list_skill_overlays(skill_id?, agent?)
-create_skill_draft(skill_name, from_skill?, from_rendered=false, template?)
+create_skill_draft(skill_name, from_skill?, from_rendered=false, template?, allow_existing=false, replace_existing=false)
 list_skill_drafts(query?, limit?)
 read_skill_draft(draft_id, include_files=true, file_limit=100)
 list_skill_draft_files(draft_id, path_prefix?, recursive=true, include_hashes=false, limit=500)
 read_skill_draft_file(draft_id, path, max_bytes=200000)
 upsert_skill_draft_file(draft_id, path, content?, base64_content?)
 delete_skill_draft_file(draft_id, path)
+delete_skill_draft(draft_id? | skill_name?)
 import_skill_draft_archive(draft_id, archive_path?, archive_url?, sha256?, strip_components?, inspect=false)
 import_skill_draft_file(draft_id, source_path?, source_url?, path, sha256?)
 render_skill_draft(draft_id, agent?, copy=false, apply_overlays=false)
 diff_skill_draft(draft_id)
 rebase_skill_draft(draft_id)
-promote_skill_draft(draft_id, to_path, dry_run=true)
+promote_skill_draft(draft_id, to_path? | to_source?, dry_run=true)
 ```
 
 Read semantics:
@@ -781,13 +845,23 @@ Write semantics:
 - Deleting overlay files follows the same operation mapping.
 - `upsert_skill_draft_file` and `delete_skill_draft_file` write only under
   `drafts/<skill>/`.
+- `delete_skill_draft` removes a mutable draft bundle only. It never removes
+  base skills.
 - Draft write paths must be relative, must not contain `..`, and must not write
   `.upskill-draft.json` unless a future metadata-specific tool exists.
 - Draft import tools may read local paths only from configured `import_dirs`.
 - Draft promotion tools default to `dry_run=true` for MCP clients. A client must
-  explicitly pass `dry_run=false` to write into a local checkout, and the
-  destination must be under an allowed workspace path if an allowlist is
-  configured.
+  explicitly pass `dry_run=false` to write into a local checkout or configured
+  local source.
+- MCP draft promotion rejects destinations inside managed `store/`,
+  `rendered/`, `overlays/`, `drafts/`, `imports/`, or configured import
+  directories.
+- `sync_skills` returns a structured summary with `updated`,
+  `updated_count`, `rendered`, `rendered_count`, and warnings when nothing was
+  updated or rendered.
+- Template overlay writes require Jinja template content in a `.j2` file. JSON
+  variable-map overlays are rejected; variable-map template overlays are not in
+  this version.
 
 Safety:
 
@@ -799,7 +873,7 @@ Safety:
 - MCP clients can import resource files into drafts from a shared import inbox
   or verified URLs. They cannot use import tools as arbitrary local file reads.
 - MCP clients can promote drafts only into local checkout paths, never directly
-  to a remote registry or Git host.
+  to a remote registry, Git host, or managed upskill directory.
 
 ## Next-Stage Implementation Plan
 
@@ -933,6 +1007,9 @@ configuration. It must instruct agents to:
 - `update` refreshes a locked local skill and renders by default.
 - `sync` updates locked skills and renders overlays.
 - `init` creates a valid `SKILL.md`.
+- `vault init` creates source, overlay, draft, and import directories and can
+  configure a named local source.
+- `vault status` reports source, installed skill, overlay, and draft state.
 - `workon` opens an existing draft, creates a version draft for installed
   skills, and creates a new-skill draft for unknown names.
 - `draft create/list/path/files/read/add-file/remove` cover the draft lifecycle.
@@ -940,6 +1017,8 @@ configuration. It must instruct agents to:
 - `draft render` renders a draft without publishing through `sync`.
 - `draft diff` compares version drafts against captured parent snapshots.
 - `draft promote --dry-run` reports local checkout writes without mutating.
+- `draft promote --to-source` resolves a named local source and reports next
+  steps.
 - Help output presents `upskill` as a standalone command.
 
 ### Source Handling
@@ -949,6 +1028,7 @@ configuration. It must instruct agents to:
 - `@ref`, `#ref`, and `#ref@skill` parse correctly.
 - Unsafe subpaths are rejected.
 - Skill discovery finds root and nested `SKILL.md` files.
+- Skill discovery ignores configured vault working directories.
 - Skill hashes are deterministic.
 
 ### Overlay and Render
@@ -984,11 +1064,16 @@ configuration. It must instruct agents to:
 - MCP file tools list and read support files.
 - MCP overlay upsert writes only under `overlays/`.
 - MCP overlay delete deletes only overlay files.
+- MCP template overlay writes reject JSON variable maps.
 - MCP draft upsert writes only under `drafts/`.
+- MCP draft delete removes only draft bundles.
 - MCP draft import cannot read outside configured import directories.
 - MCP draft promotion defaults to dry-run.
+- MCP draft promotion rejects managed upskill directories and supports
+  configured local sources.
 - MCP tools cannot overwrite base `SKILL.md` or files in `store/`.
-- `sync_skills` updates from lock/config and renders final output.
+- `sync_skills` updates from lock/config, renders final output, and returns a
+  structured summary.
 
 ### Prompt
 

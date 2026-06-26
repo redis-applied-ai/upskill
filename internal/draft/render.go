@@ -48,15 +48,20 @@ type RebaseResult struct {
 }
 
 type PromoteOptions struct {
-	ToPath string
-	DryRun bool
+	ToPath   string
+	ToSource string
+	DryRun   bool
 }
 
 type PromoteResult struct {
 	DraftID     string         `json:"draft_id"`
 	Destination string         `json:"destination"`
+	Source      string         `json:"source,omitempty"`
 	DryRun      bool           `json:"dry_run"`
 	Files       []ImportedFile `json:"files"`
+	Overwrite   bool           `json:"overwrite"`
+	BaseMutated bool           `json:"base_mutated"`
+	NextSteps   []string       `json:"next_steps,omitempty"`
 }
 
 type draftMarker struct {
@@ -180,7 +185,18 @@ func Promote(cfg config.Config, name string, opts PromoteOptions) (PromoteResult
 	if err != nil {
 		return PromoteResult{}, err
 	}
-	result := PromoteResult{DraftID: item.ID, Destination: dest, DryRun: opts.DryRun, Files: files}
+	_, statErr := osStat(dest)
+	overwrite := statErr == nil
+	result := PromoteResult{
+		DraftID:     item.ID,
+		Destination: dest,
+		Source:      opts.ToSource,
+		DryRun:      opts.DryRun,
+		Files:       files,
+		Overwrite:   overwrite,
+		BaseMutated: false,
+		NextSteps:   promotionNextSteps(item.StoreName, opts.ToSource),
+	}
 	if opts.DryRun {
 		return result, nil
 	}
@@ -193,6 +209,21 @@ func Promote(cfg config.Config, name string, opts PromoteOptions) (PromoteResult
 		return PromoteResult{}, err
 	}
 	return result, nil
+}
+
+func promotionNextSteps(skill string, source string) []string {
+	if source == "" {
+		return []string{
+			"review the promoted files in the destination checkout",
+			"commit, push, and open a PR in that upstream repository",
+			fmt.Sprintf("after merge, run upskill update %s or upskill add <source> --skill %s", skill, skill),
+		}
+	}
+	return []string{
+		fmt.Sprintf("review the promoted files in source %s", source),
+		"commit, push, and open a PR if that source is version-controlled",
+		fmt.Sprintf("run upskill add %s --skill %s to install a new skill, or upskill update %s for an already locked skill", source, skill, skill),
+	}
 }
 
 func writeDraftMarker(root string, item Draft, agent string, mode string) error {

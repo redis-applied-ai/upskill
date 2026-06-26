@@ -138,6 +138,24 @@ func TestInstallUpdateFindReadRemoveAndManifest(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(source, "skills", "redis", "SKILL.md"), "---\nname: Redis Cache\ndescription: fast cache\n---\n\nUse Redis 8.\n")
+	preview, err := PreviewUpdates(cfg, []string{"redis-cache"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview) != 1 || !preview[0].Changed || preview[0].Diff != nil {
+		t.Fatalf("preview = %#v", preview)
+	}
+	preview, err = PreviewUpdates(cfg, []string{"redis-cache"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview) != 1 || !strings.Contains(strings.Join(preview[0].Diff, "\n"), "Redis 8") {
+		t.Fatalf("preview diff = %#v", preview)
+	}
+	oldBody, _ := os.ReadFile(filepath.Join(cfg.StoreDir, "redis-cache", "SKILL.md"))
+	if strings.Contains(string(oldBody), "Redis 8") {
+		t.Fatalf("preview mutated store body = %s", oldBody)
+	}
 	updated, err := UpdateSkills(cfg, []string{"redis-cache"})
 	if err != nil {
 		t.Fatal(err)
@@ -149,6 +167,13 @@ func TestInstallUpdateFindReadRemoveAndManifest(t *testing.T) {
 	if !strings.Contains(string(body), "Redis 8") {
 		t.Fatalf("store body = %s", body)
 	}
+	preview, err = PreviewUpdates(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview) != 1 || preview[0].Changed || len(preview[0].Diff) != 0 {
+		t.Fatalf("unchanged preview = %#v", preview)
+	}
 
 	removed, err := RemoveSkills(cfg, []string{"redis-cache"}, false)
 	if err != nil {
@@ -159,6 +184,80 @@ func TestInstallUpdateFindReadRemoveAndManifest(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cfg.StoreDir, "redis-cache")); !os.IsNotExist(err) {
 		t.Fatalf("store still exists: %v", err)
+	}
+}
+
+func TestVaultSourceDiscoveryAndResolution(t *testing.T) {
+	cfg := testConfig(t)
+	vault := filepath.Join(cfg.Home, "vault")
+	source := filepath.Join(vault, "source")
+	writeFile(t, filepath.Join(source, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
+	writeFile(t, filepath.Join(source, "overlays", "shadow", "SKILL.md"), "---\nname: Shadow\n---\n\nIgnored.\n")
+	writeFile(t, filepath.Join(source, ".obsidian", "plugin", "SKILL.md"), "---\nname: Note Plugin\n---\n\nIgnored.\n")
+	writeFile(t, filepath.Join(source, "private", "SKILL.md"), "---\nname: Private\n---\n\nIgnored by custom rule.\n")
+
+	ignore := append([]string{}, config.DefaultSourceIgnore...)
+	ignore = append(ignore, "private")
+	skills, err := DiscoverSkillsWithIgnore(source, "", ignore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 || skills[0].StoreName != "redis" {
+		t.Fatalf("skills = %#v", skills)
+	}
+
+	cfg.Sources["vault"] = config.Source{Name: "vault", Source: vault, Subpath: "source"}
+	dest, err := ResolveLocalSourceDestination(cfg, "vault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dest != source {
+		t.Fatalf("dest = %s", dest)
+	}
+	cfg.Sources["vault-root"] = config.Source{Name: "vault-root", Source: source}
+	rootDest, err := ResolveLocalSourceDestination(cfg, "vault-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootDest != source {
+		t.Fatalf("rootDest = %s", rootDest)
+	}
+	if _, err := ResolveLocalSourceDestination(cfg, "missing"); err == nil {
+		t.Fatal("missing source unexpectedly resolved")
+	}
+	cfg.Sources["empty"] = config.Source{Name: "empty"}
+	if _, err := ResolveLocalSourceDestination(cfg, "empty"); err == nil {
+		t.Fatal("empty source unexpectedly resolved")
+	}
+	cfg.Sources["remote"] = config.Source{Name: "remote", Source: "owner/repo"}
+	if _, err := ResolveLocalSourceDestination(cfg, "remote"); err == nil {
+		t.Fatal("remote source unexpectedly resolved")
+	}
+	cfg.Sources["bad-subpath"] = config.Source{Name: "bad-subpath", Source: vault, Subpath: "../bad"}
+	if _, err := ResolveLocalSourceDestination(cfg, "bad-subpath"); err == nil {
+		t.Fatal("unsafe source subpath unexpectedly resolved")
+	}
+	t.Setenv("HOME", cfg.Home)
+	tilde, err := ParseSource("~/vault/source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tilde.LocalPath != source {
+		t.Fatalf("tilde local path = %#v", tilde)
+	}
+	home, err := ParseSource("~")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home.LocalPath != cfg.Home {
+		t.Fatalf("home local path = %#v", home)
+	}
+	if _, ok := ignoreNameSet([]string{"", "custom"})["custom"]; !ok {
+		t.Fatal("ignoreNameSet custom entry missing")
+	}
+	t.Setenv("HOME", "")
+	if _, err := ParseSource("~"); err == nil {
+		t.Fatal("empty HOME tilde source unexpectedly parsed")
 	}
 }
 
@@ -265,6 +364,13 @@ func TestLibraryAdditionalBranches(t *testing.T) {
 	if updated != nil {
 		t.Fatalf("empty update = %#v", updated)
 	}
+	preview, err := PreviewUpdates(emptyCfg, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview != nil {
+		t.Fatalf("empty preview = %#v", preview)
+	}
 	if _, err := UpdateSkills(cfg, []string{"absent"}); err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +449,9 @@ func TestLibraryEdgeBranches(t *testing.T) {
 	if _, err := InstallSource(cfg, source, InstallOptions{}); err == nil {
 		t.Fatal("install with bad lock unexpectedly succeeded")
 	}
+	if _, err := PreviewUpdates(cfg, nil, false); err == nil {
+		t.Fatal("preview with bad lock unexpectedly succeeded")
+	}
 	if _, err := UpdateSkills(cfg, nil); err == nil {
 		t.Fatal("update with bad lock unexpectedly succeeded")
 	}
@@ -370,6 +479,9 @@ func TestLibraryEdgeBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := PreviewUpdates(cfg, nil, false); err == nil {
+		t.Fatal("git preview unexpectedly succeeded")
+	}
 	if _, err := UpdateSkills(cfg, nil); err == nil {
 		t.Fatal("git update unexpectedly succeeded")
 	}
@@ -422,7 +534,7 @@ func TestLibraryEdgeBranches(t *testing.T) {
 	if rootFromEntry(ParsedSource{Type: "git"}, "/tmp/root") != "/tmp/root" {
 		t.Fatal("git rootFromEntry failed")
 	}
-	if err := walkSkillDirs(source, 7, 6, func(string) error { return nil }); err != nil {
+	if err := walkSkillDirs(source, 7, 6, nil, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if _, body := parseFrontmatter("---\nname: Open\nBody"); !strings.Contains(body, "Body") {
@@ -488,11 +600,96 @@ func TestLibraryFinalBranchCoverage(t *testing.T) {
 		t.Fatal("update to file store unexpectedly succeeded")
 	}
 
-	if err := walkSkillDirs(source, 0, 6, func(string) error { return os.ErrInvalid }); err == nil {
+	if err := walkSkillDirs(source, 0, 6, nil, func(string) error { return os.ErrInvalid }); err == nil {
 		t.Fatal("walk callback error not returned")
 	}
 	if _, err := parseHTTPSource(ParsedSource{}, "https://github.com/o/r/tree/main/../bad"); err == nil {
 		t.Fatal("parseHTTPSource unsafe path unexpectedly succeeded")
+	}
+}
+
+func TestPreviewUpdateErrorsAndDiffHelpers(t *testing.T) {
+	cfg := testConfig(t)
+	sourceFile := filepath.Join(cfg.Home, "source-file")
+	writeFile(t, sourceFile, "not a directory")
+	if err := WriteLock(cfg, Lock{Skills: map[string]LockEntry{
+		"file-skill": {Name: "File Skill", Source: sourceFile, SourceType: "local", SourceURL: sourceFile},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PreviewUpdates(cfg, nil, false); err == nil {
+		t.Fatal("preview with file source unexpectedly succeeded")
+	}
+
+	emptySource := filepath.Join(cfg.Home, "empty-source")
+	if err := os.MkdirAll(emptySource, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteLock(cfg, Lock{Skills: map[string]LockEntry{
+		"empty": {Name: "Empty", Source: emptySource, SourceType: "local", SourceURL: emptySource},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PreviewUpdates(cfg, nil, false); err == nil {
+		t.Fatal("preview with empty source unexpectedly succeeded")
+	}
+
+	skillSource := filepath.Join(cfg.Home, "skill-source")
+	writeFile(t, filepath.Join(skillSource, "SKILL.md"), "---\nname: Skill\n---\n\nNew.\n")
+	writeFile(t, filepath.Join(cfg.StoreDir, "skill", "SKILL.md"), "---\nname: Skill\n---\n\nOld.\n")
+	hash, err := HashDir(filepath.Join(cfg.StoreDir, "skill"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteLock(cfg, Lock{Skills: map[string]LockEntry{
+		"skill": {Name: "Skill", Source: skillSource, SourceType: "local", SourceURL: skillSource, Hash: hash},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	oldHashTree := hashTree
+	hashTree = func(string) (string, error) { return "", errors.New("hash failed") }
+	_, err = PreviewUpdates(cfg, nil, false)
+	hashTree = oldHashTree
+	if err == nil {
+		t.Fatal("preview hash error unexpectedly succeeded")
+	}
+
+	if err := os.RemoveAll(filepath.Join(cfg.StoreDir, "skill")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PreviewUpdates(cfg, nil, true); err == nil {
+		t.Fatal("preview diff error unexpectedly succeeded")
+	}
+
+	current := filepath.Join(cfg.Home, "current")
+	next := filepath.Join(cfg.Home, "next")
+	writeFile(t, filepath.Join(current, "same.txt"), "same")
+	writeFile(t, filepath.Join(next, "same.txt"), "same")
+	writeFile(t, filepath.Join(next, "added.txt"), "added")
+	diff, err := diffUpdateDirs(current, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(diff, "\n"), "added.txt") {
+		t.Fatalf("added diff = %#v", diff)
+	}
+	if _, err := diffUpdateDirs(filepath.Join(cfg.Home, "missing"), next); err == nil {
+		t.Fatal("missing current diff unexpectedly succeeded")
+	}
+	if _, err := diffUpdateDirs(current, filepath.Join(cfg.Home, "missing")); err == nil {
+		t.Fatal("missing next diff unexpectedly succeeded")
+	}
+
+	blockedRoot := filepath.Join(cfg.Home, "blocked-root")
+	blockedFile := filepath.Join(blockedRoot, "blocked.txt")
+	writeFile(t, blockedFile, "blocked")
+	if err := os.Chmod(blockedFile, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := readUpdateFiles(blockedRoot)
+	_ = os.Chmod(blockedFile, 0o644)
+	if readErr == nil {
+		t.Fatal("blocked read unexpectedly succeeded")
 	}
 }
 
@@ -743,7 +940,7 @@ func TestLibraryCoverageCompletionBranches(t *testing.T) {
 	if err := os.Chmod(walkRoot, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := walkSkillDirs(walkRoot, 0, 6, func(string) error { return nil }); err == nil {
+	if err := walkSkillDirs(walkRoot, 0, 6, nil, func(string) error { return nil }); err == nil {
 		t.Fatal("walk read-dir permission error not returned")
 	}
 	_ = os.Chmod(walkRoot, 0o755)
@@ -755,7 +952,7 @@ func TestLibraryCoverageCompletionBranches(t *testing.T) {
 	if err := os.Chmod(walkChild, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := walkSkillDirs(filepath.Dir(walkChild), 0, 6, func(string) error { return nil }); err == nil {
+	if err := walkSkillDirs(filepath.Dir(walkChild), 0, 6, nil, func(string) error { return nil }); err == nil {
 		t.Fatal("walk child permission error not returned")
 	}
 	_ = os.Chmod(walkChild, 0o755)

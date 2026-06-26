@@ -45,6 +45,15 @@ type callParams struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
+type syncSkillsResult struct {
+	Agent         string                   `json:"agent,omitempty"`
+	Updated       []library.InstalledSkill `json:"updated"`
+	UpdatedCount  int                      `json:"updated_count"`
+	Rendered      []render.Result          `json:"rendered"`
+	RenderedCount int                      `json:"rendered_count"`
+	Warnings      []string                 `json:"warnings,omitempty"`
+}
+
 func Serve(cfg config.Config, in io.Reader, out io.Writer) error {
 	reader := bufio.NewReader(in)
 	for {
@@ -142,10 +151,10 @@ func toolList() []map[string]any {
 			"base_only":      boolProp("Render base skills without overlays."),
 			"apply_overlays": boolProp("Apply overlays when rendering draft skills."),
 		}, []string{"skill_id"}),
-		tool("sync_skills", "Update locked base skills and render final outputs.", map[string]any{
+		tool("sync_skills", "Update locked base skills and render final outputs. Returns counts, rendered paths, and warnings.", map[string]any{
 			"agent": stringProp("Optional agent name for rendered target selection."),
 		}, []string{}),
-		tool("upsert_skill_overlay_file", "Create or update one overlay file. This never writes base skills.", map[string]any{
+		tool("upsert_skill_overlay_file", "Create or update one overlay file. This never writes base skills. Template overlays must be complete Jinja files under a .j2 path, not JSON variable maps.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),
 			"skill_name":     stringProp("Fallback skill name when skill_id is omitted."),
 			"agent":          stringProp("Optional agent-specific overlay name."),
@@ -222,10 +231,7 @@ func callTool(cfg config.Config, name string, args map[string]any) (any, error) 
 			BaseOnly: boolArg(args, "base_only", false),
 		})
 	case "sync_skills":
-		if _, err := library.UpdateSkills(cfg, nil); err != nil {
-			return nil, err
-		}
-		return (render.Renderer{Config: cfg}).Render(render.Options{Agent: strArg(args, "agent"), Copy: true})
+		return syncSkillsTool(cfg, args)
 	case "upsert_skill_overlay_file":
 		return writeOverlay(cfg, args)
 	case "delete_skill_overlay_file":
@@ -246,6 +252,8 @@ func callTool(cfg config.Config, name string, args map[string]any) (any, error) 
 		return upsertSkillDraftFile(cfg, args)
 	case "delete_skill_draft_file":
 		return deleteSkillDraftFile(cfg, args)
+	case "delete_skill_draft":
+		return deleteSkillDraft(cfg, args)
 	case "import_skill_draft_archive":
 		return importSkillDraftArchive(cfg, args)
 	case "import_skill_draft_file":
@@ -292,6 +300,43 @@ func readSkillFile(cfg config.Config, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return readFileFromRoot(root, args)
+}
+
+func syncSkillsTool(cfg config.Config, args map[string]any) (syncSkillsResult, error) {
+	agent := strArg(args, "agent")
+	updated, err := library.UpdateSkills(cfg, nil)
+	if err != nil {
+		return syncSkillsResult{}, err
+	}
+	rendered, err := (render.Renderer{Config: cfg}).Render(render.Options{Agent: agent, Copy: true})
+	if err != nil {
+		return syncSkillsResult{}, err
+	}
+	result := syncSkillsResult{
+		Agent:         agent,
+		Updated:       nonNilInstalled(updated),
+		UpdatedCount:  len(updated),
+		Rendered:      nonNilRendered(rendered),
+		RenderedCount: len(rendered),
+	}
+	if len(updated) == 0 && len(rendered) == 0 {
+		result.Warnings = []string{"no locked or installed skills were found"}
+	}
+	return result, nil
+}
+
+func nonNilInstalled(items []library.InstalledSkill) []library.InstalledSkill {
+	if items == nil {
+		return []library.InstalledSkill{}
+	}
+	return items
+}
+
+func nonNilRendered(items []render.Result) []render.Result {
+	if items == nil {
+		return []render.Result{}
+	}
+	return items
 }
 
 func skillRoot(cfg config.Config, args map[string]any) (string, error) {

@@ -90,6 +90,15 @@ type InstalledSkill struct {
 	Path      string
 }
 
+type UpdatePreview struct {
+	StoreName   string   `json:"store_name"`
+	Name        string   `json:"name"`
+	CurrentHash string   `json:"current_hash,omitempty"`
+	NewHash     string   `json:"new_hash,omitempty"`
+	Changed     bool     `json:"changed"`
+	Diff        []string `json:"diff,omitempty"`
+}
+
 func ParseSource(input string) (ParsedSource, error) {
 	if strings.TrimSpace(input) == "" {
 		return ParsedSource{}, fmt.Errorf("source is required")
@@ -99,7 +108,7 @@ func ParseSource(input string) (ParsedSource, error) {
 	parsed := ParsedSource{Input: input, Ref: ref, SkillFilter: skill}
 
 	if isLocalPath(noFragment) {
-		path, err := absPath(noFragment)
+		path, err := expandLocalSourcePath(noFragment)
 		if err != nil {
 			return ParsedSource{}, err
 		}
@@ -165,6 +174,10 @@ func ResolveNamedSource(cfg config.Config, name string) (config.Source, bool) {
 }
 
 func DiscoverSkills(root string, subpath string) ([]Skill, error) {
+	return DiscoverSkillsWithIgnore(root, subpath, config.DefaultSourceIgnore)
+}
+
+func DiscoverSkillsWithIgnore(root string, subpath string, ignore []string) ([]Skill, error) {
 	if subpath != "" {
 		joined, err := pathutil.SafeJoin(root, subpath)
 		if err != nil {
@@ -172,9 +185,10 @@ func DiscoverSkills(root string, subpath string) ([]Skill, error) {
 		}
 		root = joined
 	}
+	ignoreSet := ignoreNameSet(ignore)
 	seen := map[string]struct{}{}
 	skills := []Skill{}
-	err := walkSkillDirs(root, 0, 6, func(dir string) error {
+	err := walkSkillDirs(root, 0, 6, ignoreSet, func(dir string) error {
 		skill, err := readSkillFromDir(dir)
 		if err != nil {
 			return err
@@ -197,6 +211,28 @@ func DiscoverSkills(root string, subpath string) ([]Skill, error) {
 		return skills[i].StoreName < skills[j].StoreName
 	})
 	return skills, nil
+}
+
+func ResolveLocalSourceDestination(cfg config.Config, name string) (string, error) {
+	source, ok := ResolveNamedSource(cfg, name)
+	if !ok {
+		return "", fmt.Errorf("source not found: %s", name)
+	}
+	parsed, err := ParseSource(source.Source)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Type != "local" {
+		return "", fmt.Errorf("source %s is not a local filesystem source", name)
+	}
+	subpath := source.Subpath
+	if subpath == "" {
+		subpath = parsed.Subpath
+	}
+	if subpath == "" {
+		return parsed.LocalPath, nil
+	}
+	return pathutil.SafeJoin(parsed.LocalPath, subpath)
 }
 
 func InstallSource(cfg config.Config, source string, opts InstallOptions) ([]InstalledSkill, error) {
@@ -223,7 +259,7 @@ func InstallSource(cfg config.Config, source string, opts InstallOptions) ([]Ins
 	}
 	defer cleanup()
 
-	skills, err := DiscoverSkills(root, parsed.Subpath)
+	skills, err := DiscoverSkillsWithIgnore(root, parsed.Subpath, cfg.SourceIgnore)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +327,7 @@ func UpdateSkills(cfg config.Config, names []string) ([]InstalledSkill, error) {
 		if err != nil {
 			return nil, err
 		}
-		skills, err := DiscoverSkills(root, entry.Subpath)
+		skills, err := DiscoverSkillsWithIgnore(root, entry.Subpath, cfg.SourceIgnore)
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -314,6 +350,82 @@ func UpdateSkills(cfg config.Config, names []string) ([]InstalledSkill, error) {
 		return nil, err
 	}
 	return updated, nil
+}
+
+func PreviewUpdates(cfg config.Config, names []string, includeDiff bool) ([]UpdatePreview, error) {
+	lock, err := ReadLock(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(lock.Skills) == 0 {
+		return nil, nil
+	}
+	requested := map[string]struct{}{}
+	for _, name := range names {
+		requested[NormalizeName(name)] = struct{}{}
+	}
+	var keys []string
+	for key := range lock.Skills {
+		if len(requested) == 0 {
+			keys = append(keys, key)
+			continue
+		}
+		if _, ok := requested[key]; ok {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+
+	var previews []UpdatePreview
+	for _, key := range keys {
+		entry := lock.Skills[key]
+		parsed := ParsedSource{
+			Input:       entry.Source,
+			Type:        entry.SourceType,
+			URL:         entry.SourceURL,
+			LocalPath:   entry.SourceURL,
+			Ref:         entry.Ref,
+			Subpath:     entry.Subpath,
+			SkillFilter: key,
+		}
+		root, cleanup, err := materialize(parsed)
+		if err != nil {
+			return nil, err
+		}
+		skills, err := DiscoverSkillsWithIgnore(root, entry.Subpath, cfg.SourceIgnore)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		skills = filterSkills(skills, key)
+		if len(skills) == 0 {
+			cleanup()
+			return nil, fmt.Errorf("locked skill not found in source: %s", key)
+		}
+		newHash, err := hashTree(skills[0].Path)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		preview := UpdatePreview{
+			StoreName:   key,
+			Name:        skills[0].Name,
+			CurrentHash: entry.Hash,
+			NewHash:     newHash,
+			Changed:     entry.Hash != newHash,
+		}
+		if includeDiff && preview.Changed {
+			diff, err := diffUpdateDirs(filepath.Join(cfg.StoreDir, key), skills[0].Path)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			preview.Diff = diff
+		}
+		cleanup()
+		previews = append(previews, preview)
+	}
+	return previews, nil
 }
 
 func ListInstalled(cfg config.Config) ([]Skill, error) {
@@ -383,7 +495,7 @@ func ReadSourceSkill(cfg config.Config, source string, opts InstallOptions) (Ski
 		return Skill{}, err
 	}
 	defer cleanup()
-	skills, err := DiscoverSkills(root, parsed.Subpath)
+	skills, err := DiscoverSkillsWithIgnore(root, parsed.Subpath, cfg.SourceIgnore)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -515,6 +627,63 @@ func HashDir(root string) (string, error) {
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+func diffUpdateDirs(current string, next string) ([]string, error) {
+	currentFiles, err := readUpdateFiles(current)
+	if err != nil {
+		return nil, err
+	}
+	nextFiles, err := readUpdateFiles(next)
+	if err != nil {
+		return nil, err
+	}
+	keys := map[string]struct{}{}
+	for key := range currentFiles {
+		keys[key] = struct{}{}
+	}
+	for key := range nextFiles {
+		keys[key] = struct{}{}
+	}
+	var sorted []string
+	for key := range keys {
+		sorted = append(sorted, key)
+	}
+	sort.Strings(sorted)
+	var lines []string
+	for _, key := range sorted {
+		before, hadBefore := currentFiles[key]
+		after, hasAfter := nextFiles[key]
+		if hadBefore && hasAfter && before == after {
+			continue
+		}
+		lines = append(lines, "diff "+key)
+		if hadBefore {
+			lines = append(lines, "-"+before)
+		}
+		if hasAfter {
+			lines = append(lines, "+"+after)
+		}
+	}
+	return lines, nil
+}
+
+func readUpdateFiles(root string) (map[string]string, error) {
+	files := map[string]string{}
+	paths, err := fsutil.WalkFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range paths {
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		files[rel] = string(data)
+	}
+	return files, nil
+}
+
 func splitFragment(input string) (string, string, string) {
 	hash := strings.Index(input, "#")
 	if hash < 0 {
@@ -561,7 +730,22 @@ func parseHTTPSource(parsed ParsedSource, raw string) (ParsedSource, error) {
 }
 
 func isLocalPath(input string) bool {
-	return filepath.IsAbs(input) || input == "." || input == ".." || strings.HasPrefix(input, "./") || strings.HasPrefix(input, "../")
+	return filepath.IsAbs(input) || input == "." || input == ".." || strings.HasPrefix(input, "./") || strings.HasPrefix(input, "../") || input == "~" || strings.HasPrefix(input, "~/")
+}
+
+func expandLocalSourcePath(input string) (string, error) {
+	if input == "~" || strings.HasPrefix(input, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		if input == "~" {
+			input = home
+		} else {
+			input = filepath.Join(home, input[2:])
+		}
+	}
+	return absPath(input)
 }
 
 func validateOptionalSubpath(path string) error {
@@ -661,7 +845,7 @@ func filterSkills(skills []Skill, filter string) []Skill {
 	return out
 }
 
-func walkSkillDirs(root string, depth int, maxDepth int, fn func(string) error) error {
+func walkSkillDirs(root string, depth int, maxDepth int, ignore map[string]struct{}, fn func(string) error) error {
 	if depth > maxDepth {
 		return nil
 	}
@@ -682,10 +866,10 @@ func walkSkillDirs(root string, depth int, maxDepth int, fn func(string) error) 
 		return err
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || skipDir(entry.Name()) {
+		if !entry.IsDir() || skipDir(entry.Name(), ignore) {
 			continue
 		}
-		if err := walkSkillDirs(filepath.Join(root, entry.Name()), depth+1, maxDepth, fn); err != nil {
+		if err := walkSkillDirs(filepath.Join(root, entry.Name()), depth+1, maxDepth, ignore, fn); err != nil {
 			return err
 		}
 	}
@@ -697,13 +881,25 @@ func hasSkill(dir string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func skipDir(name string) bool {
-	switch name {
-	case ".git", "node_modules", "dist", "build", "__pycache__":
-		return true
-	default:
-		return false
+func skipDir(name string, ignore map[string]struct{}) bool {
+	_, ok := ignore[name]
+	return ok
+}
+
+func ignoreNameSet(ignore []string) map[string]struct{} {
+	values := ignore
+	if len(values) == 0 {
+		values = config.DefaultSourceIgnore
 	}
+	set := map[string]struct{}{}
+	for _, name := range values {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		set[name] = struct{}{}
+	}
+	return set
 }
 
 func readSkill(dir string) (Skill, error) {

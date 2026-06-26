@@ -14,6 +14,10 @@ make
 
 The binary is written to `bin/upskill`.
 
+See [docs/workflows.md](docs/workflows.md) for task-oriented examples covering
+installation, overlays through MCP, drafts, promotion to PRs, updates, and
+Jinja template overlays.
+
 ## Commands
 
 ```bash
@@ -22,9 +26,10 @@ upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subp
 upskill list|ls [--json] [--agent AGENT]
 upskill find [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
-upskill update [skill-name...] [--agent AGENT] [--no-render]
+upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
 upskill init [name] [--dir DIR]
+upskill workon <skill-name> [--from SKILL] [--template NAME]
 upskill status
 upskill doctor
 upskill mcp
@@ -38,6 +43,13 @@ upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
 upskill source remove <name>
 ```
 
+Vault-backed local sources:
+
+```bash
+upskill vault init <path> [--name NAME] [--source-dir DIR] [--no-config]
+upskill vault status [--name NAME] [--json]
+```
+
 Overlay rendering:
 
 ```bash
@@ -46,6 +58,18 @@ upskill overlay add <skill-name> [--agent AGENT] [--path]
 upskill overlay diff <skill-name> [--agent AGENT]
 upskill render [skill-name] [--agent AGENT] [--copy=false]
 upskill render <skill-name> --print [--file SKILL.md] [--base-only]
+```
+
+Drafts:
+
+```bash
+upskill draft list [--json]
+upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME]
+upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect]
+upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-overlays]
+upskill draft diff <skill-name>
+upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
+upskill draft remove <skill-name>
 ```
 
 ## Sources
@@ -65,8 +89,10 @@ git@github.com:owner/repo.git
 
 `upskill add` discovers directories containing `SKILL.md`, copies full skill
 directories into the base store, writes `upskill-lock.json`, and renders by
-default. `upskill update` refreshes locked skills. `upskill sync` updates all
-locked skills and renders final agent outputs.
+default. `upskill update --check` previews locked source changes without
+writing. `upskill update --diff` previews incoming file changes. `upskill
+update` applies updates, and `upskill sync` updates all locked skills and
+renders final agent outputs.
 
 ## Layout
 
@@ -76,6 +102,8 @@ By default, `upskill` uses:
 ~/.skills/
   store/            # synced base skills; do not edit directly
   overlays/         # global and agent-specific overlay definitions
+  drafts/           # mutable draft skill bundles
+  imports/          # shared MCP-safe import inbox
   rendered/         # generated output, safe to delete
   config.json       # sources and output directories
   upskill-lock.json # installed skill source metadata
@@ -87,10 +115,23 @@ Environment overrides:
 UPSKILL_HOME
 UPSKILL_STORE_DIR
 UPSKILL_OVERLAYS_DIR
+UPSKILL_DRAFTS_DIR
+UPSKILL_IMPORTS_DIR
 UPSKILL_RENDERED_DIR
 UPSKILL_CONFIG
 UPSKILL_LOCK
+UPSKILL_SOURCE_IGNORE
 ```
+
+For a filesystem or Obsidian-style vault, use:
+
+```bash
+upskill vault init ~/SkillVault --name personal
+upskill add personal
+```
+
+The vault keeps skill source bundles under `source/` and local overlays,
+drafts, and imports in sibling directories.
 
 ## Agent Outputs
 
@@ -204,10 +245,27 @@ sync_skills
 upsert_skill_overlay_file
 delete_skill_overlay_file
 list_skill_overlays
+create_skill_draft
+list_skill_drafts
+read_skill_draft
+list_skill_draft_files
+read_skill_draft_file
+upsert_skill_draft_file
+delete_skill_draft_file
+delete_skill_draft
+import_skill_draft_archive
+import_skill_draft_file
+render_skill_draft
+diff_skill_draft
+rebase_skill_draft
+promote_skill_draft
 ```
 
-MCP writes are overlay-only. Agents can read base or rendered skills, but they
-cannot overwrite `store/` through the MCP server.
+MCP writes are limited to overlays and mutable drafts. Agents can read base or
+rendered skills, but they cannot overwrite `store/` through the MCP server.
+Draft promotion can write only to a local checkout or named local source and
+rejects managed upskill directories such as `store/`, `rendered/`, `overlays/`,
+`drafts/`, and `imports/`.
 
 Copy `prompts/AGENTS.md` into an agent configuration when you want an agent to
 use `upskill` MCP tools for skill management instead of built-in skill servers.

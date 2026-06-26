@@ -122,29 +122,109 @@ func TestRenderPrintBaseOnly(t *testing.T) {
 func TestHelpCommands(t *testing.T) {
 	setupEnv(t)
 	var stdout, stderr bytes.Buffer
-	if code := Run(nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("nil help code = %d", code)
+
+	runHelp := func(args ...string) string {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v help code = %d stderr=%s", args, code, stderr.String())
+		}
+		return stdout.String()
 	}
-	if !strings.Contains(stdout.String(), "usage: upskill") {
-		t.Fatalf("help output = %q", stdout.String())
+
+	top := runHelp()
+	if !strings.Contains(top, "usage: upskill <command> [args]") || !strings.Contains(top, "commands:") {
+		t.Fatalf("help output = %q", top)
 	}
-	for _, want := range []string{"add <source>", "source add <source>", "overlay diff", "mcp"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("help output missing %q: %q", want, stdout.String())
+	for _, want := range []string{"add      Install", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run"} {
+		if !strings.Contains(top, want) {
+			t.Fatalf("help output missing %q: %q", want, top)
 		}
 	}
-	if strings.Contains(stdout.String(), "forward") || strings.Contains(stdout.String(), "underlying") {
-		t.Fatalf("help output exposes implementation language: %q", stdout.String())
+	for _, forbidden := range []string{"source add <source>", "draft import <skill-name>", "overlay diff <skill-name>", "--archive-url", "forward", "underlying", "target ", "targets:"} {
+		if strings.Contains(top, forbidden) {
+			t.Fatalf("top help output contains %q: %q", forbidden, top)
+		}
 	}
-	if strings.Contains(stdout.String(), "target ") || strings.Contains(stdout.String(), "targets:") {
-		t.Fatalf("help output exposes target subcommands: %q", stdout.String())
+
+	if flagTop := runHelp("--help"); flagTop != top {
+		t.Fatalf("--help output differs from default help:\ndefault=%q\nflag=%q", top, flagTop)
 	}
-	stdout.Reset()
-	if code := Run([]string{"overlay"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("overlay help code = %d", code)
+
+	sourceHelp := runHelp("source", "--help")
+	if !strings.Contains(sourceHelp, "usage: upskill source <command> [args]") || !strings.Contains(sourceHelp, "add     Add") {
+		t.Fatalf("source help = %q", sourceHelp)
 	}
-	if !strings.Contains(stdout.String(), "overlay") {
-		t.Fatalf("overlay help = %q", stdout.String())
+	if strings.Contains(sourceHelp, "--ref REF") {
+		t.Fatalf("source help descended into leaf flags: %q", sourceHelp)
+	}
+	sourceAddHelp := runHelp("source", "add", "--help")
+	if !strings.Contains(sourceAddHelp, helpSourceAdd) || !strings.Contains(sourceAddHelp, "--ref REF") {
+		t.Fatalf("source add help = %q", sourceAddHelp)
+	}
+
+	draftHelp := runHelp("draft", "--help")
+	if !strings.Contains(draftHelp, "usage: upskill draft <command> [args]") || !strings.Contains(draftHelp, "import    Import") {
+		t.Fatalf("draft help = %q", draftHelp)
+	}
+	if strings.Contains(draftHelp, "--archive-url") {
+		t.Fatalf("draft help descended into import flags: %q", draftHelp)
+	}
+	draftImportHelp := runHelp("draft", "import", "--help")
+	if !strings.Contains(draftImportHelp, "--archive-url URL") || !strings.Contains(draftImportHelp, "--file-url URL") {
+		t.Fatalf("draft import help = %q", draftImportHelp)
+	}
+
+	overlayHelp := runHelp("overlay")
+	if !strings.Contains(overlayHelp, "usage: upskill overlay <command> [args]") || !strings.Contains(overlayHelp, "diff  Show") {
+		t.Fatalf("overlay help = %q", overlayHelp)
+	}
+	overlayDiffHelp := runHelp("overlay", "diff", "--help")
+	if !strings.Contains(overlayDiffHelp, helpOverlayDiff) {
+		t.Fatalf("overlay diff help = %q", overlayDiffHelp)
+	}
+	workonHelp := runHelp("workon")
+	if !strings.Contains(workonHelp, helpWorkon) {
+		t.Fatalf("workon help = %q", workonHelp)
+	}
+
+	for _, args := range [][]string{
+		{"add", "--help"},
+		{"use", "--help"},
+		{"list", "--help"},
+		{"ls", "--help"},
+		{"find", "--help"},
+		{"remove", "--help"},
+		{"rm", "--help"},
+		{"update", "--help"},
+		{"sync", "--help"},
+		{"init", "--help"},
+		{"workon", "--help"},
+		{"source", "list", "--help"},
+		{"source", "remove", "--help"},
+		{"draft", "list", "--help"},
+		{"draft", "create", "--help"},
+		{"draft", "path", "--help"},
+		{"draft", "files", "--help"},
+		{"draft", "read", "--help"},
+		{"draft", "add-file", "--help"},
+		{"draft", "render", "--help"},
+		{"draft", "diff", "--help"},
+		{"draft", "rebase", "--help"},
+		{"draft", "promote", "--help"},
+		{"draft", "remove", "--help"},
+		{"overlay", "--help"},
+		{"overlay", "list", "--help"},
+		{"overlay", "add", "--help"},
+		{"render", "--help"},
+		{"mcp", "--help"},
+		{"status", "--help"},
+		{"doctor", "--help"},
+	} {
+		if got := runHelp(args...); !strings.HasPrefix(got, "usage:") {
+			t.Fatalf("%v help output = %q", args, got)
+		}
 	}
 }
 
@@ -441,12 +521,40 @@ func TestStandaloneLibraryCommands(t *testing.T) {
 	writeTestFile(t, filepath.Join(sourceRoot, "skills", "redis", "SKILL.md"), "---\nname: Redis Cache\ndescription: fast cache\n---\n\nUse Redis 8.2.\n", 0o644)
 	stdout.Reset()
 	stderr.Reset()
+	if code := Run([]string{"update", "redis-cache", "--check"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("update check code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "redis-cache\tchanged") {
+		t.Fatalf("update check stdout = %q", stdout.String())
+	}
+	rendered := readTestFile(t, filepath.Join(root, "codex-skills", "redis-cache", "SKILL.md"))
+	if strings.Contains(rendered, "8.2") {
+		t.Fatalf("update check mutated render = %q", rendered)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update", "redis-cache", "--diff"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("update diff code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "diff SKILL.md") || !strings.Contains(stdout.String(), "Use Redis 8.2.") {
+		t.Fatalf("update diff stdout = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
 	if code := Run([]string{"update", "redis-cache", "--agent", "codex"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("update code = %d stderr=%s", code, stderr.String())
 	}
-	rendered := readTestFile(t, filepath.Join(root, "codex-skills", "redis-cache", "SKILL.md"))
+	rendered = readTestFile(t, filepath.Join(root, "codex-skills", "redis-cache", "SKILL.md"))
 	if !strings.Contains(rendered, "8.2") {
 		t.Fatalf("updated render = %q", rendered)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update", "redis-cache", "--check"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("unchanged update check code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "no updates available") {
+		t.Fatalf("unchanged update check stdout = %q", stdout.String())
 	}
 
 	stdout.Reset()
@@ -746,6 +854,25 @@ func TestDraftRenderDiffRebasePromoteCommands(t *testing.T) {
 	}
 	if readTestFile(t, filepath.Join(dest, "redis", "SKILL.md")) != "Draft.\n" {
 		t.Fatal("draft not promoted")
+	}
+	sourceRoot := filepath.Join(root, "local-source")
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", sourceRoot, "--name", "local"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add local code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"draft", "promote", "redis", "--to-source", "local", "--dry-run"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("draft promote to-source code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"source": "local"`) {
+		t.Fatalf("promote to-source stdout = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"draft", "promote", "redis", "--to-source", "missing"}, &stdout, &stderr); code == 0 {
+		t.Fatal("draft promote to missing source unexpectedly succeeded")
 	}
 }
 
@@ -1079,6 +1206,7 @@ func TestCLIAdditionalBranches(t *testing.T) {
 		{"source", "add", "/tmp/example", "--bad"},
 		{"source", "remove"},
 		{"source", "wat"},
+		{"source", "wat", "--help"},
 	} {
 		stdout.Reset()
 		stderr.Reset()
@@ -1110,6 +1238,14 @@ func TestCLIAdditionalBranches(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "no skills updated") {
 		t.Fatalf("empty update stdout = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update", "--check"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("empty update check code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "no locked skills") {
+		t.Fatalf("empty update check stdout = %q", stdout.String())
 	}
 
 	stdout.Reset()
@@ -1212,6 +1348,186 @@ func TestCLIMoreFlagBranches(t *testing.T) {
 	_ = read.Close()
 }
 
+func TestVaultCommands(t *testing.T) {
+	root, configPath := setupEnv(t)
+	var stdout, stderr bytes.Buffer
+
+	for _, args := range [][]string{
+		{"vault"},
+		{"vault", "--help"},
+		{"vault", "init", "--help"},
+		{"vault", "status", "--help"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v help code = %d stderr=%s", args, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "usage:") {
+			t.Fatalf("%v help = %q", args, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "status"}, &stdout, &stderr); code == 0 {
+		t.Fatal("vault status without sources unexpectedly succeeded")
+	}
+
+	vault := filepath.Join(root, "Skills Vault")
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "init", vault, "--name", "personal"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("vault init code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "initialized vault") {
+		t.Fatalf("vault init stdout = %q", stdout.String())
+	}
+	for _, dir := range []string{"source", "overlays", "drafts", "imports"} {
+		if info, err := os.Stat(filepath.Join(vault, dir)); err != nil || !info.IsDir() {
+			t.Fatalf("vault dir %s err=%v info=%#v", dir, err, info)
+		}
+	}
+	rawConfig := readTestFile(t, configPath)
+	if !strings.Contains(rawConfig, `"personal"`) || !strings.Contains(rawConfig, `"source_ignore"`) {
+		t.Fatalf("config after vault init = %s", rawConfig)
+	}
+
+	writeTestFile(t, filepath.Join(vault, "source", "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n", 0o644)
+	writeTestFile(t, filepath.Join(vault, "source", "overlays", "shadow", "SKILL.md"), "---\nname: Shadow\n---\n\nIgnored.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", "personal", "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add from vault code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "status", "--name", "personal"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("vault status code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "source skills: 1") || !strings.Contains(stdout.String(), "installed skills: 1") {
+		t.Fatalf("vault status stdout = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "status", "--name", "personal", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("vault status json code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"source_skills": 1`) {
+		t.Fatalf("vault status json = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "status"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("vault status default source code = %d stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "init", filepath.Join(root, "other"), "--source-dir", "/abs"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("absolute source dir code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "init", filepath.Join(root, "badflag"), "--bad"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("bad init flag code = %d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "status", "--bad"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("bad status flag code = %d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "init"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("missing vault init path code = %d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "unknown"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("unknown vault command code = %d", code)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"vault", "init", filepath.Join(root, "scratch"), "--no-config"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("vault init no-config code = %d stderr=%s", code, stderr.String())
+	}
+
+	parentFile := filepath.Join(root, "parent-file")
+	writeTestFile(t, parentFile, "file", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := runVault(config.Config{Sources: map[string]config.Source{}, ConfigPath: filepath.Join(root, "direct-config.json")}, []string{"init", filepath.Join(parentFile, "child")}, &stdout, &stderr); code == 0 {
+		t.Fatal("vault init under file unexpectedly succeeded")
+	}
+
+	directCfg := config.Config{
+		Home:        filepath.Join(root, "direct-home"),
+		StoreDir:    filepath.Join(root, "direct-home", "store"),
+		OverlaysDir: filepath.Join(root, "direct-home", "overlays"),
+		DraftsDir:   filepath.Join(root, "direct-home", "drafts"),
+		ImportsDir:  filepath.Join(root, "direct-home", "imports"),
+		RenderedDir: filepath.Join(root, "direct-home", "rendered"),
+		ConfigPath:  filepath.Join(root, "direct-config.json"),
+		LockPath:    filepath.Join(root, "direct-home", "lock.json"),
+		SkillsBin:   "skills",
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runVault(directCfg, []string{"init", filepath.Join(root, "direct-vault")}, &stdout, &stderr); code != 0 {
+		t.Fatalf("direct runVault code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(readTestFile(t, directCfg.ConfigPath), `"sources"`) {
+		t.Fatalf("direct config = %s", readTestFile(t, directCfg.ConfigPath))
+	}
+
+	badConfig := directCfg
+	badConfig.ConfigPath = root
+	stdout.Reset()
+	stderr.Reset()
+	if code := runVault(badConfig, []string{"init", filepath.Join(root, "blocked"), "--name", "blocked"}, &stdout, &stderr); code == 0 {
+		t.Fatal("vault init with bad config path unexpectedly succeeded")
+	}
+
+	if out := appendUnique([]string{"a", ""}, "a", "b"); len(out) != 2 || out[0] != "a" || out[1] != "b" {
+		t.Fatalf("appendUnique = %#v", out)
+	}
+
+	if _, err := buildVaultStatus(config.Config{Sources: map[string]config.Source{"remote": {Name: "remote", Source: "owner/repo"}}}, "remote"); err == nil {
+		t.Fatal("remote vault status unexpectedly succeeded")
+	}
+	storeFileCfg := directCfg
+	storeFileCfg.Sources = map[string]config.Source{"vault": {Name: "vault", Source: filepath.Join(root, "direct-vault", "source")}}
+	writeTestFile(t, storeFileCfg.StoreDir, "file", 0o644)
+	if _, err := buildVaultStatus(storeFileCfg, "vault"); err == nil {
+		t.Fatal("vault status with file store unexpectedly succeeded")
+	}
+	sourceFileCfg := directCfg
+	sourceFileCfg.StoreDir = filepath.Join(root, "source-file-status-store")
+	sourceFile := filepath.Join(root, "source-file")
+	writeTestFile(t, sourceFile, "file", 0o644)
+	sourceFileCfg.Sources = map[string]config.Source{"vault": {Name: "vault", Source: sourceFile}}
+	if _, err := buildVaultStatus(sourceFileCfg, "vault"); err == nil {
+		t.Fatal("vault status with file source unexpectedly succeeded")
+	}
+	overlayFileCfg := directCfg
+	overlayFileCfg.StoreDir = filepath.Join(root, "overlay-status-store")
+	overlayFileCfg.Sources = map[string]config.Source{"vault": {Name: "vault", Source: filepath.Join(root, "direct-vault", "source")}}
+	writeTestFile(t, overlayFileCfg.OverlaysDir, "file", 0o644)
+	if _, err := buildVaultStatus(overlayFileCfg, "vault"); err == nil {
+		t.Fatal("vault status with file overlays unexpectedly succeeded")
+	}
+	draftsFileCfg := directCfg
+	draftsFileCfg.StoreDir = filepath.Join(root, "draft-status-store")
+	draftsFileCfg.Sources = overlayFileCfg.Sources
+	draftsFileCfg.OverlaysDir = filepath.Join(root, "draft-status-overlays")
+	writeTestFile(t, draftsFileCfg.DraftsDir, "file", 0o644)
+	if _, err := buildVaultStatus(draftsFileCfg, "vault"); err == nil {
+		t.Fatal("vault status with file drafts unexpectedly succeeded")
+	}
+}
+
 func TestSyncErrors(t *testing.T) {
 	root, _ := setupEnv(t)
 	var stdout, stderr bytes.Buffer
@@ -1273,6 +1589,7 @@ func TestCLICompletionBranches(t *testing.T) {
 	for _, args := range [][]string{
 		{"remove", "redis"},
 		{"update"},
+		{"update", "--check"},
 		{"sync"},
 	} {
 		stdout.Reset()
