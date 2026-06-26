@@ -1,0 +1,24 @@
+# Build outputs
+bin/
+*.test
+
+# Coverage artifacts
+coverage.out
+coverage.html
+*.coverprofile
+
+# Local agent/planning state
+.agent-plan/
+.ai/
+
+# Local environment files
+.env
+.env.*
+
+# OS/editor noise
+.DS_Store
+*.swp
+
+# Python cache artifacts from earlier prototypes
+__pycache__/
+*.py[cod]

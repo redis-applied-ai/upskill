@@ -1,0 +1,820 @@
+package library
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"upskill/internal/config"
+	"upskill/internal/fsutil"
+	"upskill/internal/pathutil"
+)
+
+const LockSchemaVersion = 1
+
+var (
+	githubShorthand  = regexp.MustCompile(`^([^/\s:]+)/([^/\s:@#]+)(?:/(.+))?$`)
+	absPath          = filepath.Abs
+	makeTempDir      = os.MkdirTemp
+	removeTree       = os.RemoveAll
+	makeAll          = os.MkdirAll
+	renameFS         = os.Rename
+	hashTree         = HashDir
+	infoForEntry     = func(entry fs.DirEntry) (fs.FileInfo, error) { return entry.Info() }
+	readSkillFromDir = readSkill
+)
+
+func noopMaterializeCleanup() {
+	return
+}
+
+type ParsedSource struct {
+	Input       string
+	Type        string
+	URL         string
+	LocalPath   string
+	Ref         string
+	Subpath     string
+	SkillFilter string
+}
+
+type Skill struct {
+	StoreName   string            `json:"store_name"`
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Path        string            `json:"path"`
+	SkillPath   string            `json:"skill_path"`
+	Body        string            `json:"body,omitempty"`
+	Frontmatter map[string]string `json:"frontmatter,omitempty"`
+}
+
+type Lock struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Skills        map[string]LockEntry `json:"skills"`
+}
+
+type LockEntry struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Source      string `json:"source"`
+	SourceType  string `json:"source_type"`
+	SourceURL   string `json:"source_url"`
+	Ref         string `json:"ref,omitempty"`
+	Subpath     string `json:"subpath,omitempty"`
+	SkillPath   string `json:"skill_path,omitempty"`
+	Hash        string `json:"hash"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type InstallOptions struct {
+	SkillFilter string
+	Ref         string
+	Subpath     string
+}
+
+type InstalledSkill struct {
+	StoreName string
+	Name      string
+	Hash      string
+	Path      string
+}
+
+func ParseSource(input string) (ParsedSource, error) {
+	if strings.TrimSpace(input) == "" {
+		return ParsedSource{}, fmt.Errorf("source is required")
+	}
+	input = strings.TrimSpace(input)
+	noFragment, ref, skill := splitFragment(input)
+	parsed := ParsedSource{Input: input, Ref: ref, SkillFilter: skill}
+
+	if isLocalPath(noFragment) {
+		path, err := absPath(noFragment)
+		if err != nil {
+			return ParsedSource{}, err
+		}
+		parsed.Type = "local"
+		parsed.LocalPath = path
+		parsed.URL = path
+		return parsed, nil
+	}
+
+	if strings.HasPrefix(noFragment, "github:") {
+		noFragment = strings.TrimPrefix(noFragment, "github:")
+	}
+
+	if strings.HasPrefix(noFragment, "git@") || strings.HasPrefix(noFragment, "ssh://") || strings.HasSuffix(noFragment, ".git") {
+		parsed.Type = "git"
+		parsed.URL = noFragment
+		return parsed, nil
+	}
+
+	if strings.HasPrefix(noFragment, "http://") || strings.HasPrefix(noFragment, "https://") {
+		return parseHTTPSource(parsed, noFragment)
+	}
+
+	if at := strings.LastIndex(noFragment, "@"); at > 0 {
+		parsed.Ref = noFragment[at+1:]
+		noFragment = noFragment[:at]
+	}
+	if match := githubShorthand.FindStringSubmatch(noFragment); match != nil {
+		owner, repo := match[1], match[2]
+		parsed.Type = "git"
+		parsed.URL = fmt.Sprintf("https://github.com/%s/%s.git", owner, strings.TrimSuffix(repo, ".git"))
+		if match[3] != "" {
+			parsed.Subpath = match[3]
+		}
+		if err := validateOptionalSubpath(parsed.Subpath); err != nil {
+			return ParsedSource{}, err
+		}
+		return parsed, nil
+	}
+
+	return ParsedSource{}, fmt.Errorf("unsupported source: %s", input)
+}
+
+func ApplySourceOverrides(parsed ParsedSource, ref string, subpath string, skill string) (ParsedSource, error) {
+	if ref != "" {
+		parsed.Ref = ref
+	}
+	if subpath != "" {
+		parsed.Subpath = subpath
+	}
+	if skill != "" {
+		parsed.SkillFilter = skill
+	}
+	if err := validateOptionalSubpath(parsed.Subpath); err != nil {
+		return ParsedSource{}, err
+	}
+	return parsed, nil
+}
+
+func ResolveNamedSource(cfg config.Config, name string) (config.Source, bool) {
+	source, ok := cfg.Sources[name]
+	return source, ok
+}
+
+func DiscoverSkills(root string, subpath string) ([]Skill, error) {
+	if subpath != "" {
+		joined, err := pathutil.SafeJoin(root, subpath)
+		if err != nil {
+			return nil, err
+		}
+		root = joined
+	}
+	seen := map[string]struct{}{}
+	skills := []Skill{}
+	err := walkSkillDirs(root, 0, 6, func(dir string) error {
+		skill, err := readSkillFromDir(dir)
+		if err != nil {
+			return err
+		}
+		key := NormalizeName(skill.Name)
+		if _, ok := seen[key]; ok {
+			return nil
+		}
+		seen[key] = struct{}{}
+		skills = append(skills, skill)
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		return skills[i].StoreName < skills[j].StoreName
+	})
+	return skills, nil
+}
+
+func InstallSource(cfg config.Config, source string, opts InstallOptions) ([]InstalledSkill, error) {
+	if named, ok := ResolveNamedSource(cfg, source); ok {
+		source = named.Source
+		if opts.Ref == "" {
+			opts.Ref = named.Ref
+		}
+		if opts.Subpath == "" {
+			opts.Subpath = named.Subpath
+		}
+	}
+	parsed, err := ParseSource(source)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err = ApplySourceOverrides(parsed, opts.Ref, opts.Subpath, opts.SkillFilter)
+	if err != nil {
+		return nil, err
+	}
+	root, cleanup, err := materialize(parsed)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	skills, err := DiscoverSkills(root, parsed.Subpath)
+	if err != nil {
+		return nil, err
+	}
+	skills = filterSkills(skills, parsed.SkillFilter)
+	if len(skills) == 0 {
+		return nil, fmt.Errorf("no skills found")
+	}
+
+	lock, err := ReadLock(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var installed []InstalledSkill
+	for _, skill := range skills {
+		result, entry, err := installSkill(cfg, root, parsed, skill)
+		if err != nil {
+			return nil, err
+		}
+		lock.Skills[result.StoreName] = entry
+		installed = append(installed, result)
+	}
+	if err := WriteLock(cfg, lock); err != nil {
+		return nil, err
+	}
+	return installed, nil
+}
+
+func UpdateSkills(cfg config.Config, names []string) ([]InstalledSkill, error) {
+	lock, err := ReadLock(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(lock.Skills) == 0 {
+		return nil, nil
+	}
+	requested := map[string]struct{}{}
+	for _, name := range names {
+		requested[NormalizeName(name)] = struct{}{}
+	}
+	var keys []string
+	for key := range lock.Skills {
+		if len(requested) == 0 {
+			keys = append(keys, key)
+			continue
+		}
+		if _, ok := requested[key]; ok {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+
+	var updated []InstalledSkill
+	for _, key := range keys {
+		entry := lock.Skills[key]
+		parsed := ParsedSource{
+			Input:       entry.Source,
+			Type:        entry.SourceType,
+			URL:         entry.SourceURL,
+			LocalPath:   entry.SourceURL,
+			Ref:         entry.Ref,
+			Subpath:     entry.Subpath,
+			SkillFilter: key,
+		}
+		root, cleanup, err := materialize(parsed)
+		if err != nil {
+			return nil, err
+		}
+		skills, err := DiscoverSkills(root, entry.Subpath)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		skills = filterSkills(skills, key)
+		if len(skills) == 0 {
+			cleanup()
+			return nil, fmt.Errorf("locked skill not found in source: %s", key)
+		}
+		result, newEntry, err := installSkill(cfg, rootFromEntry(parsed, root), parsed, skills[0])
+		cleanup()
+		if err != nil {
+			return nil, err
+		}
+		newEntry.Source = entry.Source
+		lock.Skills[key] = newEntry
+		updated = append(updated, result)
+	}
+	if err := WriteLock(cfg, lock); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func ListInstalled(cfg config.Config) ([]Skill, error) {
+	names, err := config.DiscoverSkills(cfg.StoreDir)
+	if err != nil {
+		return nil, err
+	}
+	skills := []Skill{}
+	for _, name := range names {
+		skill, err := readSkill(filepath.Join(cfg.StoreDir, name))
+		if err != nil {
+			continue
+		}
+		skills = append(skills, skill)
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		return skills[i].StoreName < skills[j].StoreName
+	})
+	return skills, nil
+}
+
+func FindInstalled(cfg config.Config, query string, limit int) ([]Skill, error) {
+	skills, err := ListInstalled(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(query) == "" {
+		if limit > 0 && len(skills) > limit {
+			return skills[:limit], nil
+		}
+		return skills, nil
+	}
+	q := strings.ToLower(query)
+	var matches []Skill
+	for _, skill := range skills {
+		text := strings.ToLower(strings.Join([]string{skill.StoreName, skill.Name, skill.Description, skill.Body}, "\n"))
+		if strings.Contains(text, q) {
+			matches = append(matches, skill)
+			if limit > 0 && len(matches) >= limit {
+				break
+			}
+		}
+	}
+	return matches, nil
+}
+
+func ReadSourceSkill(cfg config.Config, source string, opts InstallOptions) (Skill, error) {
+	if named, ok := ResolveNamedSource(cfg, source); ok {
+		source = named.Source
+		if opts.Ref == "" {
+			opts.Ref = named.Ref
+		}
+		if opts.Subpath == "" {
+			opts.Subpath = named.Subpath
+		}
+	}
+	parsed, err := ParseSource(source)
+	if err != nil {
+		return Skill{}, err
+	}
+	parsed, err = ApplySourceOverrides(parsed, opts.Ref, opts.Subpath, opts.SkillFilter)
+	if err != nil {
+		return Skill{}, err
+	}
+	root, cleanup, err := materialize(parsed)
+	if err != nil {
+		return Skill{}, err
+	}
+	defer cleanup()
+	skills, err := DiscoverSkills(root, parsed.Subpath)
+	if err != nil {
+		return Skill{}, err
+	}
+	skills = filterSkills(skills, parsed.SkillFilter)
+	if len(skills) == 0 {
+		return Skill{}, fmt.Errorf("no skills found")
+	}
+	return skills[0], nil
+}
+
+func RemoveSkills(cfg config.Config, names []string, deleteOverlays bool) ([]string, error) {
+	lock, err := ReadLock(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, name := range names {
+		key := NormalizeName(name)
+		if err := removeTree(filepath.Join(cfg.StoreDir, key)); err != nil {
+			return nil, err
+		}
+		if err := removeTree(filepath.Join(cfg.RenderedDir, "generic", key)); err != nil {
+			return nil, err
+		}
+		if deleteOverlays {
+			if err := removeTree(filepath.Join(cfg.OverlaysDir, key)); err != nil {
+				return nil, err
+			}
+		}
+		delete(lock.Skills, key)
+		removed = append(removed, key)
+	}
+	if err := WriteLock(cfg, lock); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+func InitSkill(dir string, name string) (string, error) {
+	if name == "" {
+		name = filepath.Base(dir)
+	}
+	if dir == "" {
+		dir = NormalizeName(name)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "SKILL.md")
+	if _, err := os.Stat(path); err == nil {
+		return "", fmt.Errorf("%s already exists", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	body := fmt.Sprintf("---\nname: %s\ndescription: %s skill instructions\n---\n\n# %s\n\nAdd skill instructions here.\n", name, name, name)
+	return path, os.WriteFile(path, []byte(body), 0o644)
+}
+
+func ReadLock(cfg config.Config) (Lock, error) {
+	data, err := os.ReadFile(cfg.LockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return Lock{SchemaVersion: LockSchemaVersion, Skills: map[string]LockEntry{}}, nil
+	}
+	if err != nil {
+		return Lock{}, err
+	}
+	var lock Lock
+	if err := json.Unmarshal(data, &lock); err != nil {
+		return Lock{}, err
+	}
+	if lock.SchemaVersion == 0 {
+		lock.SchemaVersion = LockSchemaVersion
+	}
+	if lock.Skills == nil {
+		lock.Skills = map[string]LockEntry{}
+	}
+	return lock, nil
+}
+
+func WriteLock(cfg config.Config, lock Lock) error {
+	if lock.SchemaVersion == 0 {
+		lock.SchemaVersion = LockSchemaVersion
+	}
+	if lock.Skills == nil {
+		lock.Skills = map[string]LockEntry{}
+	}
+	data, _ := json.MarshalIndent(lock, "", "  ")
+	data = append(data, '\n')
+	if err := makeAll(filepath.Dir(cfg.LockPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(cfg.LockPath, data, 0o644)
+}
+
+func NormalizeName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var out strings.Builder
+	dash := false
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			out.WriteRune(r)
+			dash = false
+			continue
+		}
+		if !dash && out.Len() > 0 {
+			out.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.Trim(out.String(), "-")
+}
+
+func HashDir(root string) (string, error) {
+	files, err := fsutil.WalkFiles(root)
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(files)
+	hash := sha256.New()
+	for _, file := range files {
+		rel, _ := filepath.Rel(root, file)
+		hash.Write([]byte(filepath.ToSlash(rel)))
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		hash.Write(data)
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func splitFragment(input string) (string, string, string) {
+	hash := strings.Index(input, "#")
+	if hash < 0 {
+		return input, "", ""
+	}
+	head := input[:hash]
+	fragment := input[hash+1:]
+	if fragment == "" {
+		return input, "", ""
+	}
+	at := strings.Index(fragment, "@")
+	if at < 0 {
+		return head, fragment, ""
+	}
+	return head, fragment[:at], fragment[at+1:]
+}
+
+func parseHTTPSource(parsed ParsedSource, raw string) (ParsedSource, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ParsedSource{}, err
+	}
+	if u.Host == "github.com" {
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) >= 2 {
+			owner, repo := parts[0], strings.TrimSuffix(parts[1], ".git")
+			parsed.Type = "git"
+			parsed.URL = fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+			if len(parts) >= 4 && parts[2] == "tree" {
+				parsed.Ref = parts[3]
+				if len(parts) > 4 {
+					parsed.Subpath = strings.Join(parts[4:], "/")
+				}
+			}
+			if err := validateOptionalSubpath(parsed.Subpath); err != nil {
+				return ParsedSource{}, err
+			}
+			return parsed, nil
+		}
+	}
+	parsed.Type = "git"
+	parsed.URL = raw
+	return parsed, nil
+}
+
+func isLocalPath(input string) bool {
+	return filepath.IsAbs(input) || input == "." || input == ".." || strings.HasPrefix(input, "./") || strings.HasPrefix(input, "../")
+}
+
+func validateOptionalSubpath(path string) error {
+	if path == "" {
+		return nil
+	}
+	_, err := pathutil.SafeJoin("/", path)
+	return err
+}
+
+func materialize(parsed ParsedSource) (string, func(), error) {
+	if parsed.Type == "local" {
+		return parsed.LocalPath, func() {}, nil
+	}
+	tmp, err := makeTempDir("", "upskill-*")
+	if err != nil {
+		return "", noopMaterializeCleanup, err
+	}
+	args := []string{"clone", "--depth", "1"}
+	if parsed.Ref != "" {
+		args = append(args, "--branch", parsed.Ref)
+	}
+	args = append(args, parsed.URL, tmp)
+	cmd := exec.Command("git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		_ = removeTree(tmp)
+		return "", noopMaterializeCleanup, fmt.Errorf("git clone failed: %s", strings.TrimSpace(string(output)))
+	}
+	return tmp, func() { _ = removeTree(tmp) }, nil
+}
+
+func rootFromEntry(parsed ParsedSource, root string) string {
+	if parsed.Type == "local" {
+		return parsed.LocalPath
+	}
+	return root
+}
+
+func installSkill(cfg config.Config, sourceRoot string, parsed ParsedSource, skill Skill) (InstalledSkill, LockEntry, error) {
+	storeName := NormalizeName(skill.Name)
+	if storeName == "" {
+		return InstalledSkill{}, LockEntry{}, fmt.Errorf("skill has empty normalized name: %s", skill.Path)
+	}
+	tmp := filepath.Join(cfg.StoreDir, "."+storeName+".tmp")
+	dst := filepath.Join(cfg.StoreDir, storeName)
+	if err := removeTree(tmp); err != nil {
+		return InstalledSkill{}, LockEntry{}, err
+	}
+	if err := fsutil.CopyDir(skill.Path, tmp, nil); err != nil {
+		return InstalledSkill{}, LockEntry{}, err
+	}
+	hash, err := hashTree(tmp)
+	if err != nil {
+		return InstalledSkill{}, LockEntry{}, err
+	}
+	if err := removeTree(dst); err != nil {
+		return InstalledSkill{}, LockEntry{}, err
+	}
+	if err := makeAll(filepath.Dir(dst), 0o755); err != nil {
+		return InstalledSkill{}, LockEntry{}, err
+	}
+	if err := renameFS(tmp, dst); err != nil {
+		return InstalledSkill{}, LockEntry{}, err
+	}
+	rel, _ := filepath.Rel(sourceRoot, skill.Path)
+	rel = filepath.ToSlash(rel)
+	if rel == "." {
+		rel = ""
+	}
+	entry := LockEntry{
+		Name:        skill.Name,
+		Description: skill.Description,
+		Source:      parsed.Input,
+		SourceType:  parsed.Type,
+		SourceURL:   parsed.URL,
+		Ref:         parsed.Ref,
+		Subpath:     rel,
+		SkillPath:   filepath.ToSlash(filepath.Join(rel, "SKILL.md")),
+		Hash:        hash,
+		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	return InstalledSkill{StoreName: storeName, Name: skill.Name, Hash: hash, Path: dst}, entry, nil
+}
+
+func filterSkills(skills []Skill, filter string) []Skill {
+	if filter == "" {
+		return skills
+	}
+	normalized := NormalizeName(filter)
+	var out []Skill
+	for _, skill := range skills {
+		if skill.StoreName == normalized || NormalizeName(skill.Name) == normalized || strings.EqualFold(skill.Name, filter) {
+			out = append(out, skill)
+		}
+	}
+	return out
+}
+
+func walkSkillDirs(root string, depth int, maxDepth int, fn func(string) error) error {
+	if depth > maxDepth {
+		return nil
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", root)
+	}
+	if hasSkill(root) {
+		if err := fn(root); err != nil {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || skipDir(entry.Name()) {
+			continue
+		}
+		if err := walkSkillDirs(filepath.Join(root, entry.Name()), depth+1, maxDepth, fn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasSkill(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "SKILL.md"))
+	return err == nil && !info.IsDir()
+}
+
+func skipDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "dist", "build", "__pycache__":
+		return true
+	default:
+		return false
+	}
+}
+
+func readSkill(dir string) (Skill, error) {
+	path := filepath.Join(dir, "SKILL.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Skill{}, err
+	}
+	frontmatter, body := parseFrontmatter(string(data))
+	name := frontmatter["name"]
+	if name == "" {
+		name = filepath.Base(dir)
+	}
+	storeName := NormalizeName(name)
+	return Skill{
+		StoreName:   storeName,
+		Name:        name,
+		Description: frontmatter["description"],
+		Path:        dir,
+		SkillPath:   path,
+		Body:        body,
+		Frontmatter: frontmatter,
+	}, nil
+}
+
+func parseFrontmatter(text string) (map[string]string, string) {
+	fields := map[string]string{}
+	if !strings.HasPrefix(text, "---\n") && !strings.HasPrefix(text, "---\r\n") {
+		return fields, text
+	}
+	lines := strings.SplitAfter(text, "\n")
+	var bodyStart int
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "---" {
+			bodyStart = i + 1
+			break
+		}
+		if key, value, ok := strings.Cut(line, ":"); ok {
+			fields[strings.TrimSpace(key)] = trimScalar(value)
+		}
+	}
+	if bodyStart == 0 {
+		return fields, text
+	}
+	return fields, strings.Join(lines[bodyStart:], "")
+}
+
+func trimScalar(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"'`)
+	return value
+}
+
+func FileManifest(root string, prefix string, recursive bool, hashes bool, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	var files []map[string]any
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		if prefix != "" && !strings.HasPrefix(rel, prefix) {
+			if entry.IsDir() && !strings.HasPrefix(prefix, rel) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !recursive && strings.Contains(strings.TrimPrefix(rel, strings.TrimSuffix(prefix, "/")), "/") {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := infoForEntry(entry)
+		if err != nil {
+			return err
+		}
+		item := map[string]any{
+			"path": rel,
+			"kind": "file",
+			"size": info.Size(),
+		}
+		if entry.IsDir() {
+			item["kind"] = "directory"
+		}
+		if hashes && !entry.IsDir() {
+			if hash, err := fileHash(path); err == nil {
+				item["sha256"] = hash
+			}
+		}
+		files = append(files, item)
+		if len(files) >= limit {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return files, err
+}
+
+func fileHash(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
