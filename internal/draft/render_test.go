@@ -15,10 +15,10 @@ import (
 func TestRenderDraftAndCopy(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.Config{
-		DraftsDir:   filepath.Join(root, "drafts"),
-		OverlaysDir: filepath.Join(root, "overlays"),
-		RenderedDir: filepath.Join(root, "rendered"),
-		Targets:     []config.Target{{Name: "codex", Path: filepath.Join(root, "codex")}},
+		DraftsDir:    filepath.Join(root, "drafts"),
+		OverlaysDir:  filepath.Join(root, "overlays"),
+		RenderedDir:  filepath.Join(root, "rendered"),
+		AgentOutputs: []config.AgentOutput{{Name: "codex", Path: filepath.Join(root, "codex")}},
 	}
 	if _, err := Save(cfg, Metadata{Name: "demo", Type: TypeNew, CreatedFrom: CreatedFromSkeleton}); err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestRenderDraftAndCopy(t *testing.T) {
 		t.Fatalf("marker = %s", marker)
 	}
 	if readFile(t, filepath.Join(root, "codex", "demo", "SKILL.md")) != "# Demo\n" {
-		t.Fatal("draft was not copied to target")
+		t.Fatal("draft was not copied to agent output")
 	}
 	if _, err := os.Stat(filepath.Join(results[0].RenderedPath, MetadataFile)); !os.IsNotExist(err) {
 		t.Fatalf("rendered metadata should be omitted: %v", err)
@@ -170,7 +170,7 @@ func TestDraftRenderAdditionalBranches(t *testing.T) {
 		StoreDir:    filepath.Join(root, "store"),
 		DraftsDir:   filepath.Join(root, "drafts"),
 		RenderedDir: filepath.Join(root, "rendered"),
-		Targets: []config.Target{
+		AgentOutputs: []config.AgentOutput{
 			{Name: "codex", Path: filepath.Join(root, "codex")},
 			{Name: "claude", Path: filepath.Join(root, "claude")},
 		},
@@ -228,16 +228,16 @@ func TestDraftRenderAdditionalBranches(t *testing.T) {
 	if len(copied) != 1 || !strings.Contains(copied[0], "codex") {
 		t.Fatalf("filtered copy = %#v", copied)
 	}
-	parentFile := filepath.Join(root, "target-file")
+	parentFile := filepath.Join(root, "dest-file")
 	writeFile(t, parentFile, "file")
 	badCfg := cfg
-	badCfg.Targets = []config.Target{{Name: "bad", Path: filepath.Join(parentFile, "child")}}
+	badCfg.AgentOutputs = []config.AgentOutput{{Name: "bad", Path: filepath.Join(parentFile, "child")}}
 	if _, err := copyRenderedToAgents(badCfg, "new", "", renderedPath); err == nil {
-		t.Fatal("copy target remove failure unexpectedly succeeded")
+		t.Fatal("copy destination remove failure unexpectedly succeeded")
 	}
-	badCfg.Targets = []config.Target{{Name: "bad", Path: filepath.Join(root, "bad-copy")}}
+	badCfg.AgentOutputs = []config.AgentOutput{{Name: "bad", Path: filepath.Join(root, "bad-copy")}}
 	if _, err := copyRenderedToAgents(badCfg, "new", "", filepath.Join(root, "missing-rendered")); err == nil {
-		t.Fatal("copy target copy failure unexpectedly succeeded")
+		t.Fatal("copy destination copy failure unexpectedly succeeded")
 	}
 
 	src := filepath.Join(root, "copy-src")
@@ -266,10 +266,10 @@ func TestDraftRenderAdditionalBranches(t *testing.T) {
 func TestDraftRenderInjectedErrorBranches(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.Config{
-		StoreDir:    filepath.Join(root, "store"),
-		DraftsDir:   filepath.Join(root, "drafts"),
-		RenderedDir: filepath.Join(root, "rendered"),
-		Targets:     []config.Target{{Name: "codex", Path: filepath.Join(root, "codex")}},
+		StoreDir:     filepath.Join(root, "store"),
+		DraftsDir:    filepath.Join(root, "drafts"),
+		RenderedDir:  filepath.Join(root, "rendered"),
+		AgentOutputs: []config.AgentOutput{{Name: "codex", Path: filepath.Join(root, "codex")}},
 	}
 	if _, err := Save(cfg, Metadata{Name: "demo", Type: TypeNew, CreatedFrom: CreatedFromSkeleton}); err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestDraftRenderInjectedErrorBranches(t *testing.T) {
 	fsCopyDir = func(src string, dst string, skip func(string, os.DirEntry) bool) error {
 		copyCalls++
 		if copyCalls == 2 {
-			return errors.New("target copy failed")
+			return errors.New("destination copy failed")
 		}
 		return oldCopyDir(src, dst, skip)
 	}

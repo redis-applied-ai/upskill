@@ -28,17 +28,17 @@ func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	root := t.TempDir()
 	cfg := config.Config{
-		Home:        filepath.Join(root, "home"),
-		StoreDir:    filepath.Join(root, "home", "store"),
-		OverlaysDir: filepath.Join(root, "home", "overlays"),
-		RenderedDir: filepath.Join(root, "home", "rendered"),
-		DraftsDir:   filepath.Join(root, "home", "drafts"),
-		ImportsDir:  filepath.Join(root, "home", "imports"),
-		ImportDirs:  []string{filepath.Join(root, "home", "imports")},
-		ConfigPath:  filepath.Join(root, "home", "config.json"),
-		LockPath:    filepath.Join(root, "home", "upskill-lock.json"),
-		Targets:     []config.Target{{Name: "codex", Path: filepath.Join(root, "codex-skills")}},
-		Sources:     map[string]config.Source{},
+		Home:         filepath.Join(root, "home"),
+		StoreDir:     filepath.Join(root, "home", "store"),
+		OverlaysDir:  filepath.Join(root, "home", "overlays"),
+		RenderedDir:  filepath.Join(root, "home", "rendered"),
+		DraftsDir:    filepath.Join(root, "home", "drafts"),
+		ImportsDir:   filepath.Join(root, "home", "imports"),
+		ImportDirs:   []string{filepath.Join(root, "home", "imports")},
+		ConfigPath:   filepath.Join(root, "home", "config.json"),
+		LockPath:     filepath.Join(root, "home", "upskill-lock.json"),
+		AgentOutputs: []config.AgentOutput{{Name: "codex", Path: filepath.Join(root, "codex-skills")}},
+		Sources:      map[string]config.Source{},
 	}
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n")
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "references", "guide.md"), "Guide.\n")

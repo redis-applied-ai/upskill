@@ -146,13 +146,13 @@ func toolList() []map[string]any {
 		}, []string{"skill_id", "path"}),
 		tool("render_skill", "Render one skill without mutating base skills.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),
-			"agent":          stringProp("Optional agent name for overlays and copy target selection."),
-			"copy":           boolProp("Copy rendered output to configured target directories."),
+			"agent":          stringProp("Optional agent name for overlays and configured output selection."),
+			"copy":           boolProp("Copy rendered output to configured agent output directories."),
 			"base_only":      boolProp("Render base skills without overlays."),
 			"apply_overlays": boolProp("Apply overlays when rendering draft skills."),
 		}, []string{"skill_id"}),
 		tool("sync_skills", "Update locked base skills and render final outputs. Returns counts, rendered paths, and warnings.", map[string]any{
-			"agent": stringProp("Optional agent name for rendered target selection."),
+			"agent": stringProp("Optional agent name for rendered output selection."),
 		}, []string{}),
 		tool("upsert_skill_overlay_file", "Create or update one overlay file. This never writes base skills. Template overlays must be complete Jinja files under a .j2 path, not JSON variable maps.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),

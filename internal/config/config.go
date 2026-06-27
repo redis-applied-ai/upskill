@@ -13,13 +13,13 @@ var (
 	filepathRel = filepath.Rel
 )
 
-var WellKnownTargets = map[string]string{
+var WellKnownAgentOutputs = map[string]string{
 	"claude":      "~/.claude/skills",
 	"claude-code": "~/.claude/skills",
 	"codex":       "~/.codex/skills",
 }
 
-type Target struct {
+type AgentOutput struct {
 	Name string
 	Path string
 }
@@ -43,7 +43,7 @@ type Config struct {
 	ConfigPath   string
 	LockPath     string
 	SkillsBin    string
-	Targets      []Target
+	AgentOutputs []AgentOutput
 	Sources      map[string]Source
 }
 
@@ -58,7 +58,6 @@ type rawConfig struct {
 	LockPath     string          `json:"lock_path"`
 	SkillsBin    string          `json:"skills_bin"`
 	Agents       json.RawMessage `json:"agents"`
-	Targets      json.RawMessage `json:"targets"`
 	Sources      json.RawMessage `json:"sources"`
 }
 
@@ -125,12 +124,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	targets, err := parseTargets(firstRaw(raw.Agents, raw.Targets))
+	agentOutputs, err := parseAgentOutputs(raw.Agents)
 	if err != nil {
 		return Config{}, err
 	}
-	if len(targets) == 0 {
-		targets = detectWellKnownTargets()
+	if len(agentOutputs) == 0 {
+		agentOutputs = detectWellKnownAgentOutputs()
 	}
 	sources, err := parseSources(raw.Sources)
 	if err != nil {
@@ -149,7 +148,7 @@ func Load() (Config, error) {
 		ConfigPath:   configPath,
 		LockPath:     lockPath,
 		SkillsBin:    envDefault("UPSKILL_SKILLS_BIN", defaultString(raw.SkillsBin, "skills")),
-		Targets:      targets,
+		AgentOutputs: agentOutputs,
 		Sources:      sources,
 	}, nil
 }
@@ -257,46 +256,37 @@ func mustMarshal(value any) json.RawMessage {
 	return data
 }
 
-func firstRaw(values ...json.RawMessage) json.RawMessage {
-	for _, value := range values {
-		if len(value) > 0 && string(value) != "null" {
-			return value
-		}
-	}
-	return nil
-}
-
-func parseTargets(data json.RawMessage) ([]Target, error) {
+func parseAgentOutputs(data json.RawMessage) ([]AgentOutput, error) {
 	if len(data) == 0 || string(data) == "null" {
 		return nil, nil
 	}
 
-	var objectTargets map[string]string
-	if err := json.Unmarshal(data, &objectTargets); err == nil && objectTargets != nil {
-		targets := make([]Target, 0, len(objectTargets))
-		for name, path := range objectTargets {
+	var objectOutputs map[string]string
+	if err := json.Unmarshal(data, &objectOutputs); err == nil && objectOutputs != nil {
+		outputs := make([]AgentOutput, 0, len(objectOutputs))
+		for name, path := range objectOutputs {
 			expanded, err := expandPath(path)
 			if err != nil {
 				return nil, err
 			}
-			targets = append(targets, Target{Name: name, Path: expanded})
+			outputs = append(outputs, AgentOutput{Name: name, Path: expanded})
 		}
-		return targets, nil
+		return outputs, nil
 	}
 
-	var listTargets []struct {
+	var listOutputs []struct {
 		Name      string `json:"name"`
 		Agent     string `json:"agent"`
 		Path      string `json:"path"`
 		SkillsDir string `json:"skills_dir"`
 	}
-	if err := json.Unmarshal(data, &listTargets); err != nil {
+	if err := json.Unmarshal(data, &listOutputs); err != nil {
 		return nil, err
 	}
-	targets := make([]Target, 0, len(listTargets))
-	for _, target := range listTargets {
-		name := defaultString(target.Name, target.Agent)
-		path := defaultString(target.Path, target.SkillsDir)
+	outputs := make([]AgentOutput, 0, len(listOutputs))
+	for _, output := range listOutputs {
+		name := defaultString(output.Name, output.Agent)
+		path := defaultString(output.Path, output.SkillsDir)
 		if name == "" || path == "" {
 			continue
 		}
@@ -304,9 +294,9 @@ func parseTargets(data json.RawMessage) ([]Target, error) {
 		if err != nil {
 			return nil, err
 		}
-		targets = append(targets, Target{Name: name, Path: expanded})
+		outputs = append(outputs, AgentOutput{Name: name, Path: expanded})
 	}
-	return targets, nil
+	return outputs, nil
 }
 
 func parseSources(data json.RawMessage) (map[string]Source, error) {
@@ -407,18 +397,18 @@ func uniqueNonEmpty(values []string) []string {
 	return out
 }
 
-func detectWellKnownTargets() []Target {
-	var targets []Target
-	for name, path := range WellKnownTargets {
+func detectWellKnownAgentOutputs() []AgentOutput {
+	var outputs []AgentOutput
+	for name, path := range WellKnownAgentOutputs {
 		expanded, err := expandPath(path)
 		if err != nil {
 			continue
 		}
 		if info, err := os.Stat(expanded); err == nil && info.IsDir() {
-			targets = append(targets, Target{Name: name, Path: expanded})
+			outputs = append(outputs, AgentOutput{Name: name, Path: expanded})
 		}
 	}
-	return targets
+	return outputs
 }
 
 func expandPath(path string) (string, error) {

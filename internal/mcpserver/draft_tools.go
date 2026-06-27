@@ -88,8 +88,8 @@ func draftToolList() []map[string]any {
 		tool("render_skill_draft", "Render one draft skill without mutating base skills.", map[string]any{
 			"draft_id":       stringProp("Draft identifier, for example draft:redis."),
 			"skill_id":       stringProp("Alias for draft_id."),
-			"agent":          stringProp("Optional agent name for overlay selection and copy target selection."),
-			"copy":           boolProp("Copy rendered output to configured target directories."),
+			"agent":          stringProp("Optional agent name for overlay and configured output selection."),
+			"copy":           boolProp("Copy rendered output to configured agent output directories."),
 			"apply_overlays": boolProp("Apply global and agent overlays while rendering this draft."),
 		}, []string{}),
 		tool("diff_skill_draft", "Diff a draft against its current base skill when it is a version draft.", map[string]any{

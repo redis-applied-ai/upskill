@@ -146,9 +146,8 @@ Agent output directories can be configured with `agents`:
 }
 ```
 
-Legacy `targets` configuration is still accepted for compatibility. If no
-outputs are configured, `upskill` only auto-detects well-known directories that
-already exist.
+If no outputs are configured, `upskill` only auto-detects well-known
+directories that already exist.
 
 ## Overlays
 

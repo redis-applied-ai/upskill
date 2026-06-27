@@ -33,12 +33,12 @@ func setupEnv(t *testing.T) (root string, configPath string) {
 	t.Helper()
 	root = t.TempDir()
 	configPath = filepath.Join(root, "config.json")
-	targets := map[string]any{
-		"targets": map[string]string{
+	cfg := map[string]any{
+		"agents": map[string]string{
 			"codex": filepath.Join(root, "codex-skills"),
 		},
 	}
-	data, err := json.Marshal(targets)
+	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

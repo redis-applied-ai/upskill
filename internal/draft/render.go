@@ -246,11 +246,11 @@ func writeDraftMarker(root string, item Draft, agent string, mode string) error 
 
 func copyRenderedToAgents(cfg config.Config, skill string, agent string, renderedPath string) ([]string, error) {
 	var copied []string
-	for _, target := range cfg.Targets {
-		if agent != "" && target.Name != agent {
+	for _, output := range cfg.AgentOutputs {
+		if agent != "" && output.Name != agent {
 			continue
 		}
-		dest := filepath.Join(target.Path, skill)
+		dest := filepath.Join(output.Path, skill)
 		if err := osRemoveAll(dest); err != nil {
 			return nil, err
 		}

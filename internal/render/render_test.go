@@ -22,7 +22,7 @@ func testConfig(t *testing.T) config.Config {
 		RenderedDir: filepath.Join(root, "home", "rendered"),
 		ConfigPath:  filepath.Join(root, "home", "config.json"),
 		SkillsBin:   "skills",
-		Targets: []config.Target{
+		AgentOutputs: []config.AgentOutput{
 			{Name: "claude", Path: filepath.Join(root, "claude-skills")},
 			{Name: "codex", Path: filepath.Join(root, "codex-skills")},
 		},
@@ -63,7 +63,7 @@ func TestRenderAppliesGlobalAndAgentOverlaysAndCopies(t *testing.T) {
 		t.Fatalf("got %d results, want 2", len(results))
 	}
 
-	codex := readFile(t, filepath.Join(cfg.Targets[1].Path, "redis", "SKILL.md"))
+	codex := readFile(t, filepath.Join(cfg.AgentOutputs[1].Path, "redis", "SKILL.md"))
 	if !strings.Contains(codex, "Base.") || !strings.Contains(codex, "Global.") || !strings.Contains(codex, "Codex.") {
 		t.Fatalf("codex render missing expected content:\n%s", codex)
 	}
@@ -71,7 +71,7 @@ func TestRenderAppliesGlobalAndAgentOverlaysAndCopies(t *testing.T) {
 		t.Fatalf("codex render included claude overlay:\n%s", codex)
 	}
 
-	markerData := readFile(t, filepath.Join(cfg.Targets[1].Path, "redis", MarkerFile))
+	markerData := readFile(t, filepath.Join(cfg.AgentOutputs[1].Path, "redis", MarkerFile))
 	var marker map[string]any
 	if err := json.Unmarshal([]byte(markerData), &marker); err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestAppendDirectoryAndMissingTarget(t *testing.T) {
 	}
 }
 
-func TestJSONPatchOnlyAppliesToJSONTargets(t *testing.T) {
+func TestJSONPatchOnlyAppliesToJSONFiles(t *testing.T) {
 	cfg := testConfig(t)
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Base.\n")
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "metadata.json"), `{"tags":["redis"]}`+"\n")
@@ -259,9 +259,9 @@ func TestOverlayListAddAndDiff(t *testing.T) {
 	}
 }
 
-func TestRenderWithoutTargetsUsesGenericOutputAndDiscoversSkills(t *testing.T) {
+func TestRenderWithoutAgentOutputsUsesGenericOutputAndDiscoversSkills(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Targets = nil
+	cfg.AgentOutputs = nil
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Redis.\n")
 	writeFile(t, filepath.Join(cfg.StoreDir, "other", "SKILL.md"), "Other.\n")
 
@@ -377,20 +377,20 @@ func TestPrintMissingFileAndMissingSkillError(t *testing.T) {
 	}
 }
 
-func TestCopyTargetExistingFileError(t *testing.T) {
+func TestCopyAgentOutputExistingFileError(t *testing.T) {
 	cfg := testConfig(t)
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Base.\n")
-	writeFile(t, filepath.Join(cfg.Targets[1].Path, "redis", "old.md"), "old")
+	writeFile(t, filepath.Join(cfg.AgentOutputs[1].Path, "redis", "old.md"), "old")
 	if _, err := (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex", Copy: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Targets[1].Path, "redis", "old.md")); !os.IsNotExist(err) {
-		t.Fatal("existing target directory should be replaced")
+	if _, err := os.Stat(filepath.Join(cfg.AgentOutputs[1].Path, "redis", "old.md")); !os.IsNotExist(err) {
+		t.Fatal("existing destination directory should be replaced")
 	}
 
 	cfg = testConfig(t)
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Base.\n")
-	writeFile(t, filepath.Join(cfg.Targets[1].Path, "redis"), "file-not-dir")
+	writeFile(t, filepath.Join(cfg.AgentOutputs[1].Path, "redis"), "file-not-dir")
 
 	_, err := (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex", Copy: true})
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
@@ -399,13 +399,13 @@ func TestCopyTargetExistingFileError(t *testing.T) {
 
 	cfg = testConfig(t)
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Base.\n")
-	writeFile(t, cfg.Targets[1].Path, "file-not-dir")
+	writeFile(t, cfg.AgentOutputs[1].Path, "file-not-dir")
 	if _, err := (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex", Copy: true}); err == nil {
-		t.Fatal("expected target stat error")
+		t.Fatal("expected destination stat error")
 	}
 
-	if _, err := copyToTarget("redis", filepath.Join(t.TempDir(), "missing-rendered"), config.Target{Path: t.TempDir()}); err == nil {
-		t.Fatal("expected copyToTarget missing rendered error")
+	if _, err := copyToAgentOutput("redis", filepath.Join(t.TempDir(), "missing-rendered"), config.AgentOutput{Path: t.TempDir()}); err == nil {
+		t.Fatal("expected copyToAgentOutput missing rendered error")
 	}
 }
 
@@ -424,7 +424,7 @@ func TestRenderPackageErrorBranches(t *testing.T) {
 
 	cfg = testConfig(t)
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Base.\n")
-	cfg.Targets = nil
+	cfg.AgentOutputs = nil
 	if _, err := (Renderer{Config: cfg}).Render(Options{Skill: "missing"}); err == nil {
 		t.Fatal("expected generic render error")
 	}
@@ -809,40 +809,40 @@ func TestInjectedFilesystemErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("copy target remove", func(t *testing.T) {
+	t.Run("copy destination remove", func(t *testing.T) {
 		reset()
 		root := t.TempDir()
 		rendered := filepath.Join(root, "rendered")
-		targetPath := filepath.Join(root, "target")
+		destPath := filepath.Join(root, "dest")
 		writeFile(t, filepath.Join(rendered, "SKILL.md"), "Base.\n")
-		if err := os.MkdirAll(filepath.Join(targetPath, "redis"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(destPath, "redis"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		removeAll = func(path string) error {
-			if path == filepath.Join(targetPath, "redis") {
+			if path == filepath.Join(destPath, "redis") {
 				return errors.New("copy remove failed")
 			}
 			return os.RemoveAll(path)
 		}
-		if _, err := copyToTarget("redis", rendered, config.Target{Path: targetPath}); err == nil {
-			t.Fatal("expected copy target remove error")
+		if _, err := copyToAgentOutput("redis", rendered, config.AgentOutput{Path: destPath}); err == nil {
+			t.Fatal("expected copy destination remove error")
 		}
 	})
 
-	t.Run("copy target mkdir", func(t *testing.T) {
+	t.Run("copy destination mkdir", func(t *testing.T) {
 		reset()
 		root := t.TempDir()
 		rendered := filepath.Join(root, "rendered")
-		targetPath := filepath.Join(root, "target")
+		destPath := filepath.Join(root, "dest")
 		writeFile(t, filepath.Join(rendered, "SKILL.md"), "Base.\n")
 		mkdirAll = func(path string, perm os.FileMode) error {
-			if path == targetPath {
+			if path == destPath {
 				return errors.New("copy mkdir failed")
 			}
 			return os.MkdirAll(path, perm)
 		}
-		if _, err := copyToTarget("redis", rendered, config.Target{Path: targetPath}); err == nil {
-			t.Fatal("expected copy target mkdir error")
+		if _, err := copyToAgentOutput("redis", rendered, config.AgentOutput{Path: destPath}); err == nil {
+			t.Fatal("expected copy destination mkdir error")
 		}
 	})
 }

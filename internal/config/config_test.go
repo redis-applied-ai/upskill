@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestLoadConfigWithTargetsAndEnvOverrides(t *testing.T) {
+func TestLoadConfigWithAgentOutputsAndEnvOverrides(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.json")
 	data, err := json.Marshal(map[string]any{
@@ -61,8 +61,8 @@ func TestLoadConfigWithTargetsAndEnvOverrides(t *testing.T) {
 	if len(cfg.ImportDirs) != 2 || cfg.ImportDirs[1] != filepath.Join(root, "shared-imports") {
 		t.Fatalf("import dirs = %#v", cfg.ImportDirs)
 	}
-	if len(cfg.Targets) != 1 || cfg.Targets[0].Name != "codex" {
-		t.Fatalf("targets = %#v", cfg.Targets)
+	if len(cfg.AgentOutputs) != 1 || cfg.AgentOutputs[0].Name != "codex" {
+		t.Fatalf("agent outputs = %#v", cfg.AgentOutputs)
 	}
 	if cfg.Sources["core"].Ref != "main" {
 		t.Fatalf("sources = %#v", cfg.Sources)
@@ -118,18 +118,18 @@ func TestSaveConfig(t *testing.T) {
 	}
 }
 
-func TestParseTargetsListAndHelpers(t *testing.T) {
+func TestParseAgentOutputsListAndHelpers(t *testing.T) {
 	raw := json.RawMessage(`[
 	  {"agent":"claude","skills_dir":"~/claude-skills"},
 	  {"name":"codex","path":"~/codex-skills"},
 	  {"name":"","path":""}
 	]`)
-	targets, err := parseTargets(raw)
+	agentOutputs, err := parseAgentOutputs(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 2 {
-		t.Fatalf("targets = %#v", targets)
+	if len(agentOutputs) != 2 {
+		t.Fatalf("agent outputs = %#v", agentOutputs)
 	}
 	if OverlayDir(Config{OverlaysDir: "/tmp/overlays"}, "redis", "codex") != "/tmp/overlays/redis/agents/codex" {
 		t.Fatal("OverlayDir agent failed")
@@ -257,14 +257,14 @@ func TestLoadDefaultsAndWellKnownDetection(t *testing.T) {
 	if len(cfg.ImportDirs) != 1 || cfg.ImportDirs[0] != cfg.ImportsDir {
 		t.Fatalf("import dirs = %#v", cfg.ImportDirs)
 	}
-	if len(cfg.Targets) != 1 || cfg.Targets[0].Name != "codex" {
-		t.Fatalf("targets = %#v", cfg.Targets)
+	if len(cfg.AgentOutputs) != 1 || cfg.AgentOutputs[0].Name != "codex" {
+		t.Fatalf("agent outputs = %#v", cfg.AgentOutputs)
 	}
 }
 
-func TestParseTargetsRejectsInvalidJSON(t *testing.T) {
-	if _, err := parseTargets(json.RawMessage(`42`)); err == nil {
-		t.Fatal("expected invalid targets error")
+func TestParseAgentOutputsRejectsInvalidJSON(t *testing.T) {
+	if _, err := parseAgentOutputs(json.RawMessage(`42`)); err == nil {
+		t.Fatal("expected invalid agent outputs error")
 	}
 }
 
@@ -409,15 +409,15 @@ func TestLoadErrorBranches(t *testing.T) {
 		})
 	}
 
-	t.Run("targets parse", func(t *testing.T) {
-		configPath := filepath.Join(root, "bad-targets.json")
-		if err := os.WriteFile(configPath, []byte(`{"targets": 42}`), 0o644); err != nil {
+	t.Run("agents parse", func(t *testing.T) {
+		configPath := filepath.Join(root, "bad-agents.json")
+		if err := os.WriteFile(configPath, []byte(`{"agents": 42}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		t.Setenv("UPSKILL_HOME", filepath.Join(root, "home"))
 		t.Setenv("UPSKILL_CONFIG", configPath)
 		if _, err := Load(); err == nil {
-			t.Fatal("expected target parse error")
+			t.Fatal("expected agents parse error")
 		}
 	})
 
@@ -458,31 +458,31 @@ func TestLoadErrorBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("target expansion", func(t *testing.T) {
-		configPath := filepath.Join(root, "bad-target-path.json")
-		if err := os.WriteFile(configPath, []byte(`{"targets": {"codex": "~"}}`), 0o644); err != nil {
+	t.Run("agent output expansion", func(t *testing.T) {
+		configPath := filepath.Join(root, "bad-agent-output-path.json")
+		if err := os.WriteFile(configPath, []byte(`{"agents": {"codex": "~"}}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		t.Setenv("HOME", "")
 		t.Setenv("UPSKILL_HOME", filepath.Join(root, "home"))
 		t.Setenv("UPSKILL_CONFIG", configPath)
 		if _, err := Load(); err == nil {
-			t.Fatal("expected target expansion error")
+			t.Fatal("expected agent output expansion error")
 		}
 	})
 
-	t.Run("list target expansion", func(t *testing.T) {
+	t.Run("list agent output expansion", func(t *testing.T) {
 		t.Setenv("HOME", "")
-		if _, err := parseTargets(json.RawMessage(`[{"name":"codex","path":"~"}]`)); err == nil {
-			t.Fatal("expected list target expansion error")
+		if _, err := parseAgentOutputs(json.RawMessage(`[{"name":"codex","path":"~"}]`)); err == nil {
+			t.Fatal("expected list agent output expansion error")
 		}
 	})
 
-	t.Run("detect target expansion", func(t *testing.T) {
+	t.Run("detect agent output expansion", func(t *testing.T) {
 		t.Setenv("HOME", "")
-		targets := detectWellKnownTargets()
-		if len(targets) != 0 {
-			t.Fatalf("targets = %#v", targets)
+		agentOutputs := detectWellKnownAgentOutputs()
+		if len(agentOutputs) != 0 {
+			t.Fatalf("agent outputs = %#v", agentOutputs)
 		}
 	})
 }

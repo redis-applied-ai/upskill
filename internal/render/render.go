@@ -74,10 +74,10 @@ func (r Renderer) Render(opts Options) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	targets := r.targets(opts.Agent)
+	outputs := r.agentOutputs(opts.Agent)
 	var results []Result
 	for _, skill := range skills {
-		if len(targets) == 0 {
+		if len(outputs) == 0 {
 			result, err := r.renderOne(skill, opts.Agent, opts.BaseOnly)
 			if err != nil {
 				return nil, err
@@ -85,13 +85,13 @@ func (r Renderer) Render(opts Options) ([]Result, error) {
 			results = append(results, result)
 			continue
 		}
-		for _, target := range targets {
-			result, err := r.renderOne(skill, target.Name, opts.BaseOnly)
+		for _, output := range outputs {
+			result, err := r.renderOne(skill, output.Name, opts.BaseOnly)
 			if err != nil {
 				return nil, err
 			}
 			if opts.Copy {
-				copied, err := copyToTarget(skill, result.RenderedPath, target)
+				copied, err := copyToAgentOutput(skill, result.RenderedPath, output)
 				if err != nil {
 					return nil, err
 				}
@@ -204,17 +204,17 @@ func (r Renderer) skills(skill string) ([]string, error) {
 	return config.DiscoverSkills(r.Config.StoreDir)
 }
 
-func (r Renderer) targets(agent string) []config.Target {
-	var targets []config.Target
-	for _, target := range r.Config.Targets {
-		if agent == "" || target.Name == agent {
-			targets = append(targets, target)
+func (r Renderer) agentOutputs(agent string) []config.AgentOutput {
+	var outputs []config.AgentOutput
+	for _, output := range r.Config.AgentOutputs {
+		if agent == "" || output.Name == agent {
+			outputs = append(outputs, output)
 		}
 	}
-	sort.Slice(targets, func(i, j int) bool {
-		return targets[i].Name < targets[j].Name
+	sort.Slice(outputs, func(i, j int) bool {
+		return outputs[i].Name < outputs[j].Name
 	})
-	return targets
+	return outputs
 }
 
 type templateState struct {
@@ -515,8 +515,8 @@ func templateKey(path string) string {
 	return "/" + path
 }
 
-func copyToTarget(skill string, rendered string, target config.Target) (string, error) {
-	dst := filepath.Join(target.Path, skill)
+func copyToAgentOutput(skill string, rendered string, output config.AgentOutput) (string, error) {
+	dst := filepath.Join(output.Path, skill)
 	if info, err := os.Stat(dst); err == nil {
 		if !info.IsDir() {
 			return "", fmt.Errorf("%s exists and is not a directory", dst)
