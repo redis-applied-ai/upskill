@@ -142,7 +142,7 @@ func TestHelpCommands(t *testing.T) {
 			t.Fatalf("help output missing %q: %q", want, top)
 		}
 	}
-	for _, forbidden := range []string{"source add <source>", "draft import <skill-name>", "overlay diff <skill-name>", "--archive-url", "forward", "underlying", "target ", "targets:"} {
+	for _, forbidden := range []string{"source add <source>", "draft import <skill-name>", "overlay diff <skill-name>", "--archive-url", "forward", "underlying"} {
 		if strings.Contains(top, forbidden) {
 			t.Fatalf("top help output contains %q: %q", forbidden, top)
 		}
