@@ -7,11 +7,14 @@ customizing skills unless the `upskill` MCP server is unavailable.
 Base skills from `upskill` are read-only. Treat synced base skill files as
 vendor-managed content.
 
-- Use `find_skills` to list or search skills.
+- Start by calling `find_skills` with no query to list available base skills and
+  drafts. Use a `query` only when narrowing the list.
 - `find_skills` returns base skills and drafts. Draft IDs look like
   `draft:<skill-name>` and should be passed back exactly as returned.
 - Use `read_skill`, `list_skill_files`, and `read_skill_file` to inspect base
   or draft skill bodies and support files.
+- When using a rendered skill, read the skill body first, then list/read any
+  support files referenced by the skill before acting on it.
 
 For lightweight customization of an existing skill, write overlays through
 `upskill` MCP tools:
@@ -20,6 +23,8 @@ For lightweight customization of an existing skill, write overlays through
   JSON Patch overlays.
 - Use `delete_skill_overlay_file` only for overlay files.
 - Use `render_skill` to inspect the effective result after overlay edits.
+- After writing an overlay, render the skill and read the rendered skill again
+  to verify the intended text or file change is present.
 - Use `sync_skills` when synced base skills and rendered agent outputs should be
   refreshed. Treat its `updated_count`, `rendered_count`, and warnings as the
   source of truth for what happened.
@@ -48,7 +53,8 @@ For creating a new skill or drafting a new upstream version, use draft tools:
   `import_skill_draft_file` for individual resource files.
 - For local imports through MCP, the path must be in an `upskill` import
   directory. If you need to transfer a bundle, place it in that shared import
-  directory and pass the path to the import tool.
+  directory and pass the path to the import tool. Do not try to send large
+  resource bundles as one MCP string argument.
 - Use `render_skill_draft` to inspect draft output. Draft renders do not apply
   overlays unless `apply_overlays` is explicitly true.
 - Use `diff_skill_draft` and `rebase_skill_draft` when iterating on a version
@@ -66,3 +72,7 @@ Never attempt to overwrite base `SKILL.md` files or base support files through
 the MCP server. If a base skill needs to change, create a version draft, iterate
 locally, promote it into an upstream checkout or named source, and then use the
 normal upstream review process.
+
+If the `upskill` MCP server or any of these tools are unavailable, tell the user
+which tool is missing and ask them to configure or restart the MCP server. Do
+not silently fall back to a built-in skill store for writes.

@@ -1,0 +1,6 @@
+{
+  "target": "metadata.json",
+  "operations": [
+    {"op": "add", "path": "/tags/-", "value": "patched"}
+  ]
+}

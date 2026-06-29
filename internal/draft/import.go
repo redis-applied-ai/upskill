@@ -210,6 +210,9 @@ func readZip(path string) ([]archiveEntry, error) {
 		if err := validateArchivePath(file.Name); err != nil {
 			return nil, err
 		}
+		if isIgnoredArchiveMetadata(file.Name) {
+			continue
+		}
 		mode := file.FileInfo().Mode()
 		if mode&os.ModeSymlink != 0 || mode&os.ModeType != 0 && !mode.IsDir() {
 			return nil, fmt.Errorf("unsupported archive entry: %s", file.Name)
@@ -271,6 +274,9 @@ func readTarGZ(path string) ([]archiveEntry, error) {
 		if err := validateArchivePath(header.Name); err != nil {
 			return nil, err
 		}
+		if isIgnoredArchiveMetadata(header.Name) {
+			continue
+		}
 		entry := archiveEntry{Path: filepath.ToSlash(header.Name), Dir: header.Typeflag == tar.TypeDir}
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -293,6 +299,19 @@ func readTarGZ(path string) ([]archiveEntry, error) {
 		entries = append(entries, entry)
 	}
 	return entries, nil
+}
+
+func isIgnoredArchiveMetadata(path string) bool {
+	path = filepath.ToSlash(path)
+	if path == "__MACOSX" || strings.HasPrefix(path, "__MACOSX/") {
+		return true
+	}
+	for _, part := range strings.Split(path, "/") {
+		if strings.HasPrefix(part, "._") {
+			return true
+		}
+	}
+	return false
 }
 
 func planArchiveImport(root string, entries []archiveEntry, strip int) ([]ImportedFile, []string, error) {

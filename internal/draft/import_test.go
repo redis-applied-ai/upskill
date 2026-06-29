@@ -80,6 +80,71 @@ func TestImportTarGZArchiveWithStrip(t *testing.T) {
 	}
 }
 
+func TestImportArchiveSkipsMacOSMetadata(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Config{DraftsDir: filepath.Join(root, "drafts")}
+	for _, tc := range []struct {
+		name  string
+		setup func(string)
+	}{
+		{
+			name: "zip",
+			setup: func(path string) {
+				writeZip(t, path, map[string]string{
+					"bundle/SKILL.md":                   "# Demo\n",
+					"bundle/._SKILL.md":                 "resource fork",
+					"bundle/references/api.md":          "API\n",
+					"bundle/references/._api.md":        "resource fork",
+					"__MACOSX/bundle/._SKILL.md":        "metadata",
+					"__MACOSX/bundle/references/api.md": "metadata",
+				})
+			},
+		},
+		{
+			name: "tar.gz",
+			setup: func(path string) {
+				writeTarGZ(t, path, map[string]string{
+					"bundle/SKILL.md":                   "# Demo\n",
+					"bundle/._SKILL.md":                 "resource fork",
+					"bundle/references/api.md":          "API\n",
+					"bundle/references/._api.md":        "resource fork",
+					"__MACOSX/bundle/._SKILL.md":        "metadata",
+					"__MACOSX/bundle/references/api.md": "metadata",
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			draftName := "demo-" + strings.ReplaceAll(tc.name, ".", "-")
+			if _, err := Save(cfg, Metadata{Name: draftName, Type: TypeNew, CreatedFrom: CreatedFromSkeleton}); err != nil {
+				t.Fatal(err)
+			}
+			archivePath := filepath.Join(root, draftName+"."+tc.name)
+			tc.setup(archivePath)
+			result, err := Import(cfg, draftName, ImportOptions{ArchivePath: archivePath})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Files) != 2 {
+				t.Fatalf("files = %#v", result.Files)
+			}
+			draftDir := filepath.Join(root, "drafts", draftName)
+			if got := readFile(t, filepath.Join(draftDir, "references", "api.md")); got != "API\n" {
+				t.Fatalf("api file = %q", got)
+			}
+			for _, path := range []string{
+				filepath.Join(draftDir, "._SKILL.md"),
+				filepath.Join(draftDir, "references", "._api.md"),
+				filepath.Join(draftDir, "__MACOSX"),
+			} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("metadata path exists: %s", path)
+				}
+			}
+		})
+	}
+}
+
 func TestImportSingleFileAndURL(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.Config{DraftsDir: filepath.Join(root, "drafts")}

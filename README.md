@@ -5,18 +5,32 @@ install skills from local or Git sources, update the synced base store, render
 global and agent-specific overlays, and expose skills to agents through MCP
 without allowing agents to overwrite base skills.
 
-## Build and Test
+## Quick Start
+
+```bash
+make
+mkdir -p ~/.local/bin
+install -m 0755 bin/upskill ~/.local/bin/upskill
+upskill doctor
+upskill add ./examples --skill hello-skill --agent codex
+upskill render hello-skill --print --agent codex
+```
+
+The binary is written to `bin/upskill`. Installing it to `~/.local/bin` is
+optional; you can also run `bin/upskill` directly.
+
+Start with [docs/getting-started.md](docs/getting-started.md) for installation,
+first-run config, the local example skill, and MCP setup. Use
+[docs/workflows.md](docs/workflows.md) for task-oriented examples covering
+overlays through MCP, drafts, promotion to PRs, updates, and Jinja template
+overlays.
+
+For repository validation:
 
 ```bash
 make test
-make
+make coverage
 ```
-
-The binary is written to `bin/upskill`.
-
-See [docs/workflows.md](docs/workflows.md) for task-oriented examples covering
-installation, overlays through MCP, drafts, promotion to PRs, updates, and
-Jinja template overlays.
 
 ## Commands
 
@@ -65,9 +79,14 @@ Drafts:
 ```bash
 upskill draft list [--json]
 upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME]
+upskill draft path <skill-name>
+upskill draft files <skill-name> [--json]
+upskill draft read <skill-name> [--file PATH]
+upskill draft add-file <skill-name> <local-path> --path PATH
 upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect]
 upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-overlays]
 upskill draft diff <skill-name>
+upskill draft rebase <skill-name>
 upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
 upskill draft remove <skill-name>
 ```
@@ -93,6 +112,12 @@ default. `upskill update --check` previews locked source changes without
 writing. `upskill update --diff` previews incoming file changes. `upskill
 update` applies updates, and `upskill sync` updates all locked skills and
 renders final agent outputs.
+
+The primary local example source is `./examples`:
+
+```bash
+upskill add ./examples --skill hello-skill --agent codex
+```
 
 ## Layout
 
@@ -123,15 +148,51 @@ UPSKILL_LOCK
 UPSKILL_SOURCE_IGNORE
 ```
 
-For a filesystem or Obsidian-style vault, use:
+## Doctor And Status
+
+Use `upskill doctor` after installation or when changing `UPSKILL_HOME`. It
+creates the default local directories when they do not exist:
+
+```text
+store/
+overlays/
+drafts/
+imports/
+rendered/
+```
+
+`doctor` does not create `config.json`; create that file when you want explicit
+agent output directories or import allowlists. Use `upskill status` to inspect
+the current home, store path, installed skill count, overlay count, and draft
+count.
+
+## Vaults
+
+A vault is a local, editable skills workspace that `upskill` treats as a named
+source. Use one when your skills already live as normal files in an Obsidian
+vault, a synced folder, or a personal/team skills directory, and you want a
+low-friction place to draft and revise skills before installing them into the
+managed `store/`.
+
+The important distinction is:
+
+- `source/` is your editable upstream skill collection.
+- `store/` is the installed copy that `upskill` renders from and agents read.
+- `overlays/`, `drafts/`, and `imports/` are local working state kept alongside
+  the source, but ignored when discovering base skills.
+
+You do not need a vault if you only install from Git repositories. Use a vault
+when you want local files to be the upstream source of truth.
+
+To create one:
 
 ```bash
 upskill vault init ~/SkillVault --name personal
 upskill add personal
 ```
 
-The vault keeps skill source bundles under `source/` and local overlays,
-drafts, and imports in sibling directories.
+`upskill vault init` creates `source/`, `overlays/`, `drafts/`, and `imports/`,
+then records the vault source in `config.json` under the name you choose.
 
 ## Agent Outputs
 
@@ -199,7 +260,7 @@ Only `.j2` files are rendered through Jinja-style templates using
 Base template:
 
 ```jinja
-# Redis Skill
+# Template Skill
 
 {% block guidance %}
 Base guidance.
@@ -284,3 +345,14 @@ upskill render my-skill --print --base-only
 
 Every rendered skill contains `.upskill-render.json`, which records render mode,
 agent, base path, overlay paths, overlay hash, and timestamp.
+
+## Current Limits
+
+- Search is local only; remote registry search is not implemented.
+- Draft promotion writes to a local checkout or named local source. It does not
+  create branches, commit, push, or open pull requests.
+- `sync` updates locked skills and renders outputs. It does not discover a new
+  skill that has never been installed; run `upskill add <source> --skill <name>`
+  once for new skills.
+- Template overlays are full `.j2` files. They are not JSON or YAML variable
+  maps.

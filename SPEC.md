@@ -1,5 +1,10 @@
 # upskill Specification
 
+This is a design and implementation reference, not the first-run guide. Start
+with `README.md` and `docs/getting-started.md` when learning how to use the
+project. The staged implementation notes near the end are historical planning
+context unless a task explicitly says otherwise.
+
 ## Purpose
 
 `upskill` is a standalone Go CLI and stdio MCP server for agent skill
@@ -670,13 +675,13 @@ Non-`.j2` files are copied literally only when placed under `files/` or
 Base skill:
 
 ```text
-store/redis/SKILL.md.j2
+store/template-skill/SKILL.md.j2
 ```
 
 Base template:
 
 ```jinja
-# Redis Skill
+# Template Skill
 
 {% block guidance %}
 Base guidance.
@@ -875,10 +880,11 @@ Safety:
 - MCP clients can promote drafts only into local checkout paths, never directly
   to a remote registry, Git host, or managed upskill directory.
 
-## Next-Stage Implementation Plan
+## Historical Implementation Plan
 
-Implementation should proceed in small, testable slices while preserving the
-existing 100% Go coverage requirement.
+The following stages captured the implementation plan used to build the current
+CLI, draft, vault, and MCP surfaces. Treat them as historical context and use
+the active agent plan for new documentation or implementation work.
 
 ### Stage 1: Config and Draft Store
 
@@ -947,7 +953,7 @@ existing 100% Go coverage requirement.
 - Re-run the previous real-repo overlay E2E and the Codex MCP multi-turn E2E.
 - Keep `make`, `make test`, and `make coverage` passing with 100% coverage.
 
-## Open Decisions
+## Historical And Open Design Notes
 
 - Whether `promote_skill_draft` should support branch creation directly or only
   write files into the current checkout. Default remains "write files only".

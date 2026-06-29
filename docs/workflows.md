@@ -10,6 +10,9 @@ Build the binary first when working from this repo:
 make
 ```
 
+The primary examples use the local `./examples` directory so they work from a
+fresh checkout without a remote skills repository.
+
 ## Configure Outputs
 
 `upskill` stores synced base skills under `~/.skills/store`, overlays under
@@ -55,14 +58,14 @@ This creates:
 Put skill bundles under `source/`:
 
 ```text
-~/SkillVault/source/redis/SKILL.md
-~/SkillVault/source/redis/references/guide.md
+~/SkillVault/source/hello-skill/SKILL.md
+~/SkillVault/source/hello-skill/references/checklist.md
 ```
 
 Install from the named source:
 
 ```bash
-upskill add personal --skill redis --agent codex
+upskill add personal --skill hello-skill --agent codex
 ```
 
 Check vault state:
@@ -95,21 +98,15 @@ After migration:
 - Agents should use the `upskill` MCP draft and overlay tools instead of
   writing base skills directly.
 
-Known limits in this version:
-
-- Remote registry search is not implemented.
-- Promotion writes files into a local checkout or named local source; it does
-  not create branches, commits, pushes, or PRs.
-- `sync` updates locked skills. It does not discover newly promoted skills
-  until `upskill add <source> --skill <name>` installs them once.
-- Template overlays are Jinja files, not JSON/YAML variable maps.
+For current limits such as local-only search, promotion boundaries, sync
+discovery behavior, and template overlay rules, see `README.md`.
 
 ## Add One Skill
 
 Install one skill from a repo or local checkout with `--skill`:
 
 ```bash
-upskill add redis-applied-ai/skills --skill redis --agent codex
+upskill add ./examples --skill hello-skill --agent codex
 ```
 
 What happens:
@@ -122,7 +119,7 @@ What happens:
 Use `--no-render` when you only want to populate the base store:
 
 ```bash
-upskill add ./skills-repo --skill redis --no-render
+upskill add ./examples --skill hello-skill --no-render
 ```
 
 ## Add All Skills From A Repo
@@ -130,20 +127,20 @@ upskill add ./skills-repo --skill redis --no-render
 Omit `--skill` to install every discovered skill:
 
 ```bash
-upskill add redis-applied-ai/skills --agent codex
+upskill add ./examples --agent codex
 ```
 
 For a repo that keeps skills under a subdirectory:
 
 ```bash
-upskill add redis-applied-ai/skills --subpath skills --agent codex
+upskill add owner/repo --subpath skills --agent codex
 ```
 
 You can also save a source shortcut:
 
 ```bash
-upskill source add redis-applied-ai/skills --name team-skills
-upskill add team-skills --agent codex
+upskill source add ./examples --name local-examples
+upskill add local-examples --agent codex
 ```
 
 ## Change A Skill With An Agent Using An Overlay
@@ -154,8 +151,8 @@ skill should stay upstream-managed.
 Example user instruction to an agent connected to the `upskill` MCP server:
 
 ```text
-The last run of the redis skill was too verbose. Use upskill to find the redis
-skill, read the rendered skill, add a Codex-specific overlay that tells it to
+The last run of hello-skill was too verbose. Use upskill to find hello-skill,
+read the rendered skill, add a Codex-specific overlay that tells it to
 answer concisely, render it, then read the rendered skill again to verify the
 overlay is present.
 ```
@@ -163,14 +160,14 @@ overlay is present.
 The agent should use MCP tools in this shape:
 
 ```json
-{"name": "find_skills", "arguments": {"query": "redis", "limit": 5}}
+{"name": "find_skills", "arguments": {"query": "hello", "limit": 5}}
 ```
 
 ```json
 {
   "name": "read_skill",
   "arguments": {
-    "skill_id": "redis",
+    "skill_id": "hello-skill",
     "agent": "codex",
     "rendered": true,
     "include_files": true
@@ -182,7 +179,7 @@ The agent should use MCP tools in this shape:
 {
   "name": "upsert_skill_overlay_file",
   "arguments": {
-    "skill_id": "redis",
+    "skill_id": "hello-skill",
     "agent": "codex",
     "operation": "root_append",
     "path": "SKILL.md",
@@ -195,7 +192,7 @@ The agent should use MCP tools in this shape:
 {
   "name": "render_skill",
   "arguments": {
-    "skill_id": "redis",
+    "skill_id": "hello-skill",
     "agent": "codex",
     "copy": true
   }
@@ -209,8 +206,19 @@ base skills through the MCP server.
 The equivalent CLI inspection command is:
 
 ```bash
-upskill render redis --print --agent codex
+upskill render hello-skill --print --agent codex
 ```
+
+To try the checked-in overlay snippets without an MCP client:
+
+```bash
+mkdir -p ~/.skills/overlays/hello-skill
+cp -R examples/overlays/hello-skill/. ~/.skills/overlays/hello-skill/
+upskill render hello-skill --print --agent codex
+```
+
+Those snippets demonstrate root append, file replacement, and JSON Patch
+against `metadata.json`.
 
 ## Check For Updates
 
@@ -219,13 +227,13 @@ without writing to `store/`, `rendered/`, or agent outputs:
 
 ```bash
 upskill update --check
-upskill update redis --check
+upskill update hello-skill --check
 ```
 
 Example output:
 
 ```text
-redis   changed sha256:old -> sha256:new
+hello-skill   changed sha256:old -> sha256:new
 ```
 
 If everything is current, `upskill` prints the unchanged rows and then:
@@ -239,13 +247,13 @@ no updates available
 Use `--diff` to preview incoming file changes. It is also read-only:
 
 ```bash
-upskill update redis --diff
+upskill update hello-skill --diff
 ```
 
 The diff output is simple and file-oriented:
 
 ```text
-redis   changed sha256:old -> sha256:new
+hello-skill   changed sha256:old -> sha256:new
 diff SKILL.md
 -old file body
 +new file body
@@ -254,7 +262,7 @@ diff SKILL.md
 Apply updates with `update`:
 
 ```bash
-upskill update redis --agent codex
+upskill update hello-skill --agent codex
 ```
 
 Update every locked skill and render/copy final outputs with:
@@ -268,7 +276,7 @@ sync publishes the effective local skill state. To inspect the base skill
 without overlays:
 
 ```bash
-upskill render redis --print --base-only
+upskill render hello-skill --print --base-only
 ```
 
 ## Search For Skills
@@ -279,27 +287,27 @@ search or search across common public sources.
 Search installed skills:
 
 ```bash
-upskill find redis
-upskill find redis --json
+upskill find hello
+upskill find hello --json
 ```
 
 Search through MCP:
 
 ```json
-{"name": "find_skills", "arguments": {"query": "redis", "limit": 10}}
+{"name": "find_skills", "arguments": {"query": "hello", "limit": 10}}
 ```
 
 If you want to inspect a known source without installing it:
 
 ```bash
-upskill use redis-applied-ai/skills --skill redis
+upskill use ./examples --skill hello-skill
 ```
 
 If you want to make a common source easy to reuse, add it as a named source:
 
 ```bash
-upskill source add redis-applied-ai/skills --name team-skills
-upskill add team-skills --skill redis
+upskill source add ./examples --name local-examples
+upskill add local-examples --skill hello-skill
 ```
 
 ## Instruct An LLM To Use upskill MCP
@@ -311,7 +319,28 @@ upskill mcp
 ```
 
 Add it to your MCP client as a stdio server using the command path for your
-installed binary. A generic MCP configuration looks like this:
+installed binary.
+
+For Codex, edit `~/.codex/config.toml` or a trusted project
+`.codex/config.toml`:
+
+```toml
+[mcp_servers.upskill]
+command = "/absolute/path/to/upskill"
+args = ["mcp"]
+
+[mcp_servers.upskill.env]
+UPSKILL_HOME = "/Users/you/.skills"
+```
+
+You can also add it with the Codex CLI:
+
+```bash
+codex mcp add upskill --env UPSKILL_HOME="$HOME/.skills" -- "$(command -v upskill)" mcp
+```
+
+For Claude Desktop, open Settings > Developer > Edit Config and add an entry to
+`claude_desktop_config.json`:
 
 ```json
 {
@@ -327,6 +356,9 @@ installed binary. A generic MCP configuration looks like this:
 }
 ```
 
+Restart Claude Desktop after saving the config. Use absolute paths; MCP clients
+may start stdio servers with an undefined working directory.
+
 Copy `prompts/AGENTS.md` into the agent or project instructions. The important
 rules are:
 
@@ -339,19 +371,19 @@ rules are:
 Example prompt:
 
 ```text
-Use the upskill MCP server for skill work. Find skills related to Redis, read
-the rendered Redis skill for Codex, then follow that skill's instructions for
-this task. Do not use built-in skill storage for skill edits.
+Use the upskill MCP server for skill work. Find hello-skill, read the rendered
+hello-skill body and support files for Codex, then follow that skill's
+instructions for this task. Do not use built-in skill storage for skill edits.
 ```
 
 Expected MCP sequence:
 
 ```json
-{"name": "find_skills", "arguments": {"query": "redis"}}
+{"name": "find_skills", "arguments": {"query": "hello"}}
 ```
 
 ```json
-{"name": "read_skill", "arguments": {"skill_id": "redis", "agent": "codex", "rendered": true}}
+{"name": "read_skill", "arguments": {"skill_id": "hello-skill", "agent": "codex", "rendered": true}}
 ```
 
 The agent then uses the returned `SKILL.md` body and any listed resource files
@@ -421,6 +453,26 @@ Verify:
 
 For larger bundles, have the agent write a `.zip` or `.tar.gz` into an allowed
 import directory, then import it by path:
+
+```bash
+mkdir -p ~/.skills/imports
+tar -czf ~/.skills/imports/gamma-tool.tar.gz -C /path/to gamma-tool
+shasum -a 256 ~/.skills/imports/gamma-tool.tar.gz
+upskill draft create gamma-tool
+upskill draft import gamma-tool \
+  --archive ~/.skills/imports/gamma-tool.tar.gz \
+  --sha256 <hex-sha256> \
+  --inspect
+upskill draft import gamma-tool \
+  --archive ~/.skills/imports/gamma-tool.tar.gz \
+  --sha256 <hex-sha256>
+```
+
+`--sha256` may be the hex digest or the same value with a `sha256:` prefix.
+Archive import skips common macOS metadata entries such as `__MACOSX/` and
+`._*` files.
+
+The MCP equivalent is:
 
 ```json
 {
@@ -515,7 +567,7 @@ templated, include a minimal `SKILL.md` for discovery and a `SKILL.md.j2` for
 rendering:
 
 ```text
-skills/redis/
+examples/template-skill/
   SKILL.md
   SKILL.md.j2
 ```
@@ -523,10 +575,10 @@ skills/redis/
 Example `SKILL.md.j2`:
 
 ```jinja
-# Redis Skill
+# Template Skill
 
 {% block guidance %}
-Base Redis guidance.
+Base guidance for the template skill.
 {% endblock %}
 
 {% block examples %}
@@ -541,7 +593,7 @@ The rendered output strips `.j2`, so `SKILL.md.j2` renders to `SKILL.md`.
 Create a template overlay:
 
 ```text
-~/.skills/overlays/redis/templates/SKILL.md.j2
+~/.skills/overlays/template-skill/templates/SKILL.md.j2
 ```
 
 Use `parent/<path>` to extend the previous layer:
@@ -559,14 +611,14 @@ Local guidance: prefer concise answers and include exact commands.
 Render and inspect:
 
 ```bash
-upskill render redis --copy=false
-upskill render redis --print
+upskill render template-skill --copy=false
+upskill render template-skill --print
 ```
 
 For agent-specific template overrides, place the file under:
 
 ```text
-~/.skills/overlays/redis/agents/codex/templates/SKILL.md.j2
+~/.skills/overlays/template-skill/agents/codex/templates/SKILL.md.j2
 ```
 
 ### Full Replacement When Blocks Are Not Enough
@@ -574,19 +626,19 @@ For agent-specific template overrides, place the file under:
 Use `replace/` for a complete file replacement:
 
 ```text
-~/.skills/overlays/redis/replace/SKILL.md
+~/.skills/overlays/hello-skill/replace/SKILL.md
 ```
 
 Use `append/` or root append shorthand for additive text:
 
 ```text
-~/.skills/overlays/redis/SKILL.append.md
+~/.skills/overlays/hello-skill/SKILL.append.md
 ```
 
 Use JSON Patch only for JSON files:
 
 ```text
-~/.skills/overlays/redis/patches/metadata.json
+~/.skills/overlays/hello-skill/patches/metadata.patch.json
 ```
 
 ```json
