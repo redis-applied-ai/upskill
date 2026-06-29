@@ -212,20 +212,56 @@ directories that already exist.
 
 ## Overlays
 
-Rendering applies:
+An overlay is a local customization layered on top of an installed base skill.
+Use overlays when you want to change how a skill behaves for yourself, a team,
+or a specific agent without editing the synced copy in `store/`. The base skill
+can still update from its source; your overlay is reapplied the next time the
+skill is rendered.
+
+You can create overlay files directly, or let an MCP-connected agent create
+them with `upsert_skill_overlay_file`. The CLI creates overlay directories,
+renders the final result, and shows diffs; it does not open an editor or invent
+overlay text for you.
+
+Example: add Codex-only guidance to `hello-skill`:
+
+```bash
+upskill add ./examples --skill hello-skill --agent codex
+overlay_dir=$(upskill overlay add hello-skill --agent codex --path)
+cat > "$overlay_dir/SKILL.append.md" <<'EOF'
+
+For Codex, keep verification responses concise.
+EOF
+upskill render hello-skill --print --agent codex
+```
+
+That creates this overlay file:
+
+```text
+~/.skills/overlays/hello-skill/agents/codex/SKILL.append.md
+```
+
+During render, `upskill` builds the effective skill in this order:
 
 1. Base skill from `store/<skill-name>/`
 2. Global overlay from `overlays/<skill-name>/`
 3. Agent overlay from `overlays/<skill-name>/agents/<agent>/`
 
-Overlay operations:
+Rendering is repeatable, not a one-time migration. `add`, `update`, and `sync`
+render by default unless a command has a `--no-render` flag and you use it.
+Run `upskill render <skill-name> --agent <agent>` manually while iterating on
+overlay files. `sync` always renders the final base-plus-overlay state; use
+`render --print --base-only` when you want to inspect the synced base by itself.
+
+The overlay directory layout controls the operation:
 
 ```text
-append/
-files/
-replace/
-patches/
-templates/
+overlays/<skill>/SKILL.append.md                    # append to SKILL.md for every agent
+overlays/<skill>/agents/codex/SKILL.append.md       # append only for Codex
+overlays/<skill>/files/<path>                       # add a new file
+overlays/<skill>/replace/<path>                     # replace or create a file
+overlays/<skill>/patches/*.json                     # JSON Patch for a JSON file
+overlays/<skill>/templates/<path>.j2                # Jinja template overlay
 ```
 
 `files/<path>` adds a new file and fails if the file already exists.
