@@ -77,7 +77,7 @@ upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
 upskill init [name] [--dir DIR]
-upskill workon <skill-name> [--from SKILL] [--template NAME]
+upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
 
 upskill source list [--json]
 upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
@@ -87,15 +87,16 @@ upskill vault init <path> [--name NAME] [--source-dir DIR] [--no-config]
 upskill vault status [--name NAME] [--json]
 
 upskill draft list [--json]
-upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME]
+upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME] [--no-edit]
+upskill draft edit <skill-name> [--file PATH] [--no-edit]
 upskill draft path <skill-name>
 upskill draft files <skill-name> [--json]
 upskill draft read <skill-name> [--file PATH]
-upskill draft add-file <skill-name> <local-path> --path PATH
-upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect]
-upskill draft import <skill-name> --archive-url URL --sha256 SHA256 [--strip-components N] [--inspect]
-upskill draft import <skill-name> --file PATH --path DEST [--sha256 SHA256]
-upskill draft import <skill-name> --file-url URL --path DEST --sha256 SHA256
+upskill draft add-file <skill-name> <local-path> --path PATH [--no-edit]
+upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect] [--no-edit]
+upskill draft import <skill-name> --archive-url URL --sha256 SHA256 [--strip-components N] [--inspect] [--no-edit]
+upskill draft import <skill-name> --file PATH --path DEST [--sha256 SHA256] [--no-edit]
+upskill draft import <skill-name> --file-url URL --path DEST --sha256 SHA256 [--no-edit]
 upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-overlays]
 upskill draft diff <skill-name>
 upskill draft rebase <skill-name>
@@ -103,7 +104,8 @@ upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
 upskill draft remove <skill-name>
 
 upskill overlay list [--skill NAME] [--agent AGENT] [--json]
-upskill overlay add <skill-name> [--agent AGENT] [--path]
+upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]
+upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation root-append|append|files|replace|template|patch] [--no-edit]
 upskill overlay diff <skill-name> [--agent AGENT]
 
 upskill render [skill-name] [--agent AGENT] [--copy=true|false]
@@ -414,13 +416,15 @@ users and agents that want to create or revise a skill.
 
 Behavior:
 
-- If a draft already exists for `<skill-name>`, print the draft path and
-  metadata.
+- If a draft already exists for `<skill-name>`, report the draft identifier and
+  metadata, then open `SKILL.md` in `$VISUAL` or `$EDITOR` when running
+  interactively.
 - If an installed base skill named `<skill-name>` exists, create a version
-  draft from the pristine base skill.
+  draft from the pristine base skill and open `SKILL.md`.
 - If no installed base skill exists, create a new-skill draft skeleton.
 - `--from SKILL` creates a version draft from a different installed base skill.
 - `--template NAME` selects a built-in draft skeleton for new-skill drafts.
+- `--no-edit` creates or reports the draft without opening an editor.
 - The command never mutates `store/`, `overlays/`, or an upstream repository.
 
 ### `draft`
@@ -430,8 +434,9 @@ Draft commands manage mutable local skill bundles under `drafts/`.
 Rules:
 
 - Drafts are full skill bundles with `SKILL.md` and any resource files.
-- Drafts are intended for rapid iteration. Users and agents edit normal files,
-  not overlay patch syntax.
+- Drafts are intended for rapid iteration. The CLI creates requested files and
+  opens them in `$VISUAL` or `$EDITOR` when the workflow depends on edits.
+  Users and agents edit normal files, not overlay patch syntax.
 - Drafts do not replace synced base skills automatically.
 - Drafts are not copied to agent output directories by `sync`.
 - Draft rendering is explicit through `upskill draft render` or MCP draft tools.
@@ -476,9 +481,13 @@ For version drafts:
 
 For new-skill drafts:
 
-- `upskill draft create <skill-name>` writes a minimal `SKILL.md` skeleton.
+- `upskill draft create <skill-name>` writes a minimal `SKILL.md` skeleton and
+  opens it in the editor unless `--no-edit` is set.
+- `upskill draft edit <skill-name> --file PATH` creates the file if needed and
+  opens it in the editor.
 - `upskill draft import` may replace or merge the skeleton with an imported
-  bundle containing `SKILL.md`.
+  bundle containing `SKILL.md`, then opens the imported `SKILL.md` or single
+  imported file unless `--inspect` or `--no-edit` is set.
 - Promotion requires a destination checkout path because there is no recorded
   parent source.
 
@@ -599,6 +608,14 @@ Import result shape:
 ```
 
 ## Overlay Model
+
+CLI overlay creation is editor-first:
+
+- `upskill overlay add <skill-name>` creates the default root append overlay
+  and opens it in `$VISUAL` or `$EDITOR` unless `--path` or `--no-edit` is set.
+- `upskill overlay edit <skill-name>` creates the requested overlay operation
+  file if needed and opens it in the editor.
+- `--path` remains available for scripts that need the overlay directory.
 
 For a given skill and agent, overlays apply in this order:
 
@@ -1016,9 +1033,10 @@ configuration. It must instruct agents to:
 - `vault init` creates source, overlay, draft, and import directories and can
   configure a named local source.
 - `vault status` reports source, installed skill, overlay, and draft state.
-- `workon` opens an existing draft, creates a version draft for installed
-  skills, and creates a new-skill draft for unknown names.
-- `draft create/list/path/files/read/add-file/remove` cover the draft lifecycle.
+- `workon` opens an existing draft in the editor, creates a version draft for
+  installed skills, and creates a new-skill draft for unknown names.
+- `draft create/edit/list/path/files/read/add-file/remove` cover the draft
+  lifecycle.
 - `draft import --archive` imports a local skill bundle with resource files.
 - `draft render` renders a draft without publishing through `sync`.
 - `draft diff` compares version drafts against captured parent snapshots.

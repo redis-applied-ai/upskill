@@ -32,7 +32,7 @@ func Add(cfg config.Config, skill string, agent string) (string, error) {
 	}
 	appendPath := filepath.Join(dir, "SKILL.append.md")
 	if _, err := os.Stat(appendPath); errors.Is(err, os.ErrNotExist) {
-		if err := os.WriteFile(appendPath, []byte("# Local overlay\n\nAdd local instructions here.\n"), 0o644); err != nil {
+		if err := os.WriteFile(appendPath, []byte(""), 0o644); err != nil {
 			return "", err
 		}
 	}
@@ -149,6 +149,27 @@ func UpsertFile(cfg config.Config, opts WriteOptions) (string, error) {
 		return "", err
 	}
 	return target, os.WriteFile(target, content, 0o644)
+}
+
+func EnsureFile(cfg config.Config, opts WriteOptions, content string) (string, error) {
+	target, err := overlayOperationPath(cfg, opts)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return "", err
+	}
+	info, err := os.Stat(target)
+	if err == nil {
+		if info.IsDir() {
+			return "", fmt.Errorf("%s is a directory", target)
+		}
+		return target, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return target, os.WriteFile(target, []byte(content), 0o644)
 }
 
 func DeleteFile(cfg config.Config, opts WriteOptions) (string, error) {

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +28,9 @@ var (
 	cliOsRemoveAll  = os.RemoveAll
 	cliOsStat       = os.Stat
 	cliOsWriteFile  = os.WriteFile
+	cliCanEdit      = canOpenEditor
+	cliEditor       = editorCommand
+	cliRunEditor    = runEditorCommand
 )
 
 const (
@@ -37,35 +42,37 @@ const (
 	helpUpdate       = "usage: upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]"
 	helpSync         = "usage: upskill sync [--agent AGENT]"
 	helpInit         = "usage: upskill init [name] [--dir DIR]"
-	helpWorkon       = "usage: upskill workon <skill-name> [--from SKILL] [--template NAME]"
+	helpWorkon       = "usage: upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]"
 	helpSourceList   = "usage: upskill source list [--json]"
 	helpSourceAdd    = "usage: upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]"
 	helpSourceRemove = "usage: upskill source remove <name>"
 	helpVaultInit    = "usage: upskill vault init <path> [--name NAME] [--source-dir DIR] [--no-config]"
 	helpVaultStatus  = "usage: upskill vault status [--name NAME] [--json]"
 	helpDraftList    = "usage: upskill draft list [--json]"
-	helpDraftCreate  = "usage: upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME]"
+	helpDraftCreate  = "usage: upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME] [--no-edit]"
+	helpDraftEdit    = "usage: upskill draft edit <skill-name> [--file PATH] [--no-edit]"
 	helpDraftPath    = "usage: upskill draft path <skill-name>"
 	helpDraftFiles   = "usage: upskill draft files <skill-name> [--json]"
 	helpDraftRead    = "usage: upskill draft read <skill-name> [--file PATH]"
-	helpDraftAddFile = "usage: upskill draft add-file <skill-name> <local-path> --path PATH"
+	helpDraftAddFile = "usage: upskill draft add-file <skill-name> <local-path> --path PATH [--no-edit]"
 	helpDraftRender  = "usage: upskill draft render <skill-name> [--agent AGENT] [--copy=false] [--apply-overlays]"
 	helpDraftDiff    = "usage: upskill draft diff <skill-name>"
 	helpDraftRebase  = "usage: upskill draft rebase <skill-name>"
 	helpDraftPromote = "usage: upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]"
 	helpDraftRemove  = "usage: upskill draft remove <skill-name>"
 	helpOverlayList  = "usage: upskill overlay list [--skill NAME] [--agent AGENT] [--json]"
-	helpOverlayAdd   = "usage: upskill overlay add <skill-name> [--agent AGENT] [--path]"
+	helpOverlayAdd   = "usage: upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]"
+	helpOverlayEdit  = "usage: upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation root-append|append|files|replace|template|patch] [--no-edit]"
 	helpOverlayDiff  = "usage: upskill overlay diff <skill-name> [--agent AGENT]"
 	helpRender       = "usage: upskill render [skill-name] [--agent AGENT] [--copy=false] [--print] [--base-only]"
 	helpMCP          = "usage: upskill mcp"
 	helpStatus       = "usage: upskill status"
 	helpDoctor       = "usage: upskill doctor"
 	helpDraftImport  = `usage:
-  upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect]
-  upskill draft import <skill-name> --archive-url URL --sha256 SHA256 [--strip-components N] [--inspect]
-  upskill draft import <skill-name> --file PATH --path DEST [--sha256 SHA256]
-  upskill draft import <skill-name> --file-url URL --path DEST --sha256 SHA256`
+  upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect] [--no-edit]
+  upskill draft import <skill-name> --archive-url URL --sha256 SHA256 [--strip-components N] [--inspect] [--no-edit]
+  upskill draft import <skill-name> --file PATH --path DEST [--sha256 SHA256] [--no-edit]
+  upskill draft import <skill-name> --file-url URL --path DEST --sha256 SHA256 [--no-edit]`
 )
 
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -592,9 +599,11 @@ func runWorkon(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 	}
 	name := args[0]
 	from, template := "", ""
+	noEdit := false
 	if err := parseFlags(args[1:], map[string]func(string) error{
 		"--from":     func(v string) error { from = v; return nil },
 		"--template": func(v string) error { template = v; return nil },
+		"--no-edit":  func(_ string) error { noEdit = true; return nil },
 	}); err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 2
@@ -605,6 +614,11 @@ func runWorkon(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		return 1
 	}
 	printDraft(stdout, item)
+	if !noEdit {
+		if code := editDraftFile(item, "SKILL.md", stdout, stderr); code != 0 {
+			return code
+		}
+	}
 	return 0
 }
 
@@ -647,10 +661,12 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 		}
 		from, template := "", ""
 		fromRendered := false
+		noEdit := false
 		if err := parseFlags(args[2:], map[string]func(string) error{
 			"--from":          func(v string) error { from = v; return nil },
 			"--from-rendered": func(_ string) error { fromRendered = true; return nil },
 			"--template":      func(v string) error { template = v; return nil },
+			"--no-edit":       func(_ string) error { noEdit = true; return nil },
 		}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 2
@@ -661,7 +677,40 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 			return 1
 		}
 		printDraft(stdout, item)
+		if !noEdit {
+			if code := editDraftFile(item, "SKILL.md", stdout, stderr); code != 0 {
+				return code
+			}
+		}
 		return 0
+	case "edit":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "upskill: draft edit requires <skill-name>")
+			return 2
+		}
+		file := "SKILL.md"
+		noEdit := false
+		if err := parseFlags(args[2:], map[string]func(string) error{
+			"--file":    func(v string) error { file = v; return nil },
+			"--no-edit": func(_ string) error { noEdit = true; return nil },
+		}); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		item, err := draft.Read(cfg, args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		if noEdit {
+			if _, err := ensureDraftFile(item, file); err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(stdout, "ready %s\n", filepath.ToSlash(filepath.Clean(file)))
+			return 0
+		}
+		return editDraftFile(item, file, stdout, stderr)
 	case "path":
 		if len(args) < 2 {
 			fmt.Fprintln(stderr, "upskill: draft path requires <skill-name>")
@@ -740,8 +789,10 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 			return 2
 		}
 		dest := ""
+		noEdit := false
 		if err := parseFlagsWithValues(args[3:], map[string]func(string) error{
-			"--path": func(v string) error { dest = v; return nil },
+			"--path":    func(v string) error { dest = v; return nil },
+			"--no-edit": func(_ string) error { noEdit = true; return nil },
 		}, map[string]bool{"--path": true}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 2
@@ -765,6 +816,11 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 			return 1
 		}
 		fmt.Fprintf(stdout, "added %s\n", dest)
+		if !noEdit {
+			if code := editDraftFile(item, dest, stdout, stderr); code != 0 {
+				return code
+			}
+		}
 		return 0
 	case "import":
 		if len(args) < 2 {
@@ -773,6 +829,7 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 		}
 		opts := draft.ImportOptions{}
 		strip := ""
+		noEdit := false
 		if err := parseFlagsWithValues(args[2:], map[string]func(string) error{
 			"--archive":          func(v string) error { opts.ArchivePath = v; return nil },
 			"--archive-url":      func(v string) error { opts.ArchiveURL = v; return nil },
@@ -782,6 +839,7 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 			"--sha256":           func(v string) error { opts.SHA256 = v; return nil },
 			"--strip-components": func(v string) error { strip = v; return nil },
 			"--inspect":          func(_ string) error { opts.Inspect = true; return nil },
+			"--no-edit":          func(_ string) error { noEdit = true; return nil },
 		}, map[string]bool{"--path": true}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 2
@@ -807,6 +865,18 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 		}
 		data, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Fprintln(stdout, string(data))
+		if !noEdit && result.Imported && canStartEditor(stdout, stderr) {
+			item, err := draft.Read(cfg, args[1])
+			if err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+			if file := importedEditTarget(result); file != "" {
+				if code := editDraftFile(item, file, stdout, stderr); code != 0 {
+					return code
+				}
+			}
+		}
 		return 0
 	case "render":
 		if len(args) < 2 {
@@ -1027,10 +1097,164 @@ func storeSkillExists(cfg config.Config, name string) bool {
 }
 
 func printDraft(w io.Writer, item draft.Draft) {
-	fmt.Fprintf(w, "%s\t%s\t%s\n", item.ID, item.Metadata.Type, item.Path)
+	fmt.Fprintf(w, "%s\t%s\n", item.ID, item.Metadata.Type)
 	if item.Metadata.CreatedFrom == draft.CreatedFromRendered {
 		fmt.Fprintln(w, "warning: draft was created from rendered output and may include local overlays")
 	}
+}
+
+func editDraftFile(item draft.Draft, file string, stdout io.Writer, stderr io.Writer) int {
+	path, err := ensureDraftFile(item, file)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	edited, err := maybeEdit(path, stdout, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	if edited {
+		fmt.Fprintf(stdout, "edited %s\n", filepath.ToSlash(filepath.Clean(file)))
+	} else {
+		fmt.Fprintf(stdout, "ready %s\n", filepath.ToSlash(filepath.Clean(file)))
+	}
+	return 0
+}
+
+func ensureDraftFile(item draft.Draft, file string) (string, error) {
+	path, err := pathutil.SafeJoin(item.Path, file)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err == nil {
+		if info.IsDir() {
+			return "", fmt.Errorf("%s is a directory", file)
+		}
+		return path, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	return path, os.WriteFile(path, []byte(""), 0o644)
+}
+
+func importedEditTarget(result draft.ImportResult) string {
+	if len(result.Files) == 0 {
+		return ""
+	}
+	for _, file := range result.Files {
+		if file.Path == "SKILL.md" {
+			return file.Path
+		}
+	}
+	if len(result.Files) == 1 {
+		return result.Files[0].Path
+	}
+	return "SKILL.md"
+}
+
+func editOverlayFile(cfg config.Config, skill string, agent string, operation string, file string, stdout io.Writer, stderr io.Writer) int {
+	path, err := ensureOverlayFile(cfg, skill, agent, operation, file)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	edited, err := maybeEdit(path, stdout, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	label := overlayLabel(skill, agent)
+	if edited {
+		fmt.Fprintf(stdout, "edited overlay %s %s\n", label, filepath.Base(path))
+	} else {
+		fmt.Fprintf(stdout, "ready overlay %s %s\n", label, filepath.Base(path))
+	}
+	return 0
+}
+
+func ensureOverlayFile(cfg config.Config, skill string, agent string, operation string, file string) (string, error) {
+	return overlay.EnsureFile(cfg, overlay.WriteOptions{
+		Skill:     skill,
+		Agent:     agent,
+		Operation: operation,
+		Path:      file,
+	}, "")
+}
+
+func overlayLabel(skill string, agent string) string {
+	if agent == "" {
+		return skill
+	}
+	return fmt.Sprintf("%s[%s]", skill, agent)
+}
+
+func normalizeOverlayOperation(operation string) string {
+	return strings.ReplaceAll(operation, "-", "_")
+}
+
+func maybeEdit(path string, stdout io.Writer, stderr io.Writer) (bool, error) {
+	editor := cliEditor()
+	if editor == "" || !cliCanEdit(stdout, stderr) {
+		return false, nil
+	}
+	if err := cliRunEditor(editor, path); err != nil {
+		return true, fmt.Errorf("editor failed: %w", err)
+	}
+	return true, nil
+}
+
+func canStartEditor(stdout io.Writer, stderr io.Writer) bool {
+	return cliEditor() != "" && cliCanEdit(stdout, stderr)
+}
+
+func editorCommand() string {
+	for _, name := range []string{"UPSKILL_EDITOR", "VISUAL", "EDITOR"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func canOpenEditor(stdout io.Writer, stderr io.Writer) bool {
+	out, ok := stdout.(*os.File)
+	if !ok || !isCharDevice(out) || !isCharDevice(os.Stdin) {
+		return false
+	}
+	errOut, ok := stderr.(*os.File)
+	return ok && isCharDevice(errOut)
+}
+
+func isCharDevice(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func runEditorCommand(editor string, path string) error {
+	command := editor + " " + quoteEditorPath(path)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", command)
+	} else {
+		cmd = exec.Command("/bin/sh", "-c", command)
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func quoteEditorPath(path string) string {
+	if runtime.GOOS == "windows" {
+		return `"` + strings.ReplaceAll(path, `"`, `""`) + `"`
+	}
+	return "'" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'"
 }
 
 func runOverlay(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -1080,14 +1304,17 @@ func runOverlay(cfg config.Config, args []string, stdout io.Writer, stderr io.Wr
 		skill := args[1]
 		agent := ""
 		printPath := false
+		noEdit := false
 		if err := parseFlags(args[2:], map[string]func(string) error{
-			"--agent": func(v string) error { agent = v; return nil },
-			"--path":  func(_ string) error { printPath = true; return nil },
+			"--agent":   func(v string) error { agent = v; return nil },
+			"--path":    func(_ string) error { printPath = true; return nil },
+			"--no-edit": func(_ string) error { noEdit = true; return nil },
 		}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 2
 		}
-		path, err := overlay.Add(cfg, library.NormalizeName(skill), agent)
+		storeName := library.NormalizeName(skill)
+		path, err := overlay.Add(cfg, storeName, agent)
 		if err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
@@ -1095,9 +1322,43 @@ func runOverlay(cfg config.Config, args []string, stdout io.Writer, stderr io.Wr
 		if printPath {
 			fmt.Fprintln(stdout, path)
 		} else {
-			fmt.Fprintf(stdout, "created %s\n", path)
+			fmt.Fprintf(stdout, "created overlay %s\n", overlayLabel(storeName, agent))
+			if !noEdit {
+				if code := editOverlayFile(cfg, storeName, agent, "root_append", "SKILL.md", stdout, stderr); code != 0 {
+					return code
+				}
+			}
 		}
 		return 0
+	case "edit":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "upskill: overlay edit requires <skill-name>")
+			return 2
+		}
+		skill := library.NormalizeName(args[1])
+		agent := ""
+		file := "SKILL.md"
+		operation := "root_append"
+		noEdit := false
+		if err := parseFlags(args[2:], map[string]func(string) error{
+			"--agent":     func(v string) error { agent = v; return nil },
+			"--file":      func(v string) error { file = v; return nil },
+			"--operation": func(v string) error { operation = normalizeOverlayOperation(v); return nil },
+			"--no-edit":   func(_ string) error { noEdit = true; return nil },
+		}); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		if noEdit {
+			path, err := ensureOverlayFile(cfg, skill, agent, operation, file)
+			if err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(stdout, "ready overlay %s %s\n", overlayLabel(skill, agent), filepath.Base(path))
+			return 0
+		}
+		return editOverlayFile(cfg, skill, agent, operation, file, stdout, stderr)
 	case "diff":
 		if len(args) < 2 {
 			fmt.Fprintln(stderr, "upskill: overlay diff requires <skill-name>")
@@ -1362,7 +1623,7 @@ func parseFlagsWithValues(args []string, handlers map[string]func(string) error,
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--source-dir":
+	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--source-dir", "--operation":
 		return true
 	default:
 		return false
@@ -1419,6 +1680,7 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printNestedHelp(args[1:], w, printDraftHelp, map[string]string{
 			"list":     helpDraftList,
 			"create":   helpDraftCreate,
+			"edit":     helpDraftEdit,
 			"path":     helpDraftPath,
 			"files":    helpDraftFiles,
 			"read":     helpDraftRead,
@@ -1434,6 +1696,7 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printNestedHelp(args[1:], w, printOverlayHelp, map[string]string{
 			"list": helpOverlayList,
 			"add":  helpOverlayAdd,
+			"edit": helpOverlayEdit,
 			"diff": helpOverlayDiff,
 		})
 	case "render":
@@ -1510,7 +1773,8 @@ func printOverlayHelp(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  list  List overlays")
-	fmt.Fprintln(w, "  add   Create an overlay directory")
+	fmt.Fprintln(w, "  add   Create and edit an overlay")
+	fmt.Fprintln(w, "  edit  Edit an overlay file")
 	fmt.Fprintln(w, "  diff  Show rendered overlay changes")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, `Run "upskill overlay <command> --help" for command help.`)
@@ -1542,7 +1806,8 @@ func printDraftHelp(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  list      List drafts")
-	fmt.Fprintln(w, "  create    Create a draft")
+	fmt.Fprintln(w, "  create    Create and edit a draft")
+	fmt.Fprintln(w, "  edit      Edit a draft file")
 	fmt.Fprintln(w, "  path      Print a draft path")
 	fmt.Fprintln(w, "  files     List draft files")
 	fmt.Fprintln(w, "  read      Print a draft file")

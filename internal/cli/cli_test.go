@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,6 +47,30 @@ func setupEnv(t *testing.T) (root string, configPath string) {
 	t.Setenv("UPSKILL_HOME", filepath.Join(root, "home"))
 	t.Setenv("UPSKILL_CONFIG", configPath)
 	return root, configPath
+}
+
+func installFakeEditor(t *testing.T, edited *[]string) {
+	t.Helper()
+	oldCanEdit := cliCanEdit
+	oldEditor := cliEditor
+	oldRunEditor := cliRunEditor
+	cliCanEdit = func(io.Writer, io.Writer) bool { return true }
+	cliEditor = func() string { return "fake-editor" }
+	cliRunEditor = func(_ string, path string) error {
+		*edited = append(*edited, path)
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		_, err = file.WriteString("\nEdited by test.\n")
+		return err
+	}
+	t.Cleanup(func() {
+		cliCanEdit = oldCanEdit
+		cliEditor = oldEditor
+		cliRunEditor = oldRunEditor
+	})
 }
 
 func TestUnknownCommandErrors(t *testing.T) {
@@ -205,6 +230,7 @@ func TestHelpCommands(t *testing.T) {
 		{"source", "remove", "--help"},
 		{"draft", "list", "--help"},
 		{"draft", "create", "--help"},
+		{"draft", "edit", "--help"},
 		{"draft", "path", "--help"},
 		{"draft", "files", "--help"},
 		{"draft", "read", "--help"},
@@ -217,6 +243,7 @@ func TestHelpCommands(t *testing.T) {
 		{"overlay", "--help"},
 		{"overlay", "list", "--help"},
 		{"overlay", "add", "--help"},
+		{"overlay", "edit", "--help"},
 		{"render", "--help"},
 		{"mcp", "--help"},
 		{"status", "--help"},
@@ -288,6 +315,41 @@ func TestOverlayCommands(t *testing.T) {
 	}
 }
 
+func TestOverlayCommandsOpenEditor(t *testing.T) {
+	root, _ := setupEnv(t)
+	var edited []string
+	installFakeEditor(t, &edited)
+	var stdout, stderr bytes.Buffer
+
+	if code := Run([]string{"overlay", "add", "redis", "--agent", "codex"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("overlay add edit code = %d stderr=%s", code, stderr.String())
+	}
+	wantAppend := filepath.Join(root, "home", "overlays", "redis", "agents", "codex", "SKILL.append.md")
+	if len(edited) != 1 || edited[0] != wantAppend {
+		t.Fatalf("edited = %#v, want %s", edited, wantAppend)
+	}
+	if !strings.Contains(readTestFile(t, wantAppend), "Edited by test.") {
+		t.Fatal("overlay append file was not edited")
+	}
+	if !strings.Contains(stdout.String(), "edited overlay redis[codex] SKILL.append.md") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	edited = nil
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"overlay", "edit", "redis", "--operation", "replace", "--file", "references/checklist.md"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("overlay edit replace code = %d stderr=%s", code, stderr.String())
+	}
+	wantReplace := filepath.Join(root, "home", "overlays", "redis", "replace", "references", "checklist.md")
+	if len(edited) != 1 || edited[0] != wantReplace {
+		t.Fatalf("edited replace = %#v, want %s", edited, wantReplace)
+	}
+	if !strings.Contains(readTestFile(t, wantReplace), "Edited by test.") {
+		t.Fatal("overlay replace file was not edited")
+	}
+}
+
 func TestOverlayListNoOverlays(t *testing.T) {
 	setupEnv(t)
 	var stdout, stderr bytes.Buffer
@@ -305,6 +367,10 @@ func TestOverlayCommandErrors(t *testing.T) {
 	cases := [][]string{
 		{"overlay", "add"},
 		{"overlay", "add", "redis", "--bad"},
+		{"overlay", "edit"},
+		{"overlay", "edit", "redis", "--bad"},
+		{"overlay", "edit", "redis", "--operation", "unknown"},
+		{"overlay", "edit", "redis", "--file", "../bad"},
 		{"overlay", "diff"},
 		{"overlay", "diff", "redis", "--bad"},
 		{"overlay", "wat"},
@@ -696,6 +762,41 @@ func TestDraftWorkflowCommands(t *testing.T) {
 	}
 }
 
+func TestDraftCommandsOpenEditor(t *testing.T) {
+	root, _ := setupEnv(t)
+	var edited []string
+	installFakeEditor(t, &edited)
+	var stdout, stderr bytes.Buffer
+
+	if code := Run([]string{"workon", "Edited Draft"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("workon edit code = %d stderr=%s", code, stderr.String())
+	}
+	wantSkill := filepath.Join(root, "home", "drafts", "edited-draft", "SKILL.md")
+	if len(edited) != 1 || edited[0] != wantSkill {
+		t.Fatalf("edited = %#v, want %s", edited, wantSkill)
+	}
+	if !strings.Contains(readTestFile(t, wantSkill), "Edited by test.") {
+		t.Fatal("draft SKILL.md was not edited")
+	}
+	if !strings.Contains(stdout.String(), "edited SKILL.md") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	edited = nil
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"draft", "edit", "edited-draft", "--file", "references/new.md"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("draft edit code = %d stderr=%s", code, stderr.String())
+	}
+	wantReference := filepath.Join(root, "home", "drafts", "edited-draft", "references", "new.md")
+	if len(edited) != 1 || edited[0] != wantReference {
+		t.Fatalf("edited reference = %#v, want %s", edited, wantReference)
+	}
+	if !strings.Contains(readTestFile(t, wantReference), "Edited by test.") {
+		t.Fatal("draft reference file was not edited")
+	}
+}
+
 func TestVersionDraftWorkflowCommands(t *testing.T) {
 	root, _ := setupEnv(t)
 	source := filepath.Join(root, "source", "redis")
@@ -775,6 +876,10 @@ func TestDraftImportCommand(t *testing.T) {
 	stderr.Reset()
 	if code := Run([]string{"draft", "import", "imported", "--archive", archive}, &stdout, &stderr); code != 0 {
 		t.Fatalf("draft import code = %d stderr=%s", code, stderr.String())
+	}
+	var importJSON map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &importJSON); err != nil {
+		t.Fatalf("draft import stdout is not JSON: %v\n%s", err, stdout.String())
 	}
 	if !strings.Contains(stdout.String(), `"imported": true`) {
 		t.Fatalf("import stdout = %q", stdout.String())
@@ -883,6 +988,9 @@ func TestDraftCommandErrors(t *testing.T) {
 		{"workon", "name", "--bad"},
 		{"draft", "create"},
 		{"draft", "create", "name", "--bad"},
+		{"draft", "edit"},
+		{"draft", "edit", "missing"},
+		{"draft", "edit", "missing", "--bad"},
 		{"draft", "path"},
 		{"draft", "path", "missing"},
 		{"draft", "files"},

@@ -209,15 +209,16 @@ The equivalent CLI inspection command is:
 upskill render hello-skill --print --agent codex
 ```
 
-To try the checked-in overlay snippets without an MCP client:
+To author the same kinds of overlays without an MCP client:
 
 ```bash
-mkdir -p ~/.skills/overlays/hello-skill
-cp -R examples/overlays/hello-skill/. ~/.skills/overlays/hello-skill/
+upskill overlay edit hello-skill
+upskill overlay edit hello-skill --operation replace --file references/checklist.md
+upskill overlay edit hello-skill --operation patch --file metadata.patch.json
 upskill render hello-skill --print --agent codex
 ```
 
-Those snippets demonstrate root append, file replacement, and JSON Patch
+Those overlay forms demonstrate root append, file replacement, and JSON Patch
 against `metadata.json`.
 
 ## Check For Updates
@@ -468,6 +469,10 @@ upskill draft import gamma-tool \
   --sha256 <hex-sha256>
 ```
 
+For interactive CLI use, `draft create`, `draft edit`, `draft add-file`, and
+non-inspection `draft import` open `$VISUAL` or `$EDITOR` on the file that needs
+attention. Add `--no-edit` when running those commands from scripts.
+
 `--sha256` may be the hex digest or the same value with a `sha256:` prefix.
 Archive import skips common macOS metadata entries such as `__MACOSX/` and
 `._*` files.
@@ -592,8 +597,8 @@ The rendered output strips `.j2`, so `SKILL.md.j2` renders to `SKILL.md`.
 
 Create a template overlay:
 
-```text
-~/.skills/overlays/template-skill/templates/SKILL.md.j2
+```bash
+upskill overlay edit template-skill --operation template --file SKILL.md.j2
 ```
 
 Use `parent/<path>` to extend the previous layer:
@@ -615,30 +620,30 @@ upskill render template-skill --copy=false
 upskill render template-skill --print
 ```
 
-For agent-specific template overrides, place the file under:
+For agent-specific template overrides:
 
-```text
-~/.skills/overlays/template-skill/agents/codex/templates/SKILL.md.j2
+```bash
+upskill overlay edit template-skill --agent codex --operation template --file SKILL.md.j2
 ```
 
 ### Full Replacement When Blocks Are Not Enough
 
-Use `replace/` for a complete file replacement:
+Use `replace` for a complete file replacement:
 
-```text
-~/.skills/overlays/hello-skill/replace/SKILL.md
+```bash
+upskill overlay edit hello-skill --operation replace --file SKILL.md
 ```
 
-Use `append/` or root append shorthand for additive text:
+Use the default root append operation for additive text:
 
-```text
-~/.skills/overlays/hello-skill/SKILL.append.md
+```bash
+upskill overlay edit hello-skill
 ```
 
 Use JSON Patch only for JSON files:
 
-```text
-~/.skills/overlays/hello-skill/patches/metadata.patch.json
+```bash
+upskill overlay edit hello-skill --operation patch --file metadata.patch.json
 ```
 
 ```json

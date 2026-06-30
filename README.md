@@ -43,7 +43,7 @@ upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
 upskill init [name] [--dir DIR]
-upskill workon <skill-name> [--from SKILL] [--template NAME]
+upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
 upskill status
 upskill doctor
 upskill mcp
@@ -68,7 +68,8 @@ Overlay rendering:
 
 ```bash
 upskill overlay list [--skill NAME] [--agent AGENT] [--json]
-upskill overlay add <skill-name> [--agent AGENT] [--path]
+upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]
+upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation OPERATION] [--no-edit]
 upskill overlay diff <skill-name> [--agent AGENT]
 upskill render [skill-name] [--agent AGENT] [--copy=false]
 upskill render <skill-name> --print [--file SKILL.md] [--base-only]
@@ -78,18 +79,24 @@ Drafts:
 
 ```bash
 upskill draft list [--json]
-upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME]
+upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME] [--no-edit]
+upskill draft edit <skill-name> [--file PATH] [--no-edit]
 upskill draft path <skill-name>
 upskill draft files <skill-name> [--json]
 upskill draft read <skill-name> [--file PATH]
-upskill draft add-file <skill-name> <local-path> --path PATH
-upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect]
+upskill draft add-file <skill-name> <local-path> --path PATH [--no-edit]
+upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect] [--no-edit]
 upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-overlays]
 upskill draft diff <skill-name>
 upskill draft rebase <skill-name>
 upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
 upskill draft remove <skill-name>
 ```
+
+Interactive draft commands use `$VISUAL` or `$EDITOR`: `workon`, `draft
+create`, `draft edit`, `draft add-file`, and non-inspection `draft import`
+create the needed file and open it when running in a terminal. Use `--no-edit`
+for automation.
 
 ## Sources
 
@@ -218,28 +225,22 @@ or a specific agent without editing the synced copy in `store/`. The base skill
 can still update from its source; your overlay is reapplied the next time the
 skill is rendered.
 
-You can create overlay files directly, or let an MCP-connected agent create
-them with `upsert_skill_overlay_file`. The CLI creates overlay directories,
-renders the final result, and shows diffs; it does not open an editor or invent
-overlay text for you.
+For CLI users, overlays are editor-first. `upskill overlay add` creates the
+overlay file and opens `$VISUAL` or `$EDITOR` immediately. `upskill overlay
+edit` revisits an existing overlay or creates the requested overlay file before
+opening the editor. `--path` and `--no-edit` are available for scripts.
+MCP-connected agents can create overlays with `upsert_skill_overlay_file`.
 
 Example: add Codex-only guidance to `hello-skill`:
 
 ```bash
 upskill add ./examples --skill hello-skill --agent codex
-overlay_dir=$(upskill overlay add hello-skill --agent codex --path)
-cat > "$overlay_dir/SKILL.append.md" <<'EOF'
-
-For Codex, keep verification responses concise.
-EOF
+upskill overlay add hello-skill --agent codex
 upskill render hello-skill --print --agent codex
 ```
 
-That creates this overlay file:
-
-```text
-~/.skills/overlays/hello-skill/agents/codex/SKILL.append.md
-```
+The editor opens the Codex-specific append overlay for `SKILL.md`. Save the
+guidance there, then render or sync to apply it.
 
 During render, `upskill` builds the effective skill in this order:
 
