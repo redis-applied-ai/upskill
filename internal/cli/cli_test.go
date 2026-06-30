@@ -162,12 +162,13 @@ func TestHelpCommands(t *testing.T) {
 	if !strings.Contains(top, "usage: upskill <command> [args]") || !strings.Contains(top, "commands:") {
 		t.Fatalf("help output = %q", top)
 	}
-	for _, want := range []string{"add      Install", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run"} {
+	for _, want := range []string{"add      Install", "find     Search", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run"} {
 		if !strings.Contains(top, want) {
 			t.Fatalf("help output missing %q: %q", want, top)
 		}
 	}
-	for _, forbidden := range []string{"source add <source>", "draft import <skill-name>", "overlay diff <skill-name>", "--archive-url", "forward", "underlying"} {
+	removedCommand := "va" + "ult"
+	for _, forbidden := range []string{"search   Alias", "source add <source>", "draft import <skill-name>", "overlay diff <skill-name>", "--archive-url", "forward", "underlying", removedCommand} {
 		if strings.Contains(top, forbidden) {
 			t.Fatalf("top help output contains %q: %q", forbidden, top)
 		}
@@ -178,48 +179,90 @@ func TestHelpCommands(t *testing.T) {
 	}
 
 	sourceHelp := runHelp("source", "--help")
-	if !strings.Contains(sourceHelp, "usage: upskill source <command> [args]") || !strings.Contains(sourceHelp, "add     Add") {
+	if !strings.Contains(sourceHelp, "usage: upskill source <command> [args]") || !strings.Contains(sourceHelp, "skills  List") || !strings.Contains(sourceHelp, "find    Search") {
 		t.Fatalf("source help = %q", sourceHelp)
 	}
-	if strings.Contains(sourceHelp, "--ref REF") {
-		t.Fatalf("source help descended into leaf flags: %q", sourceHelp)
+	if strings.Contains(sourceHelp, "--ref REF") || strings.Contains(sourceHelp, "|") {
+		t.Fatalf("source help descended into leaf details or aliases: %q", sourceHelp)
 	}
 	sourceAddHelp := runHelp("source", "add", "--help")
-	if !strings.Contains(sourceAddHelp, helpSourceAdd) || !strings.Contains(sourceAddHelp, "--ref REF") {
+	if !strings.Contains(sourceAddHelp, helpSourceAdd) ||
+		!strings.Contains(sourceAddHelp, "--ref REF") ||
+		!strings.Contains(sourceAddHelp, "renames the source") {
 		t.Fatalf("source add help = %q", sourceAddHelp)
+	}
+	sourceSkillsHelp := runHelp("source", "skills", "--help")
+	if !strings.Contains(sourceSkillsHelp, helpSourceSkills) ||
+		!strings.Contains(sourceSkillsHelp, "--subpath PATH") ||
+		!strings.Contains(sourceSkillsHelp, "Output columns are SKILL, DESCRIPTION, and PATH") {
+		t.Fatalf("source skills help = %q", sourceSkillsHelp)
+	}
+	sourceFindHelp := runHelp("source", "find", "--help")
+	if !strings.Contains(sourceFindHelp, helpSourceFind) ||
+		!strings.Contains(sourceFindHelp, "without installing") ||
+		!strings.Contains(sourceFindHelp, "--limit N") {
+		t.Fatalf("source find help = %q", sourceFindHelp)
+	}
+	sourceSearchHelp := runHelp("source", "search", "--help")
+	if !strings.Contains(sourceSearchHelp, helpSourceFind) {
+		t.Fatalf("source search help = %q", sourceSearchHelp)
+	}
+	sourceAliasHelp := runHelp("source", "ls", "--help")
+	if !strings.Contains(sourceAliasHelp, helpSourceList) {
+		t.Fatalf("source ls help = %q", sourceAliasHelp)
+	}
+	sourceRemoveAliasHelp := runHelp("source", "rm", "--help")
+	if !strings.Contains(sourceRemoveAliasHelp, helpSourceRemove) {
+		t.Fatalf("source rm help = %q", sourceRemoveAliasHelp)
 	}
 
 	draftHelp := runHelp("draft", "--help")
 	if !strings.Contains(draftHelp, "usage: upskill draft <command> [args]") || !strings.Contains(draftHelp, "import    Import") {
 		t.Fatalf("draft help = %q", draftHelp)
 	}
-	if strings.Contains(draftHelp, "--archive-url") {
-		t.Fatalf("draft help descended into import flags: %q", draftHelp)
+	if strings.Contains(draftHelp, "--archive-url") || strings.Contains(draftHelp, "|") {
+		t.Fatalf("draft help descended into leaf details or aliases: %q", draftHelp)
 	}
 	draftImportHelp := runHelp("draft", "import", "--help")
 	if !strings.Contains(draftImportHelp, "--archive-url URL") || !strings.Contains(draftImportHelp, "--file-url URL") {
 		t.Fatalf("draft import help = %q", draftImportHelp)
+	}
+	draftAliasHelp := runHelp("draft", "ls", "--help")
+	if !strings.Contains(draftAliasHelp, helpDraftList) {
+		t.Fatalf("draft ls help = %q", draftAliasHelp)
+	}
+	draftRemoveAliasHelp := runHelp("draft", "rm", "--help")
+	if !strings.Contains(draftRemoveAliasHelp, helpDraftRemove) {
+		t.Fatalf("draft rm help = %q", draftRemoveAliasHelp)
 	}
 
 	overlayHelp := runHelp("overlay")
 	if !strings.Contains(overlayHelp, "usage: upskill overlay <command> [args]") || !strings.Contains(overlayHelp, "diff  Show") {
 		t.Fatalf("overlay help = %q", overlayHelp)
 	}
+	if strings.Contains(overlayHelp, "|") {
+		t.Fatalf("overlay help contains alias marker: %q", overlayHelp)
+	}
 	overlayDiffHelp := runHelp("overlay", "diff", "--help")
 	if !strings.Contains(overlayDiffHelp, helpOverlayDiff) {
 		t.Fatalf("overlay diff help = %q", overlayDiffHelp)
+	}
+	overlayAliasHelp := runHelp("overlay", "ls", "--help")
+	if !strings.Contains(overlayAliasHelp, helpOverlayList) {
+		t.Fatalf("overlay ls help = %q", overlayAliasHelp)
 	}
 	workonHelp := runHelp("workon")
 	if !strings.Contains(workonHelp, helpWorkon) {
 		t.Fatalf("workon help = %q", workonHelp)
 	}
 
-	for _, args := range [][]string{
+	helpCommands := [][]string{
 		{"add", "--help"},
 		{"use", "--help"},
 		{"list", "--help"},
 		{"ls", "--help"},
 		{"find", "--help"},
+		{"search", "--help"},
 		{"remove", "--help"},
 		{"rm", "--help"},
 		{"update", "--help"},
@@ -227,8 +270,14 @@ func TestHelpCommands(t *testing.T) {
 		{"init", "--help"},
 		{"workon", "--help"},
 		{"source", "list", "--help"},
+		{"source", "ls", "--help"},
+		{"source", "skills", "--help"},
+		{"source", "find", "--help"},
+		{"source", "search", "--help"},
 		{"source", "remove", "--help"},
+		{"source", "rm", "--help"},
 		{"draft", "list", "--help"},
+		{"draft", "ls", "--help"},
 		{"draft", "create", "--help"},
 		{"draft", "edit", "--help"},
 		{"draft", "path", "--help"},
@@ -240,18 +289,49 @@ func TestHelpCommands(t *testing.T) {
 		{"draft", "rebase", "--help"},
 		{"draft", "promote", "--help"},
 		{"draft", "remove", "--help"},
+		{"draft", "rm", "--help"},
 		{"overlay", "--help"},
 		{"overlay", "list", "--help"},
+		{"overlay", "ls", "--help"},
 		{"overlay", "add", "--help"},
 		{"overlay", "edit", "--help"},
 		{"render", "--help"},
 		{"mcp", "--help"},
 		{"status", "--help"},
 		{"doctor", "--help"},
-	} {
+	}
+	for _, args := range helpCommands {
 		if got := runHelp(args...); !strings.HasPrefix(got, "usage:") {
 			t.Fatalf("%v help output = %q", args, got)
 		}
+	}
+	for _, args := range helpCommands {
+		if len(args) == 2 && args[0] == "overlay" && isHelp(args[1]) {
+			continue
+		}
+		got := runHelp(args...)
+		if !strings.Contains(got, "summary:") || !strings.Contains(got, "examples:") {
+			t.Fatalf("%v help missing rich sections: %q", args, got)
+		}
+	}
+
+	addHelp := runHelp("add", "--help")
+	for _, want := range []string{"--no-render", "Git branch, tag, or commit", "Installed skill IDs"} {
+		if !strings.Contains(addHelp, want) {
+			t.Fatalf("add help missing %q: %q", want, addHelp)
+		}
+	}
+	findHelp := runHelp("search", "--help")
+	if !strings.Contains(findHelp, "Search installed skills") || !strings.Contains(findHelp, "upskill source find") {
+		t.Fatalf("search help missing installed/source distinction: %q", findHelp)
+	}
+	draftImportHelp = runHelp("draft", "import", "--help")
+	if !strings.Contains(draftImportHelp, "Remote imports require --sha256") {
+		t.Fatalf("draft import help missing checksum note: %q", draftImportHelp)
+	}
+	overlayEditHelp := runHelp("overlay", "edit", "--help")
+	if !strings.Contains(overlayEditHelp, "root-append") || !strings.Contains(overlayEditHelp, "files adds new files") {
+		t.Fatalf("overlay edit help missing operation context: %q", overlayEditHelp)
 	}
 }
 
@@ -277,7 +357,7 @@ func TestOverlayCommands(t *testing.T) {
 
 	writeTestFile(t, filepath.Join(root, "home", "overlays", "redis", "SKILL.append.md"), "Global.\n", 0o644)
 	stdout.Reset()
-	if code := Run([]string{"overlay", "list"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"overlay", "ls"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("list text code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "redis") || !strings.Contains(stdout.String(), "all") {
@@ -568,6 +648,15 @@ func TestStandaloneLibraryCommands(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	if code := Run([]string{"search", "Redis", "--limit", "1"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("search code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "redis-cache") {
+		t.Fatalf("search stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
 	if code := Run([]string{"find", "Redis", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("find json code = %d stderr=%s", code, stderr.String())
 	}
@@ -630,6 +719,89 @@ func TestStandaloneLibraryCommands(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "home", "store", "redis-cache")); !os.IsNotExist(err) {
 		t.Fatalf("store skill still exists: %v", err)
+	}
+}
+
+func TestSearchPaginationSummaries(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "alpha", "SKILL.md"), "---\nname: Alpha\ndescription: first\n---\n\nAlpha body.\n", 0o644)
+	writeTestFile(t, filepath.Join(root, "home", "store", "bravo", "SKILL.md"), "---\nname: Bravo\ndescription: second\n---\n\nBravo body.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"find", "--limit", "1"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("find page code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "showing 1/2 skills") || !strings.Contains(stdout.String(), "alpha") || strings.Contains(stdout.String(), "bravo") {
+		t.Fatalf("find page stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"search", "--json", "--limit", "1"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("search json page code = %d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "showing") || !strings.Contains(stdout.String(), `"store_name": "alpha"`) || strings.Contains(stdout.String(), `"store_name": "bravo"`) {
+		t.Fatalf("search json page stdout = %q", stdout.String())
+	}
+}
+
+func TestSourceSearchCommands(t *testing.T) {
+	root, _ := setupEnv(t)
+	sourceRoot := filepath.Join(root, "source")
+	writeTestFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis Cache\ndescription: fast cache\n---\n\nUse Redis for cache storage.\n", 0o644)
+	writeTestFile(t, filepath.Join(sourceRoot, "writing", "SKILL.md"), "---\nname: Writing Guide\ndescription: drafting help\n---\n\nPlain English writing guidance.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", sourceRoot, "--name", "Obsidian"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add code = %d stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "find", "Obsidian", "--limit", "1"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source find page code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "showing 1/2 skills") || !strings.Contains(stdout.String(), "redis-cache") || strings.Contains(stdout.String(), "writing-guide") {
+		t.Fatalf("source find page stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "find", "Obsidian", "cache"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source find code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "SKILL") || !strings.Contains(stdout.String(), "PATH") || !strings.Contains(stdout.String(), "redis-cache") {
+		t.Fatalf("source find stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "writing-guide") {
+		t.Fatalf("source find returned unrelated skill: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "search", "Obsidian", "English", "--json", "--limit", "1"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source search json code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"store_name": "writing-guide"`) || strings.Contains(stdout.String(), `"store_name": "redis-cache"`) {
+		t.Fatalf("source search json stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "find", "Obsidian", "absent"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source find no-match code = %d stderr=%s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "no matching skills" {
+		t.Fatalf("source find no-match stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "find", sourceRoot, "Redis"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source find raw path code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "redis-cache") {
+		t.Fatalf("source find raw path stdout = %q", stdout.String())
 	}
 }
 
@@ -745,7 +917,7 @@ func TestDraftWorkflowCommands(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"draft", "list"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"draft", "ls"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("draft list code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "draft:brand-new") {
@@ -754,7 +926,7 @@ func TestDraftWorkflowCommands(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"draft", "remove", "brand-new"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"draft", "rm", "brand-new"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("draft remove code = %d stderr=%s", code, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(root, "home", "drafts", "brand-new")); !os.IsNotExist(err) {
@@ -1429,14 +1601,11 @@ func TestCLIMoreFlagBranches(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"source", "list"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("empty source list code = %d stderr=%s", code, stderr.String())
+	if code := Run([]string{"source", "ls"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "no sources") {
-		t.Fatalf("empty source list = %q", stdout.String())
-	}
-	if defaultSourceName("") != "source" || defaultSourceName("https://github.com/owner/repo.git") != "repo" {
-		t.Fatal("defaultSourceName failed")
+	if !strings.Contains(stdout.String(), "SOURCE") || !strings.Contains(stdout.String(), "repo") {
+		t.Fatalf("source list after raw add = %q", stdout.String())
 	}
 
 	oldStdin := os.Stdin
@@ -1456,183 +1625,193 @@ func TestCLIMoreFlagBranches(t *testing.T) {
 	_ = read.Close()
 }
 
-func TestVaultCommands(t *testing.T) {
+func TestSourceCommands(t *testing.T) {
 	root, configPath := setupEnv(t)
 	var stdout, stderr bytes.Buffer
 
-	for _, args := range [][]string{
-		{"vault"},
-		{"vault", "--help"},
-		{"vault", "init", "--help"},
-		{"vault", "status", "--help"},
-	} {
-		stdout.Reset()
-		stderr.Reset()
-		if code := Run(args, &stdout, &stderr); code != 0 {
-			t.Fatalf("%v help code = %d stderr=%s", args, code, stderr.String())
+	source := filepath.Join(root, "Obsidian Skills")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n", 0o644)
+	writeTestFile(t, filepath.Join(source, "overlays", "shadow", "SKILL.md"), "---\nname: Shadow\n---\n\nIgnored.\n", 0o644)
+	writeTestFile(t, filepath.Join(source, ".obsidian", "plugin", "SKILL.md"), "---\nname: Plugin\n---\n\nIgnored.\n", 0o644)
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", source, "--name", "Obsidian"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add named code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "added source Obsidian") {
+		t.Fatalf("source add stdout = %q", stdout.String())
+	}
+	if rawConfig := readTestFile(t, configPath); !strings.Contains(rawConfig, `"name": "Obsidian"`) || !strings.Contains(rawConfig, source) {
+		t.Fatalf("config after source add = %s", rawConfig)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "SOURCE") || !strings.Contains(stdout.String(), "LOCATION") || !strings.Contains(stdout.String(), "Obsidian") {
+		t.Fatalf("source list = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list json code = %d stderr=%s", code, stderr.String())
+	}
+	var rows []sourceRow
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("source list json decode: %v\n%s", err, stdout.String())
+	}
+	if len(rows) != 1 || rows[0].Name != "Obsidian" || rows[0].DisplayName != "Obsidian" || rows[0].CanonicalID != "Obsidian" {
+		t.Fatalf("source rows = %#v", rows)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "skills", "Obsidian"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source skills named code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "SKILL") ||
+		!strings.Contains(stdout.String(), "DESCRIPTION") ||
+		!strings.Contains(stdout.String(), "redis") ||
+		!strings.Contains(stdout.String(), "cache") ||
+		!strings.Contains(stdout.String(), "redis/SKILL.md") ||
+		strings.Contains(stdout.String(), "NAME") ||
+		strings.Contains(stdout.String(), "shadow") {
+		t.Fatalf("source skills stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "skills", source, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source skills raw json code = %d stderr=%s", code, stderr.String())
+	}
+	var skills []library.SourceSkill
+	if err := json.Unmarshal(stdout.Bytes(), &skills); err != nil {
+		t.Fatalf("source skills json decode: %v\n%s", err, stdout.String())
+	}
+	if len(skills) != 1 || skills[0].StoreName != "redis" || skills[0].SourceSubpath != "redis" {
+		t.Fatalf("source skills json = %#v", skills)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", source, "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("raw add existing named source code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list after raw named add code = %d stderr=%s", code, stderr.String())
+	}
+	rows = nil
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("source list after raw named add json decode: %v\n%s", err, stdout.String())
+	}
+	if len(rows) != 1 || rows[0].Name != "Obsidian" || rows[0].Source != source {
+		t.Fatalf("source rows after raw named add = %#v", rows)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", "Obsidian", "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add from named source code = %d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "home", "store", "redis", "SKILL.md")); err != nil {
+		t.Fatalf("named source install missing: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "remove", "Obsidian"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source remove named code = %d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "home", "store", "redis", "SKILL.md")); err != nil {
+		t.Fatalf("source remove should not remove installed skill: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", source}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add unnamed code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list unnamed code = %d stderr=%s", code, stderr.String())
+	}
+	rows = nil
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("source list unnamed json decode: %v\n%s", err, stdout.String())
+	}
+	if len(rows) != 1 || rows[0].Name != "" || rows[0].DisplayName != source || rows[0].Source != source {
+		t.Fatalf("unnamed source rows = %#v", rows)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", source, "--name", "Personal"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add rename code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated source Personal") {
+		t.Fatalf("source add rename stdout = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list renamed code = %d stderr=%s", code, stderr.String())
+	}
+	rows = nil
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("source list renamed json decode: %v\n%s", err, stdout.String())
+	}
+	if len(rows) != 1 || rows[0].Name != "Personal" || rows[0].Source != source {
+		t.Fatalf("renamed source rows = %#v", rows)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "rm", source}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source remove raw code = %d stderr=%s", code, stderr.String())
+	}
+
+	rawSource := filepath.Join(root, "Raw Skills")
+	writeTestFile(t, filepath.Join(rawSource, "docs", "SKILL.md"), "---\nname: Docs\ndescription: writing\n---\n\nDraft docs.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", rawSource, "--skill", "docs", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add raw source code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list after raw add code = %d stderr=%s", code, stderr.String())
+	}
+	rows = nil
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("source list raw json decode: %v\n%s", err, stdout.String())
+	}
+	foundRaw := false
+	for _, row := range rows {
+		if row.Source == rawSource && row.Name == "" && row.DisplayName == rawSource {
+			foundRaw = true
 		}
-		if !strings.Contains(stdout.String(), "usage:") {
-			t.Fatalf("%v help = %q", args, stdout.String())
-		}
+	}
+	if !foundRaw {
+		t.Fatalf("raw source was not auto-registered: %#v", rows)
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"vault", "status"}, &stdout, &stderr); code == 0 {
-		t.Fatal("vault status without sources unexpectedly succeeded")
-	}
-
-	vault := filepath.Join(root, "Skills Vault")
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "init", vault, "--name", "personal"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("vault init code = %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "initialized vault") {
-		t.Fatalf("vault init stdout = %q", stdout.String())
-	}
-	for _, dir := range []string{"source", "overlays", "drafts", "imports"} {
-		if info, err := os.Stat(filepath.Join(vault, dir)); err != nil || !info.IsDir() {
-			t.Fatalf("vault dir %s err=%v info=%#v", dir, err, info)
-		}
-	}
-	rawConfig := readTestFile(t, configPath)
-	if !strings.Contains(rawConfig, `"personal"`) || !strings.Contains(rawConfig, `"source_ignore"`) {
-		t.Fatalf("config after vault init = %s", rawConfig)
-	}
-
-	writeTestFile(t, filepath.Join(vault, "source", "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n", 0o644)
-	writeTestFile(t, filepath.Join(vault, "source", "overlays", "shadow", "SKILL.md"), "---\nname: Shadow\n---\n\nIgnored.\n", 0o644)
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"add", "personal", "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("add from vault code = %d stderr=%s", code, stderr.String())
+	if code := Run([]string{"source", "remove", "missing"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("source remove missing code = %d stderr=%s", code, stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"vault", "status", "--name", "personal"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("vault status code = %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "source skills: 1") || !strings.Contains(stdout.String(), "installed skills: 1") {
-		t.Fatalf("vault status stdout = %q", stdout.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "status", "--name", "personal", "--json"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("vault status json code = %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), `"source_skills": 1`) {
-		t.Fatalf("vault status json = %q", stdout.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "status"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("vault status default source code = %d stderr=%s", code, stderr.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "init", filepath.Join(root, "other"), "--source-dir", "/abs"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("absolute source dir code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "init", filepath.Join(root, "badflag"), "--bad"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("bad init flag code = %d", code)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "status", "--bad"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("bad status flag code = %d", code)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "init"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("missing vault init path code = %d", code)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "unknown"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("unknown vault command code = %d", code)
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"vault", "init", filepath.Join(root, "scratch"), "--no-config"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("vault init no-config code = %d stderr=%s", code, stderr.String())
-	}
-
-	parentFile := filepath.Join(root, "parent-file")
-	writeTestFile(t, parentFile, "file", 0o644)
-	stdout.Reset()
-	stderr.Reset()
-	if code := runVault(config.Config{Sources: map[string]config.Source{}, ConfigPath: filepath.Join(root, "direct-config.json")}, []string{"init", filepath.Join(parentFile, "child")}, &stdout, &stderr); code == 0 {
-		t.Fatal("vault init under file unexpectedly succeeded")
-	}
-
-	directCfg := config.Config{
-		Home:        filepath.Join(root, "direct-home"),
-		StoreDir:    filepath.Join(root, "direct-home", "store"),
-		OverlaysDir: filepath.Join(root, "direct-home", "overlays"),
-		DraftsDir:   filepath.Join(root, "direct-home", "drafts"),
-		ImportsDir:  filepath.Join(root, "direct-home", "imports"),
-		RenderedDir: filepath.Join(root, "direct-home", "rendered"),
-		ConfigPath:  filepath.Join(root, "direct-config.json"),
-		LockPath:    filepath.Join(root, "direct-home", "lock.json"),
-		SkillsBin:   "skills",
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := runVault(directCfg, []string{"init", filepath.Join(root, "direct-vault")}, &stdout, &stderr); code != 0 {
-		t.Fatalf("direct runVault code = %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(readTestFile(t, directCfg.ConfigPath), `"sources"`) {
-		t.Fatalf("direct config = %s", readTestFile(t, directCfg.ConfigPath))
-	}
-
-	badConfig := directCfg
-	badConfig.ConfigPath = root
-	stdout.Reset()
-	stderr.Reset()
-	if code := runVault(badConfig, []string{"init", filepath.Join(root, "blocked"), "--name", "blocked"}, &stdout, &stderr); code == 0 {
-		t.Fatal("vault init with bad config path unexpectedly succeeded")
-	}
-
-	if out := appendUnique([]string{"a", ""}, "a", "b"); len(out) != 2 || out[0] != "a" || out[1] != "b" {
-		t.Fatalf("appendUnique = %#v", out)
-	}
-
-	if _, err := buildVaultStatus(config.Config{Sources: map[string]config.Source{"remote": {Name: "remote", Source: "owner/repo"}}}, "remote"); err == nil {
-		t.Fatal("remote vault status unexpectedly succeeded")
-	}
-	storeFileCfg := directCfg
-	storeFileCfg.Sources = map[string]config.Source{"vault": {Name: "vault", Source: filepath.Join(root, "direct-vault", "source")}}
-	writeTestFile(t, storeFileCfg.StoreDir, "file", 0o644)
-	if _, err := buildVaultStatus(storeFileCfg, "vault"); err == nil {
-		t.Fatal("vault status with file store unexpectedly succeeded")
-	}
-	sourceFileCfg := directCfg
-	sourceFileCfg.StoreDir = filepath.Join(root, "source-file-status-store")
-	sourceFile := filepath.Join(root, "source-file")
-	writeTestFile(t, sourceFile, "file", 0o644)
-	sourceFileCfg.Sources = map[string]config.Source{"vault": {Name: "vault", Source: sourceFile}}
-	if _, err := buildVaultStatus(sourceFileCfg, "vault"); err == nil {
-		t.Fatal("vault status with file source unexpectedly succeeded")
-	}
-	overlayFileCfg := directCfg
-	overlayFileCfg.StoreDir = filepath.Join(root, "overlay-status-store")
-	overlayFileCfg.Sources = map[string]config.Source{"vault": {Name: "vault", Source: filepath.Join(root, "direct-vault", "source")}}
-	writeTestFile(t, overlayFileCfg.OverlaysDir, "file", 0o644)
-	if _, err := buildVaultStatus(overlayFileCfg, "vault"); err == nil {
-		t.Fatal("vault status with file overlays unexpectedly succeeded")
-	}
-	draftsFileCfg := directCfg
-	draftsFileCfg.StoreDir = filepath.Join(root, "draft-status-store")
-	draftsFileCfg.Sources = overlayFileCfg.Sources
-	draftsFileCfg.OverlaysDir = filepath.Join(root, "draft-status-overlays")
-	writeTestFile(t, draftsFileCfg.DraftsDir, "file", 0o644)
-	if _, err := buildVaultStatus(draftsFileCfg, "vault"); err == nil {
-		t.Fatal("vault status with file drafts unexpectedly succeeded")
+	removedCommand := "va" + "ult"
+	if code := Run([]string{removedCommand}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("removed command code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 

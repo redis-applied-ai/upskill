@@ -114,7 +114,7 @@ func TestInstallUpdateFindReadRemoveAndManifest(t *testing.T) {
 	if len(listed) != 1 || listed[0].Description != "fast cache" {
 		t.Fatalf("listed = %#v", listed)
 	}
-	found, err := FindInstalled(cfg, "Redis", 1)
+	found, _, err := FindInstalled(cfg, "Redis", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,10 +187,10 @@ func TestInstallUpdateFindReadRemoveAndManifest(t *testing.T) {
 	}
 }
 
-func TestVaultSourceDiscoveryAndResolution(t *testing.T) {
+func TestLocalSourceDiscoveryAndResolution(t *testing.T) {
 	cfg := testConfig(t)
-	vault := filepath.Join(cfg.Home, "vault")
-	source := filepath.Join(vault, "source")
+	sourceRoot := filepath.Join(cfg.Home, "local-source-root")
+	source := filepath.Join(sourceRoot, "source")
 	writeFile(t, filepath.Join(source, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
 	writeFile(t, filepath.Join(source, "overlays", "shadow", "SKILL.md"), "---\nname: Shadow\n---\n\nIgnored.\n")
 	writeFile(t, filepath.Join(source, ".obsidian", "plugin", "SKILL.md"), "---\nname: Note Plugin\n---\n\nIgnored.\n")
@@ -206,16 +206,16 @@ func TestVaultSourceDiscoveryAndResolution(t *testing.T) {
 		t.Fatalf("skills = %#v", skills)
 	}
 
-	cfg.Sources["vault"] = config.Source{Name: "vault", Source: vault, Subpath: "source"}
-	dest, err := ResolveLocalSourceDestination(cfg, "vault")
+	cfg.Sources["local"] = config.Source{Name: "local", Source: sourceRoot, Subpath: "source"}
+	dest, err := ResolveLocalSourceDestination(cfg, "local")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dest != source {
 		t.Fatalf("dest = %s", dest)
 	}
-	cfg.Sources["vault-root"] = config.Source{Name: "vault-root", Source: source}
-	rootDest, err := ResolveLocalSourceDestination(cfg, "vault-root")
+	cfg.Sources["local-root"] = config.Source{Name: "local-root", Source: source}
+	rootDest, err := ResolveLocalSourceDestination(cfg, "local-root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,12 +233,12 @@ func TestVaultSourceDiscoveryAndResolution(t *testing.T) {
 	if _, err := ResolveLocalSourceDestination(cfg, "remote"); err == nil {
 		t.Fatal("remote source unexpectedly resolved")
 	}
-	cfg.Sources["bad-subpath"] = config.Source{Name: "bad-subpath", Source: vault, Subpath: "../bad"}
+	cfg.Sources["bad-subpath"] = config.Source{Name: "bad-subpath", Source: sourceRoot, Subpath: "../bad"}
 	if _, err := ResolveLocalSourceDestination(cfg, "bad-subpath"); err == nil {
 		t.Fatal("unsafe source subpath unexpectedly resolved")
 	}
 	t.Setenv("HOME", cfg.Home)
-	tilde, err := ParseSource("~/vault/source")
+	tilde, err := ParseSource("~/local-source-root/source")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,6 +258,48 @@ func TestVaultSourceDiscoveryAndResolution(t *testing.T) {
 	t.Setenv("HOME", "")
 	if _, err := ParseSource("~"); err == nil {
 		t.Fatal("empty HOME tilde source unexpectedly parsed")
+	}
+}
+
+func TestSearchSource(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "source-root")
+	writeFile(t, filepath.Join(sourceRoot, "skills", "redis", "SKILL.md"), "---\nname: Redis Cache\ndescription: fast cache\n---\n\nUse Redis for cache storage.\n")
+	writeFile(t, filepath.Join(sourceRoot, "skills", "writing", "SKILL.md"), "---\nname: Writing Guide\ndescription: drafting help\n---\n\nPlain English writing guidance.\n")
+	writeFile(t, filepath.Join(sourceRoot, "skills", "private", "SKILL.md"), "---\nname: Private Skill\ndescription: secret\n---\n\nHidden.\n")
+	cfg.SourceIgnore = append(config.DefaultSourceIgnore, "private")
+	cfg.Sources["named"] = config.Source{Name: "named", Source: sourceRoot, Subpath: "skills"}
+
+	found, total, err := SearchSource(cfg, "named", "English", InstallOptions{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 || total != 1 || found[0].StoreName != "writing-guide" || found[0].SkillPath != "skills/writing/SKILL.md" {
+		t.Fatalf("body search = %#v", found)
+	}
+
+	pathMatch, total, err := SearchSource(cfg, "named", "skills/redis", InstallOptions{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pathMatch) != 1 || total != 1 || pathMatch[0].StoreName != "redis-cache" {
+		t.Fatalf("path search = %#v", pathMatch)
+	}
+
+	limited, total, err := SearchSource(cfg, "named", "", InstallOptions{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 1 || total != 2 || limited[0].StoreName != "redis-cache" {
+		t.Fatalf("limited search = %#v", limited)
+	}
+
+	none, total, err := SearchSource(cfg, "named", "absent", InstallOptions{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 || total != 0 {
+		t.Fatalf("no-match search = %#v", none)
 	}
 }
 
@@ -338,14 +380,14 @@ func TestLibraryAdditionalBranches(t *testing.T) {
 		t.Fatal("bad source unexpectedly installed")
 	}
 
-	all, err := FindInstalled(cfg, "", 1)
+	all, _, err := FindInstalled(cfg, "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(all) != 1 {
 		t.Fatalf("find all = %#v", all)
 	}
-	none, err := FindInstalled(cfg, "absent", 10)
+	none, _, err := FindInstalled(cfg, "absent", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +535,7 @@ func TestLibraryEdgeBranches(t *testing.T) {
 	if listed, err := ListInstalled(cfg); err != nil || len(listed) != 0 {
 		t.Fatalf("list skips bad = %#v %v", listed, err)
 	}
-	if _, err := FindInstalled(config.Config{StoreDir: cfg.LockPath}, "x", 1); err == nil {
+	if _, _, err := FindInstalled(config.Config{StoreDir: cfg.LockPath}, "x", 1); err == nil {
 		t.Fatal("find with bad store unexpectedly succeeded")
 	}
 
@@ -560,11 +602,11 @@ func TestLibraryFinalBranchCoverage(t *testing.T) {
 	if len(installed) != 2 {
 		t.Fatalf("installed = %#v", installed)
 	}
-	all, err := FindInstalled(cfg, "", 1)
+	all, total, err := FindInstalled(cfg, "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 1 || all[0].StoreName != "nested-skill" {
+	if len(all) != 1 || total != 2 || all[0].StoreName != "nested-skill" {
 		t.Fatalf("limited sorted find = %#v", all)
 	}
 	lock, err := ReadLock(cfg)

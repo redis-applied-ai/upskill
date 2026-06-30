@@ -36,62 +36,44 @@ When a command prints a rendered path, use that path as the source of truth.
 If agents are configured, render output is agent-specific, such as
 `~/.skills/rendered/codex/<skill-name>`.
 
-## Use An Obsidian Or Filesystem Vault
+## Use An Obsidian Or Filesystem Directory
 
-Use a vault when you want skills to live in normal editable files while
-`upskill` still treats installed base skills as synced copies.
-
-```bash
-upskill vault init ~/SkillVault --name personal
-```
-
-This creates:
-
-```text
-~/SkillVault/
-  source/
-  overlays/
-  drafts/
-  imports/
-```
-
-Put skill bundles under `source/`:
-
-```text
-~/SkillVault/source/hello-skill/SKILL.md
-~/SkillVault/source/hello-skill/references/checklist.md
-```
-
-Install from the named source:
+Use a local source when skills already live in normal editable files and
+`upskill` should keep installed base skills as synced copies.
 
 ```bash
+upskill source add ~/Documents/Notes/Memory/Skills --name personal
+upskill source skills personal
 upskill add personal --skill hello-skill --agent codex
 ```
 
-Check vault state:
+The local directory is the upstream skill source. `~/.skills/store` is the
+installed copy and should not be edited directly. Overlays, drafts, imports, and
+rendered output stay in the managed `upskill` home unless configured otherwise.
+
+You can also install directly from a raw local path:
 
 ```bash
-upskill vault status --name personal
+upskill add ~/Documents/Notes/Memory/Skills --skill hello-skill --agent codex
 ```
 
-`source/` is the local upstream. `store/` is still the installed immutable copy.
-Overlays and drafts are local working state and are ignored during source
-discovery.
+Raw sources are recorded automatically and displayed by path in
+`upskill source list` / `upskill source ls`.
 
-## Migrate From A Memory-Server Skills Directory
+## Use An Existing Memory-Server Skills Directory
 
-If an existing memory server stores skill bundles as ordinary directories, move
-or copy those bundles into the vault source directory:
+If an existing memory server stores skill bundles as ordinary directories, point
+`upskill` at that directory:
 
 ```bash
-upskill vault init ~/SkillVault --name personal
-cp -R ~/Obsidian/Skills/* ~/SkillVault/source/
+upskill source add ~/Obsidian/Skills --name personal
+upskill source skills personal
 upskill add personal --agent codex
 ```
 
-After migration:
+After setup:
 
-- The vault `source/` directory is the local upstream skill source.
+- The configured directory is the local upstream skill source.
 - `~/.skills/store` is the installed copy and should not be edited directly.
 - Local customizations belong in overlays.
 - Rapid skill creation and upstream revisions belong in drafts.
@@ -282,13 +264,15 @@ upskill render hello-skill --print --base-only
 
 ## Search For Skills
 
-Current search is local only. `upskill` does not yet provide remote registry
+Installed-skill search is local to Upskill's store. Source search inspects one
+requested source live. `upskill` does not yet provide broad remote registry
 search or search across common public sources.
 
 Search installed skills:
 
 ```bash
 upskill find hello
+upskill search hello
 upskill find hello --json
 ```
 
@@ -301,6 +285,7 @@ Search through MCP:
 If you want to inspect a known source without installing it:
 
 ```bash
+upskill source find ./examples hello
 upskill use ./examples --skill hello-skill
 ```
 
@@ -308,6 +293,7 @@ If you want to make a common source easy to reuse, add it as a named source:
 
 ```bash
 upskill source add ./examples --name local-examples
+upskill source search local-examples hello
 upskill add local-examples --skill hello-skill
 ```
 

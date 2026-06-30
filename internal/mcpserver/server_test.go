@@ -430,19 +430,19 @@ func TestMCPTranscriptRegressionWorkflow(t *testing.T) {
 	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
 		t.Fatal(err)
 	}
-	sourceRoot := filepath.Join(t.TempDir(), "vault", "source")
-	cfg.Sources["vault"] = config.Source{Name: "vault", Source: sourceRoot}
-	promoted, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "vault", "dry_run": false})
+		sourceRoot := filepath.Join(t.TempDir(), "local", "source")
+		cfg.Sources["local"] = config.Source{Name: "local", Source: sourceRoot}
+		promoted, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "local", "dry_run": false})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(mustJSON(promoted), `"source":"vault"`) || !strings.Contains(readFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md")), "Base.") {
+		if !strings.Contains(mustJSON(promoted), `"source":"local"`) || !strings.Contains(readFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md")), "Base.") {
 		t.Fatalf("promoted = %#v", promoted)
 	}
 	if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_path": cfg.StoreDir}); err == nil {
 		t.Fatal("managed store promotion unexpectedly succeeded")
 	}
-	if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_path": sourceRoot, "to_source": "vault"}); err == nil {
+		if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_path": sourceRoot, "to_source": "local"}); err == nil {
 		t.Fatal("to_path plus to_source unexpectedly succeeded")
 	}
 	cfg.Sources["remote"] = config.Source{Name: "remote", Source: "owner/repo"}

@@ -22,8 +22,10 @@ discovery by `SKILL.md`, and agent-aware installation.
   skills CLI.
 - Install skills from local paths, Git URLs, GitHub shorthand, and configured
   sources.
-- Support a filesystem or Obsidian-style vault as a local source of immutable
-  base skills plus sibling local overlay, draft, and import directories.
+- Support local filesystem sources, including Obsidian directories, without
+  requiring users to create an Upskill-managed source layout.
+- Automatically create Upskill's managed config, store, overlay, draft, import,
+  rendered, and cache directories when commands need them.
 - Track installed skill source metadata in a deterministic lock file.
 - Update installed skills from their recorded sources.
 - Render base skills plus global and agent-specific overlays into effective
@@ -72,21 +74,20 @@ discovery by `SKILL.md`, and agent-aware installation.
 upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
 upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
 upskill list|ls [--json] [--agent AGENT]
-upskill find [query] [--json] [--limit N]
+upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
 upskill init [name] [--dir DIR]
 upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
 
-upskill source list [--json]
+upskill source list|ls [--json]
 upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
-upskill source remove <name>
+upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
+upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref REF] [--subpath PATH]
+upskill source remove|rm <source-or-name>
 
-upskill vault init <path> [--name NAME] [--source-dir DIR] [--no-config]
-upskill vault status [--name NAME] [--json]
-
-upskill draft list [--json]
+upskill draft list|ls [--json]
 upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME] [--no-edit]
 upskill draft edit <skill-name> [--file PATH] [--no-edit]
 upskill draft path <skill-name>
@@ -101,9 +102,9 @@ upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-o
 upskill draft diff <skill-name>
 upskill draft rebase <skill-name>
 upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
-upskill draft remove <skill-name>
+upskill draft remove|rm <skill-name>
 
-upskill overlay list [--skill NAME] [--agent AGENT] [--json]
+upskill overlay list|ls [--skill NAME] [--agent AGENT] [--json]
 upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]
 upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation root-append|append|files|replace|template|patch] [--no-edit]
 upskill overlay diff <skill-name> [--agent AGENT]
@@ -115,6 +116,25 @@ upskill mcp
 upskill status
 upskill doctor
 ```
+
+## CLI Help Contract
+
+Top-level and parent command help stay concise and route users to leaf command
+help. Parent `commands:` listings print canonical command names only; aliases
+are shown in the leaf command `usage:` text. Every leaf command help output must
+include:
+
+- `usage:` with the complete command shape and aliases.
+- `summary:` explaining what the command does.
+- `arguments:` and `options:` when the command accepts them.
+- `notes:` for side effects, defaults, identity rules, naming behavior, or
+  safety constraints that users need before running the command.
+- `examples:` with practical commands that can be copied and adapted.
+
+Help text must explain non-obvious flags in user language. For example, `--ref`
+means a Git branch, tag, or commit; `--subpath` means a relative directory
+inside a source; and `--no-render` means updating Upskill's store and lock
+without writing rendered agent output.
 
 Aliases:
 
@@ -215,6 +235,10 @@ UPSKILL_SOURCE_IGNORE
 
 ## Configuration
 
+Upskill must work without an explicit initialization command. Any command that
+needs managed state must create the default config directory and the specific
+files or directories it needs before continuing.
+
 Agent output directories are configured as `agents`:
 
 ```json
@@ -248,6 +272,13 @@ Draft and import directories may be configured explicitly:
 
 Rules:
 
+- Missing `config.json` is treated as an empty config with defaults.
+- Commands create `~/.skills/` before writing config, lock, store, rendered,
+  overlay, draft, import, or cache state.
+- Commands create managed directories lazily: `add` creates `store/` and the
+  lock file, rendering creates `rendered/` and configured agent outputs, overlay
+  commands create `overlays/`, draft commands create `drafts/`, and import
+  commands create `imports/`.
 - `drafts_dir` stores mutable draft bundles.
 - `imports_dir` is the default shared inbox where agents may place archives or
   resource files for local import.
@@ -263,27 +294,94 @@ Rules:
   `.trash`, `.upskill`, `overlays`, `drafts`, `imports`, and `rendered`.
   `UPSKILL_SOURCE_IGNORE` appends comma-separated names.
 
-### Vault-backed local sources
+### Source Records
 
-`upskill vault init <path>` creates this layout and, unless `--no-config` is
-used, writes it into `config.json`:
+`sources` stores known upstream locations. A source may be named or unnamed.
+Names are optional conveniences for repeated commands; the source location
+itself remains the canonical identity for unnamed sources.
 
-```text
-<path>/
-  source/    # local upstream skill bundles; copied into store by add/update
-  overlays/  # local overlay definitions
-  drafts/    # mutable draft bundles
-  imports/   # shared MCP-safe import inbox
+Preferred write format:
+
+```json
+{
+  "sources": [
+    {
+      "name": "Obsidian",
+      "source": "~/Documents/Notes/Memory/Skills"
+    },
+    {
+      "source": "example/skills",
+      "ref": "main",
+      "subpath": "skills"
+    }
+  ]
+}
 ```
 
-The vault `source/` directory is treated like any other local source. `store/`
-remains the immutable installed copy used by render and MCP reads. Draft and
-overlay writes stay local to the configured `drafts/` and `overlays/`
-directories.
+Read compatibility:
 
-For Obsidian use, keep skill bundles under the vault `source/` folder and let
-notes, attachments, overlays, drafts, and import inboxes remain outside source
-or under ignored names. This avoids discovering local working files as skills.
+- Existing object/map `sources` config remains valid.
+- When reading map config, keys are treated as source names unless the record has
+  no `name` and the key is identical to the canonical source string.
+- New writes should preserve existing source names but may migrate to the list
+  form.
+
+Rules:
+
+- `source add <source> --name NAME` records a named source.
+- `source add <source>` records an unnamed source.
+- `add <source> ...` also records the source if the argument is not already a
+  configured source name. This supports one-step installs such as
+  `upskill add ~/Documents/Notes/Memory/Skills --skill redis`.
+- `--skill` is an install or inspection filter and is not part of source
+  identity.
+- Local source paths are expanded to absolute paths before storage.
+- GitHub shorthand and Git URLs are stored in canonical form when possible.
+- `ref` and `subpath` are part of source identity because they change the visible
+  skill set.
+- Re-adding the same canonical source updates the existing source record instead
+  of creating a duplicate.
+- Re-adding a source with an existing name updates that named record.
+- `source list|ls` prints named sources by name. For unnamed sources, it prints the
+  canonical source string where a name would otherwise appear.
+- `source list|ls --json` includes `name`, `display_name`, `source`, `ref`,
+  `subpath`, and `canonical_id` for each source. `name` is omitted or empty for
+  unnamed sources.
+
+### Live Source Inspection
+
+Users can inspect available upstream skills without installing them:
+
+```bash
+upskill source skills Obsidian
+upskill source skills ~/Documents/Notes/Memory/Skills
+upskill source skills example/skills --subpath skills
+upskill source find Obsidian redis
+upskill source search ~/Documents/Notes/Memory/Skills writing --limit 5
+```
+
+Rules:
+
+- `source skills` resolves either a configured source name or a raw source
+  string.
+- `source find|search` resolves the same source inputs and filters skills by
+  normalized store name, display name, description, `SKILL.md` body, and source
+  path.
+- The command inspects the current upstream source every time it runs.
+- Local directory inspection reads the current directory contents directly.
+- Git source inspection may use a temporary clone, persistent cache, or provider
+  API internally, but output must reflect the requested source/ref/subpath rather
+  than the installed store.
+- The command never installs skills, updates the lock file, writes `store/`, or
+  renders agent outputs.
+- Output includes normalized store name, display name, description, source
+  subpath, and `SKILL.md` path.
+- `source find|search` uses the same output shape as `source skills`; when no
+  skills match, text output prints `no matching skills` and exits successfully.
+- `--ref` and `--subpath` override configured or parsed source values for that
+  inspection only.
+- Errors clearly distinguish source resolution failures, clone/fetch failures,
+  and "no skills found".
 
 If no output directories are configured, `upskill` may auto-detect well-known
 directories that already exist:
@@ -338,6 +436,10 @@ default.
 
 Rules:
 
+- `<source>` may be a configured source name or any supported source string.
+- If `<source>` is a raw source string, `add` records it as a configured source
+  before installation. The auto-created source is unnamed and is displayed by
+  canonical source string.
 - Multiple discovered skills are installed unless `--skill` filters the result.
 - Existing store skills are replaced atomically.
 - Existing overlays are preserved.
@@ -355,10 +457,11 @@ temporary directory and prints the selected `SKILL.md` without installing.
 Lists installed base skills with source and overlay status. With `--agent`, the
 overlay status reflects that agent's effective overlay chain.
 
-### `find`
+### `find` / `search`
 
 Searches installed skills by normalized name, display name, description, and
-`SKILL.md` body. It is local search in this version.
+`SKILL.md` body. It is local to Upskill's installed store. Use
+`source find|search` to search a source before installing from it.
 
 ### `remove` / `rm`
 
@@ -385,6 +488,9 @@ changed skills. It is read-only.
 1. `upskill update --no-render`
 2. `upskill render --copy=true`
 
+Rendering skips unchanged rendered directories when the base skill hash, overlay
+hash, mode, and agent match the existing render marker.
+
 If overlays exist, they are always applied. There is no `--with-overlays` flag
 because overlays are the default. There is no `--without-overlays` flag because
 sync publishes the effective final state. Use `render --print --base-only` to
@@ -396,18 +502,27 @@ Creates a new local skill skeleton with `SKILL.md` and frontmatter.
 
 ### `source`
 
-`source` commands manage named source shortcuts in `config.json`. Named sources
-are optional conveniences for repeated `add` calls.
+`source` commands manage configured upstream sources in `config.json`.
 
-### `vault`
+`source add <source> [--name NAME] [--ref REF] [--subpath PATH]` records a
+source without installing skills. `--name` creates a shortcut; omitting `--name`
+stores an unnamed source that is displayed by canonical source string.
 
-`vault init` creates a filesystem-backed skill vault and configures it as a
-named local source. It also points overlays, drafts, imports, and local import
-allowlist entries at sibling vault directories.
+`source list|ls` prints configured sources. It does not inspect upstream
+contents.
 
-`vault status` reports the named local source path, configured overlay/draft/
-import paths, installed skill count, source skill count, overlay count, and
-draft count.
+`source skills <source-or-name>` performs live source inspection and prints the
+skills available in that source. It accepts named sources and raw source strings.
+It does not install, update, render, or mutate the lock file.
+
+`source find|search <source-or-name> [query]` performs live source inspection and
+filters available skills by metadata, body, and path. It accepts `--json`,
+`--limit`, `--ref`, and `--subpath`. It does not install, update, render, record
+the source, or mutate the lock file.
+
+`source remove|rm <source-or-name>` removes a configured source record.
+Removing a source does not remove installed skills, lock entries, overlays,
+drafts, or rendered outputs.
 
 ### `workon`
 
@@ -513,8 +628,7 @@ Draft promotion:
 - `upskill draft promote <skill-name> --to PATH` copies the draft bundle into a
   local upstream checkout.
 - `upskill draft promote <skill-name> --to-source NAME` resolves a configured
-  local source and promotes into that source. This is the preferred path for a
-  vault-backed source.
+  local source and promotes into that source.
 - For version drafts, the destination path is inferred from parent metadata
   when possible; otherwise the command asks for or requires the skill subpath.
 - For new-skill drafts, the destination path must be provided or inferred from
@@ -769,6 +883,7 @@ Every rendered skill contains `.upskill-render.json`:
   "agent": "codex",
   "mode": "with-overlays",
   "base_path": "/Users/example/.skills/store/redis",
+  "base_hash": "sha256:...",
   "overlays": [
     "/Users/example/.skills/overlays/redis",
     "/Users/example/.skills/overlays/redis/agents/codex"
@@ -900,8 +1015,8 @@ Safety:
 ## Historical Implementation Plan
 
 The following stages captured the implementation plan used to build the current
-CLI, draft, vault, and MCP surfaces. Treat them as historical context and use
-the active agent plan for new documentation or implementation work.
+CLI, draft, and MCP surfaces. Treat them as historical context and use the
+active agent plan for new documentation or implementation work.
 
 ### Stage 1: Config and Draft Store
 
@@ -916,7 +1031,7 @@ the active agent plan for new documentation or implementation work.
 ### Stage 2: CLI Draft Workflow
 
 - Implement `upskill workon`.
-- Implement `upskill draft list/create/path/files/read/add-file/remove`.
+- Implement `upskill draft list|ls/create/path/files/read/add-file/remove|rm`.
 - Implement new-skill draft skeleton creation.
 - Implement version draft creation from pristine base skills.
 - Keep draft commands independent from `sync`; drafts must not be published
@@ -1025,14 +1140,16 @@ configuration. It must instruct agents to:
 
 - `add` installs one or more local skills and writes lock entries.
 - `add --skill` filters discovered skills.
-- `list` and `find` show installed skills.
+- `list` shows installed skills, and `find|search` searches installed skills.
 - `remove` deletes base skill and lock entry but preserves overlays by default.
 - `update` refreshes a locked local skill and renders by default.
 - `sync` updates locked skills and renders overlays.
 - `init` creates a valid `SKILL.md`.
-- `vault init` creates source, overlay, draft, and import directories and can
-  configure a named local source.
-- `vault status` reports source, installed skill, overlay, and draft state.
+- `source add` records named and unnamed local/Git sources.
+- `source list|ls` displays unnamed sources by canonical source string.
+- `source skills` inspects named and raw sources live without installing.
+- `source find|search` searches one named or raw source live without installing.
+- `add <raw-source>` records an unnamed source before installing from it.
 - `workon` opens an existing draft in the editor, creates a version draft for
   installed skills, and creates a new-skill draft for unknown names.
 - `draft create/edit/list/path/files/read/add-file/remove` cover the draft
@@ -1052,7 +1169,8 @@ configuration. It must instruct agents to:
 - `@ref`, `#ref`, and `#ref@skill` parse correctly.
 - Unsafe subpaths are rejected.
 - Skill discovery finds root and nested `SKILL.md` files.
-- Skill discovery ignores configured vault working directories.
+- Skill discovery ignores configured working directories such as `overlays`,
+  `drafts`, `imports`, and `rendered`.
 - Skill hashes are deterministic.
 
 ### Overlay and Render

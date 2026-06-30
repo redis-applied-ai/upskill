@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -219,7 +220,7 @@ func SaveSources(cfg Config, sources map[string]Source) error {
 	if err != nil {
 		return err
 	}
-	data, _ := json.Marshal(sources)
+	data, _ := json.Marshal(SourceRecords(sources))
 	raw.Sources = data
 	return writeRawConfig(cfg.ConfigPath, raw)
 }
@@ -238,7 +239,7 @@ func SaveConfig(cfg Config) error {
 	raw.SkillsBin = cfg.SkillsBin
 	raw.ImportDirs = mustMarshal(cfg.ImportDirs)
 	raw.SourceIgnore = mustMarshal(cfg.SourceIgnore)
-	raw.Sources = mustMarshal(cfg.Sources)
+	raw.Sources = mustMarshal(SourceRecords(cfg.Sources))
 	return writeRawConfig(cfg.ConfigPath, raw)
 }
 
@@ -308,8 +309,13 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 	var objectSources map[string]Source
 	if err := json.Unmarshal(data, &objectSources); err == nil && objectSources != nil {
 		for name, source := range objectSources {
-			source.Name = defaultString(source.Name, name)
-			sources[name] = source
+			if source.Source == "" {
+				continue
+			}
+			if source.Name == "" && name != SourceKey(source) {
+				source.Name = name
+			}
+			sources[SourceKey(source)] = source
 		}
 		return sources, nil
 	}
@@ -317,7 +323,11 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 	var stringSources map[string]string
 	if err := json.Unmarshal(data, &stringSources); err == nil && stringSources != nil {
 		for name, source := range stringSources {
-			sources[name] = Source{Name: name, Source: source}
+			if source == "" {
+				continue
+			}
+			item := Source{Name: name, Source: source}
+			sources[SourceKey(item)] = item
 		}
 		return sources, nil
 	}
@@ -327,12 +337,65 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 		return nil, err
 	}
 	for _, source := range listSources {
-		if source.Name == "" || source.Source == "" {
+		if source.Source == "" {
 			continue
 		}
-		sources[source.Name] = source
+		sources[SourceKey(source)] = source
 	}
 	return sources, nil
+}
+
+func SourceKey(source Source) string {
+	if source.Name != "" {
+		return source.Name
+	}
+	key := source.Source
+	if source.Ref != "" {
+		key += "#ref=" + source.Ref
+	}
+	if source.Subpath != "" {
+		key += "#subpath=" + filepath.ToSlash(source.Subpath)
+	}
+	return key
+}
+
+func SourceDisplayName(source Source) string {
+	if source.Name != "" {
+		return source.Name
+	}
+	return source.Source
+}
+
+func SourceRecords(sources map[string]Source) []Source {
+	records := make([]Source, 0, len(sources))
+	for key, source := range sources {
+		if source.Source == "" {
+			continue
+		}
+		if source.Name != "" && key != "" && key != source.Name {
+			source.Name = key
+		}
+		records = append(records, source)
+	}
+	sortSources(records)
+	return records
+}
+
+func sortSources(sources []Source) {
+	sort.Slice(sources, func(i, j int) bool {
+		left := SourceDisplayName(sources[i])
+		right := SourceDisplayName(sources[j])
+		if left != right {
+			return left < right
+		}
+		if sources[i].Source != sources[j].Source {
+			return sources[i].Source < sources[j].Source
+		}
+		if sources[i].Ref != sources[j].Ref {
+			return sources[i].Ref < sources[j].Ref
+		}
+		return sources[i].Subpath < sources[j].Subpath
+	})
 }
 
 func parseImportDirs(data json.RawMessage, fallback string) ([]string, error) {

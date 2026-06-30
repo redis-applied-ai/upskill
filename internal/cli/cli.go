@@ -34,45 +34,669 @@ var (
 )
 
 const (
-	helpAdd          = "usage: upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]"
-	helpUse          = "usage: upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]"
-	helpList         = "usage: upskill list|ls [--json] [--agent AGENT]"
-	helpFind         = "usage: upskill find [query] [--json] [--limit N]"
-	helpRemove       = "usage: upskill remove|rm <skill-name>... [--delete-overlays]"
-	helpUpdate       = "usage: upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]"
-	helpSync         = "usage: upskill sync [--agent AGENT]"
-	helpInit         = "usage: upskill init [name] [--dir DIR]"
-	helpWorkon       = "usage: upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]"
-	helpSourceList   = "usage: upskill source list [--json]"
-	helpSourceAdd    = "usage: upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]"
-	helpSourceRemove = "usage: upskill source remove <name>"
-	helpVaultInit    = "usage: upskill vault init <path> [--name NAME] [--source-dir DIR] [--no-config]"
-	helpVaultStatus  = "usage: upskill vault status [--name NAME] [--json]"
-	helpDraftList    = "usage: upskill draft list [--json]"
-	helpDraftCreate  = "usage: upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME] [--no-edit]"
-	helpDraftEdit    = "usage: upskill draft edit <skill-name> [--file PATH] [--no-edit]"
-	helpDraftPath    = "usage: upskill draft path <skill-name>"
-	helpDraftFiles   = "usage: upskill draft files <skill-name> [--json]"
-	helpDraftRead    = "usage: upskill draft read <skill-name> [--file PATH]"
-	helpDraftAddFile = "usage: upskill draft add-file <skill-name> <local-path> --path PATH [--no-edit]"
-	helpDraftRender  = "usage: upskill draft render <skill-name> [--agent AGENT] [--copy=false] [--apply-overlays]"
-	helpDraftDiff    = "usage: upskill draft diff <skill-name>"
-	helpDraftRebase  = "usage: upskill draft rebase <skill-name>"
-	helpDraftPromote = "usage: upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]"
-	helpDraftRemove  = "usage: upskill draft remove <skill-name>"
-	helpOverlayList  = "usage: upskill overlay list [--skill NAME] [--agent AGENT] [--json]"
-	helpOverlayAdd   = "usage: upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]"
-	helpOverlayEdit  = "usage: upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation root-append|append|files|replace|template|patch] [--no-edit]"
-	helpOverlayDiff  = "usage: upskill overlay diff <skill-name> [--agent AGENT]"
-	helpRender       = "usage: upskill render [skill-name] [--agent AGENT] [--copy=false] [--print] [--base-only]"
-	helpMCP          = "usage: upskill mcp"
-	helpStatus       = "usage: upskill status"
-	helpDoctor       = "usage: upskill doctor"
-	helpDraftImport  = `usage:
+	helpAdd = `usage: upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
+
+summary:
+  Install one or more skills from a configured source, local directory, GitHub
+  shorthand, or Git URL.
+
+arguments:
+  <source>          Source name, local path, GitHub shorthand, or Git URL.
+
+options:
+  --skill NAME      Install one matching skill only. Matches the skill ID or
+                    SKILL.md name.
+  --ref REF         Git branch, tag, or commit to read.
+  --subpath PATH    Relative directory inside the source to scan.
+  --agent AGENT     Render output for one configured agent after installing.
+  --no-render       Install to Upskill's store and lock only; skip rendering.
+
+notes:
+  Without --skill, every discovered SKILL.md directory is installed.
+  A raw source is recorded automatically as an unnamed configured source.
+  Installed skill IDs use SKILL.md name when present, otherwise the directory
+  name, normalized for filesystem use.
+
+examples:
+  upskill add Obsidian --skill redis
+  upskill add ~/Documents/Notes/Memory/Skills --skill redis
+  upskill add owner/repo --subpath skills --skill redis
+  upskill add owner/repo --ref v1.2.0 --skill redis --no-render`
+
+	helpUse = `usage: upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
+
+summary:
+  Print an installed skill or preview a skill directly from a source.
+
+arguments:
+  <source-or-skill> Installed skill ID, configured source name, local path,
+                    GitHub shorthand, or Git URL.
+
+options:
+  --skill NAME      Select one source skill when reading from a source.
+  --ref REF         Git branch, tag, or commit to read.
+  --subpath PATH    Relative directory inside the source to scan.
+  --agent AGENT     Include the agent-specific overlay chain when reading an
+                    installed skill.
+
+notes:
+  Reading from a source does not install, update the lock, or render output.
+  Reading an installed skill applies overlays for the selected agent.
+
+examples:
+  upskill use redis
+  upskill use redis --agent codex
+  upskill use Obsidian --skill redis
+  upskill use owner/repo --subpath skills --skill redis`
+
+	helpList = `usage: upskill list|ls [--json] [--agent AGENT]
+
+summary:
+  List installed skills in Upskill's local store.
+
+options:
+  --json            Print machine-readable JSON.
+  --agent AGENT     Show overlay counts for one agent's overlay chain.
+
+notes:
+  This lists installed skills, not every skill available in configured sources.
+  Use upskill source skills to inspect a source without installing from it.
+
+examples:
+  upskill list
+  upskill ls --agent codex
+  upskill list --json`
+
+	helpFind = `usage: upskill find|search [query] [--json] [--limit N]
+
+summary:
+  Search installed skills in Upskill's local store.
+
+arguments:
+  [query]           Optional search text. Omit it to list installed skills.
+
+options:
+  --json            Print machine-readable JSON.
+  --limit N         Maximum results to return. Default: 10.
+
+notes:
+  This searches only installed skills by ID, display name, description, and
+  SKILL.md body text. Use upskill source find to search skills that are
+  available in one source but not necessarily installed.
+  When --limit truncates text output, upskill prints showing N/M skills.
+
+examples:
+  upskill find redis
+  upskill search redis
+  upskill find writing --limit 5
+  upskill find --json`
+
+	helpRemove = `usage: upskill remove|rm <skill-name>... [--delete-overlays]
+
+summary:
+  Remove installed skills from Upskill's store and lock file.
+
+arguments:
+  <skill-name>      One or more installed skill IDs to remove.
+
+options:
+  --delete-overlays Also delete local overlays for the removed skills.
+
+notes:
+  Removing an installed skill does not remove configured sources or drafts.
+  Overlays are preserved by default.
+
+examples:
+  upskill rm redis
+  upskill remove redis docs --delete-overlays`
+
+	helpUpdate = `usage: upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
+
+summary:
+  Refresh installed skills from the source metadata recorded in the lock file.
+
+arguments:
+  [skill-name...]   Optional installed skill IDs. Omit to update all locked
+                    skills.
+
+options:
+  --agent AGENT     Render updated skills for one configured agent.
+  --no-render       Update store and lock only; skip rendering.
+  --check           Preview which locked skills would change.
+  --diff            Preview incoming file changes. Implies --check.
+
+notes:
+  update uses locked source metadata; it does not inspect arbitrary configured
+  sources unless a skill was installed from them.
+
+examples:
+  upskill update
+  upskill update redis --agent codex
+  upskill update --check
+  upskill update redis --diff`
+
+	helpSync = `usage: upskill sync [--agent AGENT]
+
+summary:
+  Update all locked skills and render the effective skill output.
+
+options:
+  --agent AGENT     Render only for one configured agent.
+
+notes:
+  sync is equivalent to updating locked skills, then rendering with overlays.
+  It writes installed store updates, lock metadata, rendered output, and agent
+  output copies when configured.
+
+examples:
+  upskill sync
+  upskill sync --agent codex`
+
+	helpInit = `usage: upskill init [name] [--dir DIR]
+
+summary:
+  Create a new skill bundle skeleton containing SKILL.md.
+
+arguments:
+  [name]            Skill name or ID. Defaults to the target directory name.
+
+options:
+  --dir DIR         Directory where the skill bundle should be created.
+
+notes:
+  init creates source files only. It does not install the skill into Upskill's
+  store or render agent output.
+
+examples:
+  upskill init redis-helper
+  upskill init --dir ~/Documents/Notes/Memory/Skills/redis-helper`
+
+	helpWorkon = `usage: upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
+
+summary:
+  Create or open a mutable draft for skill work.
+
+arguments:
+  <skill-name>      Draft skill ID to create or open.
+
+options:
+  --from SKILL      Create a version draft from an installed skill.
+  --template NAME   Use a named skeleton template for a new-skill draft.
+  --no-edit         Create or open the draft without launching an editor.
+
+notes:
+  Existing installed skills default to version drafts. Unknown names create
+  new-skill drafts. Drafts are not published until promoted or rendered.
+
+examples:
+  upskill workon redis
+  upskill workon new-skill --no-edit
+  upskill workon redis-v2 --from redis`
+
+	helpSourceList = `usage: upskill source list|ls [--json]
+
+summary:
+  List configured sources.
+
+options:
+  --json            Print machine-readable JSON including canonical_id, ref,
+                    and subpath.
+
+notes:
+  This command does not inspect upstream contents. Use source skills for that.
+  Unnamed sources are displayed by canonical source string.
+
+examples:
+  upskill source list
+  upskill source ls --json`
+
+	helpSourceAdd = `usage: upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
+
+summary:
+  Add, rename, or update a configured source without installing skills.
+
+arguments:
+  <source>          Local path, GitHub shorthand, Git URL, or GitHub tree URL.
+
+options:
+  --name NAME       Shortcut name for repeated commands.
+  --ref REF         Git branch, tag, or commit to read.
+  --subpath PATH    Relative directory inside the source to scan.
+
+notes:
+  Source identity is source location plus ref plus subpath. Re-adding the same
+  identity updates the existing record. Adding the same identity with a new
+  --name renames the source.
+
+examples:
+  upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian
+  upskill source add owner/repo --subpath skills --name team
+  upskill source add owner/repo --ref main --subpath skills`
+
+	helpSourceSkills = `usage: upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
+
+summary:
+  Inspect skills currently available in a source without installing them.
+
+arguments:
+  <source-or-name>  Configured source name, local path, GitHub shorthand, or Git
+                    URL.
+
+options:
+  --json            Print machine-readable JSON.
+  --ref REF         Git branch, tag, or commit to inspect.
+  --subpath PATH    Relative directory inside the source to scan.
+
+notes:
+  Output columns are SKILL, DESCRIPTION, and PATH. The SKILL column is the
+  installable skill ID; display names are shown only when they differ.
+  The command does not write the store, lock, source list, or rendered output.
+
+examples:
+  upskill source skills Obsidian
+  upskill source skills ~/Documents/Notes/Memory/Skills
+  upskill source skills owner/repo --subpath skills`
+
+	helpSourceFind = `usage: upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref REF] [--subpath PATH]
+
+summary:
+  Search skills currently available in one source without installing them.
+
+arguments:
+  <source-or-name>  Configured source name, local path, GitHub shorthand, or Git
+                    URL.
+  [query]           Optional search text. Omit it to list matching source skills
+                    up to --limit.
+
+options:
+  --json            Print machine-readable JSON.
+  --limit N         Maximum results to return. Default: 10.
+  --ref REF         Git branch, tag, or commit to inspect.
+  --subpath PATH    Relative directory inside the source to scan.
+
+notes:
+  This searches the requested live source by skill ID, display name,
+  description, SKILL.md body text, and path. It does not write the store, lock,
+  source list, or rendered output.
+  When --limit truncates text output, upskill prints showing N/M skills.
+
+examples:
+  upskill source find Obsidian redis
+  upskill source search ~/Documents/Notes/Memory/Skills writing --limit 5
+  upskill source find owner/repo cache --subpath skills --json`
+
+	helpSourceRemove = `usage: upskill source remove|rm <source-or-name>
+
+summary:
+  Remove a configured source record.
+
+arguments:
+  <source-or-name>  Source name or raw source string matching a configured
+                    source identity.
+
+notes:
+  Removing a source does not remove installed skills, lock entries, overlays,
+  drafts, or rendered output.
+
+examples:
+  upskill source rm Obsidian
+  upskill source remove ~/Documents/Notes/Memory/Skills`
+
+	helpDraftList = `usage: upskill draft list|ls [--json]
+
+summary:
+  List mutable draft bundles.
+
+options:
+  --json            Print machine-readable JSON.
+
+notes:
+  Drafts are local work in progress. Installed skills are listed with upskill
+  list.
+
+examples:
+  upskill draft list
+  upskill draft ls --json`
+
+	helpDraftCreate = `usage: upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME] [--no-edit]
+
+summary:
+  Create a draft bundle for new skill work or for editing an existing skill.
+
+arguments:
+  <skill-name>      Draft skill ID to create.
+
+options:
+  --from SKILL      Create from an installed base skill.
+  --from-rendered   Create from the rendered effective skill.
+  --template NAME   Use a named skeleton template for new skill drafts.
+  --no-edit         Do not launch an editor after creating the draft.
+
+examples:
+  upskill draft create redis-helper
+  upskill draft create redis-v2 --from redis
+  upskill draft create redis-effective --from redis --from-rendered`
+
+	helpDraftEdit = `usage: upskill draft edit <skill-name> [--file PATH] [--no-edit]
+
+summary:
+  Open or prepare a file inside an existing draft.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+options:
+  --file PATH       Relative draft file to edit. Default: SKILL.md.
+  --no-edit         Create or verify the file without launching an editor.
+
+examples:
+  upskill draft edit redis
+  upskill draft edit redis --file references/checklist.md`
+
+	helpDraftPath = `usage: upskill draft path <skill-name>
+
+summary:
+  Print the local filesystem path for a draft.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+examples:
+  upskill draft path redis`
+
+	helpDraftFiles = `usage: upskill draft files <skill-name> [--json]
+
+summary:
+  List files in a draft bundle.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+options:
+  --json            Print machine-readable JSON.
+
+examples:
+  upskill draft files redis
+  upskill draft files redis --json`
+
+	helpDraftRead = `usage: upskill draft read <skill-name> [--file PATH]
+
+summary:
+  Print a file from a draft bundle.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+options:
+  --file PATH       Relative draft file to read. Default: SKILL.md.
+
+examples:
+  upskill draft read redis
+  upskill draft read redis --file references/checklist.md`
+
+	helpDraftAddFile = `usage: upskill draft add-file <skill-name> <local-path> --path PATH [--no-edit]
+
+summary:
+  Copy a local file into a draft bundle.
+
+arguments:
+  <skill-name>      Draft skill ID.
+  <local-path>      Local file to copy into the draft.
+
+options:
+  --path PATH       Required relative destination path inside the draft.
+  --no-edit         Copy the file without launching an editor.
+
+examples:
+  upskill draft add-file redis ./notes.md --path references/notes.md
+  upskill draft add-file redis ./api.md --path references/api.md --no-edit`
+
+	helpDraftImport = `usage:
   upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-components N] [--inspect] [--no-edit]
   upskill draft import <skill-name> --archive-url URL --sha256 SHA256 [--strip-components N] [--inspect] [--no-edit]
   upskill draft import <skill-name> --file PATH --path DEST [--sha256 SHA256] [--no-edit]
-  upskill draft import <skill-name> --file-url URL --path DEST --sha256 SHA256 [--no-edit]`
+  upskill draft import <skill-name> --file-url URL --path DEST --sha256 SHA256 [--no-edit]
+
+summary:
+  Import files into a draft from a local file, remote file, local archive, or
+  remote archive.
+
+arguments:
+  <skill-name>      Draft skill ID. The draft is created if it does not exist.
+
+options:
+  --archive PATH          Local zip or tar archive to import.
+  --archive-url URL       Remote archive to download and import.
+  --file PATH             Local single file to import.
+  --file-url URL          Remote single file to download and import.
+  --path DEST             Required destination path for single-file imports.
+  --sha256 SHA256         Expected SHA-256 checksum.
+  --strip-components N    Remove leading path components from archive entries.
+  --inspect               Show what would import without writing files.
+  --no-edit               Do not launch an editor after importing.
+
+notes:
+  Remote imports require --sha256. Existing files are not overwritten during
+  inspection.
+
+examples:
+  upskill draft import redis --file ./api.md --path references/api.md
+  upskill draft import redis --archive ./bundle.zip --strip-components 1
+  upskill draft import redis --file-url https://example.com/api.md --path references/api.md --sha256 HASH`
+
+	helpDraftRender = `usage: upskill draft render <skill-name> [--agent AGENT] [--copy=false] [--apply-overlays]
+
+summary:
+  Render a draft into effective skill output.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+options:
+  --agent AGENT       Render for one configured agent.
+  --copy=false        Render to Upskill's rendered directory without copying to
+                      agent output directories.
+  --apply-overlays    Apply existing overlays while rendering the draft.
+
+examples:
+  upskill draft render redis
+  upskill draft render redis --agent codex --copy=false
+  upskill draft render redis --apply-overlays`
+
+	helpDraftDiff = `usage: upskill draft diff <skill-name>
+
+summary:
+  Show changes between a draft and its parent or skeleton baseline.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+examples:
+  upskill draft diff redis`
+
+	helpDraftRebase = `usage: upskill draft rebase <skill-name>
+
+summary:
+  Refresh a version draft's parent snapshot from the current installed skill.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+notes:
+  Rebase is for version drafts. It does not promote draft changes upstream.
+
+examples:
+  upskill draft rebase redis`
+
+	helpDraftPromote = `usage: upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
+
+summary:
+  Copy a draft bundle into an upstream local source checkout.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+options:
+  --to PATH         Destination directory in a local source checkout.
+  --to-source NAME  Configured local source name to promote into.
+  --dry-run         Show planned writes without changing files.
+
+notes:
+  Promotion writes source files. It does not install or render the promoted
+  skill; run upskill add or sync afterward when needed.
+
+examples:
+  upskill draft promote redis --to-source Obsidian --dry-run
+  upskill draft promote redis --to ~/Documents/Notes/Memory/Skills/redis`
+
+	helpDraftRemove = `usage: upskill draft remove|rm <skill-name>
+
+summary:
+  Delete a local draft bundle.
+
+arguments:
+  <skill-name>      Draft skill ID.
+
+notes:
+  Removing a draft does not remove installed skills, sources, overlays, or
+  rendered output.
+
+examples:
+  upskill draft rm redis`
+
+	helpOverlayList = `usage: upskill overlay list|ls [--skill NAME] [--agent AGENT] [--json]
+
+summary:
+  List local overlay files.
+
+options:
+  --skill NAME      Show overlays for one installed skill.
+  --agent AGENT     Show overlays for one agent.
+  --json            Print machine-readable JSON.
+
+examples:
+  upskill overlay list
+  upskill overlay ls --skill redis
+  upskill overlay list --agent codex --json`
+
+	helpOverlayAdd = `usage: upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]
+
+summary:
+  Create an overlay file for an installed skill.
+
+arguments:
+  <skill-name>      Installed skill ID.
+
+options:
+  --agent AGENT     Create an agent-specific overlay.
+  --path            Print the overlay path after creating it.
+  --no-edit         Create the overlay without launching an editor.
+
+examples:
+  upskill overlay add redis
+  upskill overlay add redis --agent codex --path`
+
+	helpOverlayEdit = `usage: upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation root-append|append|files|replace|template|patch] [--no-edit]
+
+summary:
+  Edit an overlay operation file for an installed skill.
+
+arguments:
+  <skill-name>      Installed skill ID.
+
+options:
+  --agent AGENT       Edit an agent-specific overlay.
+  --file PATH         Relative file path for file-scoped operations.
+  --operation OP      Overlay operation. Default: root-append.
+  --no-edit           Create or verify the overlay file without launching an
+                      editor.
+
+notes:
+  append adds to a base file, files adds new files, replace replaces files,
+  template adds template overrides, patch stores patch files, and root-append
+  appends to SKILL.md.
+
+examples:
+  upskill overlay edit redis
+  upskill overlay edit redis --agent codex
+  upskill overlay edit redis --operation files --file references/checklist.md`
+
+	helpOverlayDiff = `usage: upskill overlay diff <skill-name> [--agent AGENT]
+
+summary:
+  Show the rendered changes produced by overlays.
+
+arguments:
+  <skill-name>      Installed skill ID.
+
+options:
+  --agent AGENT     Include overlays for one agent.
+
+examples:
+  upskill overlay diff redis
+  upskill overlay diff redis --agent codex`
+
+	helpRender = `usage: upskill render [skill-name] [--agent AGENT] [--copy=false] [--print] [--base-only]
+
+summary:
+  Render installed skills with overlays into effective skill output.
+
+arguments:
+  [skill-name]      Optional installed skill ID. Omit to render all installed
+                    skills.
+
+options:
+  --agent AGENT     Render for one configured agent.
+  --copy=false      Render without copying to agent output directories.
+  --print           Print one rendered skill file to stdout.
+  --base-only       With --print, print the installed base file without overlays.
+
+notes:
+  Rendering writes Upskill's rendered directory. Copying writes configured agent
+  output directories.
+  If the base skill, overlays, mode, and agent are unchanged, render reuses the
+  existing rendered directory.
+
+examples:
+  upskill render redis --agent codex
+  upskill render --copy=false
+  upskill render redis --print --base-only`
+
+	helpMCP = `usage: upskill mcp
+
+summary:
+  Run the Upskill MCP server over stdin and stdout.
+
+notes:
+  MCP mode is intended for agent integrations. It reads JSON-RPC messages from
+  stdin and writes responses to stdout.
+
+examples:
+  upskill mcp`
+
+	helpStatus = `usage: upskill status
+
+summary:
+  Show local Upskill state paths and counts.
+
+notes:
+  status reads configured store, overlay, and draft state. It does not create
+  missing directories; use doctor for that.
+
+examples:
+  upskill status`
+
+	helpDoctor = `usage: upskill doctor
+
+summary:
+  Check and create Upskill's managed local directories.
+
+notes:
+  doctor creates the home, store, overlays, drafts, imports, and rendered
+  directories when needed. It does not install or update skills.
+
+examples:
+  upskill doctor`
 )
 
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -93,7 +717,7 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runUse(cfg, args[1:], stdout, stderr)
 	case "list", "ls":
 		return runList(cfg, args[1:], stdout, stderr)
-	case "find":
+	case "find", "search":
 		return runFind(cfg, args[1:], stdout, stderr)
 	case "remove", "rm":
 		return runRemove(cfg, args[1:], stdout, stderr)
@@ -107,8 +731,6 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runWorkon(cfg, args[1:], stdout, stderr)
 	case "source":
 		return runSource(cfg, args[1:], stdout, stderr)
-	case "vault":
-		return runVault(cfg, args[1:], stdout, stderr)
 	case "draft":
 		return runDraft(cfg, args[1:], stdout, stderr)
 	case "overlay":
@@ -144,6 +766,22 @@ func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 	}); err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 2
+	}
+	if _, ok := library.ResolveNamedSource(cfg, source); !ok {
+		canonical, key, err := library.CanonicalSource(source, "", ref, subpath)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		if cfg.Sources == nil {
+			cfg.Sources = map[string]config.Source{}
+		}
+		canonical, key, _ = upsertSourceRecord(cfg.Sources, canonical)
+		cfg.Sources[key] = canonical
+		if err := config.SaveSources(cfg, cfg.Sources); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
 	}
 	installed, err := library.InstallSource(cfg, source, library.InstallOptions{SkillFilter: skill, Ref: ref, Subpath: subpath})
 	if err != nil {
@@ -216,10 +854,16 @@ func runList(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 		fmt.Fprintln(stdout, "no skills installed")
 		return 0
 	}
+	rows := make([][]string, 0, len(skills))
 	for _, skill := range skills {
 		overlays := overlay.Chain(cfg, skill.StoreName, agent)
-		fmt.Fprintf(stdout, "%s\t%s\toverlays:%d\n", skill.StoreName, skill.Description, len(overlays))
+		rows = append(rows, []string{skill.StoreName, skill.Description, strconv.Itoa(len(overlays))})
 	}
+	printTable(stdout, []tableColumn{
+		{Header: "SKILL", MaxWidth: 36},
+		{Header: "DESCRIPTION", MaxWidth: 64},
+		{Header: "OVERLAYS", MaxWidth: 8},
+	}, rows)
 	return 0
 }
 
@@ -235,7 +879,7 @@ func runFind(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 		return 2
 	}
 	query := strings.Join(positionals, " ")
-	skills, err := library.FindInstalled(cfg, query, limit)
+	skills, total, err := library.FindInstalled(cfg, query, limit)
 	if err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
@@ -249,9 +893,15 @@ func runFind(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 		fmt.Fprintln(stdout, "no matching skills")
 		return 0
 	}
+	printSearchPageSummary(stdout, len(skills), total)
+	rows := make([][]string, 0, len(skills))
 	for _, skill := range skills {
-		fmt.Fprintf(stdout, "%s\t%s\n", skill.StoreName, skill.Description)
+		rows = append(rows, []string{skill.StoreName, skill.Description})
 	}
+	printTable(stdout, []tableColumn{
+		{Header: "SKILL", MaxWidth: 36},
+		{Header: "DESCRIPTION", MaxWidth: 72},
+	}, rows)
 	return 0
 }
 
@@ -376,7 +1026,7 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		return 0
 	}
 	switch args[0] {
-	case "list":
+	case "list", "ls":
 		jsonOut := false
 		if err := parseFlags(args[1:], map[string]func(string) error{
 			"--json": func(_ string) error { jsonOut = true; return nil },
@@ -385,19 +1035,51 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 			return 2
 		}
 		if jsonOut {
-			data, _ := json.MarshalIndent(cfg.Sources, "", "  ")
+			data, _ := json.MarshalIndent(sourceRows(cfg.Sources), "", "  ")
 			fmt.Fprintln(stdout, string(data))
 			return 0
 		}
-		names := sortedSourceNames(cfg.Sources)
-		if len(names) == 0 {
+		sources := config.SourceRecords(cfg.Sources)
+		if len(sources) == 0 {
 			fmt.Fprintln(stdout, "no sources")
 			return 0
 		}
-		for _, name := range names {
-			src := cfg.Sources[name]
-			fmt.Fprintf(stdout, "%s\t%s\n", name, src.Source)
+		hasRef := false
+		hasSubpath := false
+		for _, src := range sources {
+			if src.Ref != "" {
+				hasRef = true
+			}
+			if src.Subpath != "" {
+				hasSubpath = true
+			}
 		}
+		columns := []tableColumn{
+			{Header: "SOURCE", MaxWidth: 48},
+			{Header: "LOCATION", MaxWidth: 72},
+		}
+		if hasRef {
+			columns = append(columns, tableColumn{Header: "REF", MaxWidth: 20})
+		}
+		if hasSubpath {
+			columns = append(columns, tableColumn{Header: "SUBPATH", MaxWidth: 36})
+		}
+		rows := make([][]string, 0, len(sources))
+		for _, src := range sources {
+			location := src.Source
+			if src.Name == "" && config.SourceDisplayName(src) == src.Source {
+				location = ""
+			}
+			row := []string{config.SourceDisplayName(src), location}
+			if hasRef {
+				row = append(row, src.Ref)
+			}
+			if hasSubpath {
+				row = append(row, src.Subpath)
+			}
+			rows = append(rows, row)
+		}
+		printTable(stdout, columns, rows)
 		return 0
 	case "add":
 		if len(args) < 2 {
@@ -414,22 +1096,128 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 2
 		}
-		if name == "" {
-			name = defaultSourceName(source)
+		canonical, _, err := library.CanonicalSource(source, name, ref, subpath)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
 		}
-		cfg.Sources[name] = config.Source{Name: name, Source: source, Ref: ref, Subpath: subpath}
+		if cfg.Sources == nil {
+			cfg.Sources = map[string]config.Source{}
+		}
+		canonical, key, updated := upsertSourceRecord(cfg.Sources, canonical)
+		cfg.Sources[key] = canonical
 		if err := config.SaveSources(cfg, cfg.Sources); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "added source %s\n", name)
+		verb := "added"
+		if updated {
+			verb = "updated"
+		}
+		fmt.Fprintf(stdout, "%s source %s\n", verb, config.SourceDisplayName(canonical))
 		return 0
-	case "remove":
+	case "skills":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "upskill: source remove requires <name>")
+			fmt.Fprintln(stderr, "upskill: source skills requires <source-or-name>")
 			return 2
 		}
-		delete(cfg.Sources, args[1])
+		source := args[1]
+		jsonOut := false
+		ref, subpath := "", ""
+		if err := parseFlags(args[2:], map[string]func(string) error{
+			"--json":    func(_ string) error { jsonOut = true; return nil },
+			"--ref":     func(v string) error { ref = v; return nil },
+			"--subpath": func(v string) error { subpath = v; return nil },
+		}); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		skills, err := library.InspectSource(cfg, source, library.InstallOptions{Ref: ref, Subpath: subpath})
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		if jsonOut {
+			data, _ := json.MarshalIndent(skills, "", "  ")
+			fmt.Fprintln(stdout, string(data))
+			return 0
+		}
+		rows := make([][]string, 0, len(skills))
+		for _, skill := range skills {
+			rows = append(rows, []string{sourceSkillDisplay(skill), skill.Description, skill.SkillPath})
+		}
+		printTable(stdout, []tableColumn{
+			{Header: "SKILL", MaxWidth: 40},
+			{Header: "DESCRIPTION", MaxWidth: 58},
+			{Header: "PATH", MaxWidth: 44},
+		}, rows)
+		return 0
+	case "find", "search":
+		if len(args) < 2 {
+			fmt.Fprintf(stderr, "upskill: source %s requires <source-or-name>\n", args[0])
+			return 2
+		}
+		source := args[1]
+		jsonOut := false
+		limit := 10
+		ref, subpath := "", ""
+		positionals := []string{}
+		if err := parseFlags(args[2:], map[string]func(string) error{
+			"--json":    func(_ string) error { jsonOut = true; return nil },
+			"--limit":   func(v string) error { n, err := strconv.Atoi(v); limit = n; return err },
+			"--ref":     func(v string) error { ref = v; return nil },
+			"--subpath": func(v string) error { subpath = v; return nil },
+		}, &positionals); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		query := strings.Join(positionals, " ")
+		skills, total, err := library.SearchSource(cfg, source, query, library.InstallOptions{Ref: ref, Subpath: subpath}, limit)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		if jsonOut {
+			data, _ := json.MarshalIndent(skills, "", "  ")
+			fmt.Fprintln(stdout, string(data))
+			return 0
+		}
+		if len(skills) == 0 {
+			fmt.Fprintln(stdout, "no matching skills")
+			return 0
+		}
+		printSearchPageSummary(stdout, len(skills), total)
+		rows := make([][]string, 0, len(skills))
+		for _, skill := range skills {
+			rows = append(rows, []string{sourceSkillDisplay(skill), skill.Description, skill.SkillPath})
+		}
+		printTable(stdout, []tableColumn{
+			{Header: "SKILL", MaxWidth: 40},
+			{Header: "DESCRIPTION", MaxWidth: 58},
+			{Header: "PATH", MaxWidth: 44},
+		}, rows)
+		return 0
+	case "remove", "rm":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "upskill: source remove requires <source-or-name>")
+			return 2
+		}
+		key := args[1]
+		if _, ok := cfg.Sources[key]; !ok {
+			if canonical, canonicalKey, err := library.CanonicalSource(args[1], "", "", ""); err == nil {
+				key = canonicalKey
+				if _, ok := cfg.Sources[key]; !ok {
+					if existingKey, ok := findSourceRecordByIdentity(cfg.Sources, canonical); ok {
+						key = existingKey
+					}
+				}
+			}
+		}
+		if _, ok := cfg.Sources[key]; !ok {
+			fmt.Fprintf(stderr, "upskill: source not found: %s\n", args[1])
+			return 1
+		}
+		delete(cfg.Sources, key)
 		if err := config.SaveSources(cfg, cfg.Sources); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
@@ -440,156 +1228,6 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		fmt.Fprintf(stderr, "upskill: unknown source command: %s\n", args[0])
 		return 2
 	}
-}
-
-type vaultStatus struct {
-	Name            string `json:"name"`
-	Root            string `json:"root"`
-	SourceDir       string `json:"source_dir"`
-	OverlaysDir     string `json:"overlays_dir"`
-	DraftsDir       string `json:"drafts_dir"`
-	ImportsDir      string `json:"imports_dir"`
-	InstalledSkills int    `json:"installed_skills"`
-	SourceSkills    int    `json:"source_skills"`
-	Overlays        int    `json:"overlays"`
-	Drafts          int    `json:"drafts"`
-}
-
-func runVault(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
-	if len(args) == 0 || isHelp(args[0]) {
-		printVaultHelp(stdout)
-		return 0
-	}
-	switch args[0] {
-	case "init":
-		name := ""
-		sourceDirName := "source"
-		noConfig := false
-		positionals := []string{}
-		if err := parseFlags(args[1:], map[string]func(string) error{
-			"--name":       func(v string) error { name = v; return nil },
-			"--source-dir": func(v string) error { sourceDirName = v; return nil },
-			"--no-config":  func(_ string) error { noConfig = true; return nil },
-		}, &positionals); err != nil {
-			fmt.Fprintf(stderr, "upskill: %v\n", err)
-			return 2
-		}
-		if len(positionals) == 0 {
-			fmt.Fprintln(stderr, "upskill: vault init requires <path>")
-			return 2
-		}
-		root, _ := filepath.Abs(positionals[0])
-		sourceDir, err := pathutil.SafeJoin(root, sourceDirName)
-		if err != nil {
-			fmt.Fprintf(stderr, "upskill: %v\n", err)
-			return 2
-		}
-		layout := map[string]string{
-			"source":   sourceDir,
-			"overlays": filepath.Join(root, "overlays"),
-			"drafts":   filepath.Join(root, "drafts"),
-			"imports":  filepath.Join(root, "imports"),
-		}
-		for _, dir := range layout {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				fmt.Fprintf(stderr, "upskill: %v\n", err)
-				return 1
-			}
-		}
-		if name == "" {
-			name = defaultSourceName(root)
-		}
-		if !noConfig {
-			cfg.OverlaysDir = layout["overlays"]
-			cfg.DraftsDir = layout["drafts"]
-			cfg.ImportsDir = layout["imports"]
-			cfg.ImportDirs = appendUnique(cfg.ImportDirs, layout["imports"])
-			cfg.SourceIgnore = appendUnique(config.DefaultSourceIgnore, cfg.SourceIgnore...)
-			if cfg.Sources == nil {
-				cfg.Sources = map[string]config.Source{}
-			}
-			cfg.Sources[name] = config.Source{Name: name, Source: sourceDir}
-			if err := config.SaveConfig(cfg); err != nil {
-				fmt.Fprintf(stderr, "upskill: %v\n", err)
-				return 1
-			}
-		}
-		fmt.Fprintf(stdout, "initialized vault %s\n", root)
-		fmt.Fprintf(stdout, "source %s -> %s\n", name, sourceDir)
-		return 0
-	case "status":
-		name := ""
-		jsonOut := false
-		if err := parseFlags(args[1:], map[string]func(string) error{
-			"--name": func(v string) error { name = v; return nil },
-			"--json": func(_ string) error {
-				jsonOut = true
-				return nil
-			},
-		}); err != nil {
-			fmt.Fprintf(stderr, "upskill: %v\n", err)
-			return 2
-		}
-		status, err := buildVaultStatus(cfg, name)
-		if err != nil {
-			fmt.Fprintf(stderr, "upskill: %v\n", err)
-			return 1
-		}
-		if jsonOut {
-			data, _ := json.MarshalIndent(status, "", "  ")
-			fmt.Fprintln(stdout, string(data))
-			return 0
-		}
-		fmt.Fprintf(stdout, "name: %s\nroot: %s\nsource: %s\ninstalled skills: %d\nsource skills: %d\noverlays: %d\ndrafts: %d\n", status.Name, status.Root, status.SourceDir, status.InstalledSkills, status.SourceSkills, status.Overlays, status.Drafts)
-		return 0
-	default:
-		fmt.Fprintf(stderr, "upskill: unknown vault command: %s\n", args[0])
-		return 2
-	}
-}
-
-func buildVaultStatus(cfg config.Config, name string) (vaultStatus, error) {
-	sourceName := name
-	if sourceName == "" {
-		names := sortedSourceNames(cfg.Sources)
-		if len(names) == 0 {
-			return vaultStatus{}, fmt.Errorf("no sources configured")
-		}
-		sourceName = names[0]
-	}
-	sourceDir, err := library.ResolveLocalSourceDestination(cfg, sourceName)
-	if err != nil {
-		return vaultStatus{}, err
-	}
-	root := filepath.Dir(sourceDir)
-	installed, err := library.ListInstalled(cfg)
-	if err != nil {
-		return vaultStatus{}, err
-	}
-	sourceSkills, err := library.DiscoverSkillsWithIgnore(sourceDir, "", cfg.SourceIgnore)
-	if err != nil {
-		return vaultStatus{}, err
-	}
-	overlays, err := overlay.List(cfg, "", "")
-	if err != nil {
-		return vaultStatus{}, err
-	}
-	drafts, err := draft.List(cfg)
-	if err != nil {
-		return vaultStatus{}, err
-	}
-	return vaultStatus{
-		Name:            sourceName,
-		Root:            root,
-		SourceDir:       sourceDir,
-		OverlaysDir:     cfg.OverlaysDir,
-		DraftsDir:       cfg.DraftsDir,
-		ImportsDir:      cfg.ImportsDir,
-		InstalledSkills: len(installed),
-		SourceSkills:    len(sourceSkills),
-		Overlays:        len(overlays),
-		Drafts:          len(drafts),
-	}, nil
 }
 
 func runWorkon(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -628,7 +1266,7 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 		return 0
 	}
 	switch args[0] {
-	case "list":
+	case "list", "ls":
 		jsonOut := false
 		if err := parseFlags(args[1:], map[string]func(string) error{
 			"--json": func(_ string) error { jsonOut = true; return nil },
@@ -650,9 +1288,15 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 			fmt.Fprintln(stdout, "no drafts")
 			return 0
 		}
+		rows := make([][]string, 0, len(items))
 		for _, item := range items {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", item.ID, item.Metadata.Type, item.Path)
+			rows = append(rows, []string{item.ID, item.Metadata.Type, item.Path})
 		}
+		printTable(stdout, []tableColumn{
+			{Header: "DRAFT", MaxWidth: 36},
+			{Header: "TYPE", MaxWidth: 16},
+			{Header: "PATH", MaxWidth: 72},
+		}, rows)
 		return 0
 	case "create":
 		if len(args) < 2 {
@@ -966,7 +1610,7 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 		data, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Fprintln(stdout, string(data))
 		return 0
-	case "remove":
+	case "remove", "rm":
 		if len(args) < 2 {
 			fmt.Fprintln(stderr, "upskill: draft remove requires <skill-name>")
 			return 2
@@ -1263,7 +1907,7 @@ func runOverlay(cfg config.Config, args []string, stdout io.Writer, stderr io.Wr
 		return 0
 	}
 	switch args[0] {
-	case "list":
+	case "list", "ls":
 		var skill, agent string
 		jsonOut := false
 		if err := parseFlags(args[1:], map[string]func(string) error{
@@ -1288,13 +1932,20 @@ func runOverlay(cfg config.Config, args []string, stdout io.Writer, stderr io.Wr
 			fmt.Fprintln(stdout, "no overlays")
 			return 0
 		}
+		tableRows := make([][]string, 0, len(rows))
 		for _, row := range rows {
 			agentName := row.Agent
 			if agentName == "" {
 				agentName = "all"
 			}
-			fmt.Fprintf(stdout, "%s\t%s\t%d\t%s\n", row.Skill, agentName, row.Files, row.Path)
+			tableRows = append(tableRows, []string{row.Skill, agentName, strconv.Itoa(row.Files), row.Path})
 		}
+		printTable(stdout, []tableColumn{
+			{Header: "SKILL", MaxWidth: 36},
+			{Header: "AGENT", MaxWidth: 20},
+			{Header: "FILES", MaxWidth: 8},
+			{Header: "PATH", MaxWidth: 72},
+		}, tableRows)
 		return 0
 	case "add":
 		if len(args) < 2 {
@@ -1544,46 +2195,245 @@ func printResults(w io.Writer, results []render.Result) {
 		if len(result.CopiedTo) > 0 {
 			copied = strings.Join(result.CopiedTo, ", ")
 		}
+		if result.Skipped {
+			copied = "unchanged; " + copied
+		}
 		fmt.Fprintf(w, "%s [%s] -> %s (%s)\n", result.Skill, agent, result.RenderedPath, copied)
 	}
 }
 
-func sortedSourceNames(sources map[string]config.Source) []string {
-	names := make([]string, 0, len(sources))
-	for name := range sources {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+type tableColumn struct {
+	Header   string
+	MaxWidth int
 }
 
-func appendUnique(values []string, extra ...string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(values)+len(extra))
-	for _, value := range append(append([]string{}, values...), extra...) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
+func printTable(w io.Writer, columns []tableColumn, rows [][]string) {
+	if len(columns) == 0 || len(rows) == 0 {
+		return
+	}
+	widths := tableWidths(columns, rows)
+	printTableLine(w, columnHeaders(columns), widths)
+	printTableLine(w, tableRules(widths), widths)
+	for _, row := range rows {
+		wrapped := wrapTableRow(row, widths)
+		for line := 0; line < tableRowHeight(wrapped); line++ {
+			cells := make([]string, len(columns))
+			for col := range columns {
+				if col < len(wrapped) && line < len(wrapped[col]) {
+					cells[col] = wrapped[col][line]
+				}
+			}
+			printTableLine(w, cells, widths)
 		}
-		if _, ok := seen[value]; ok {
-			continue
+	}
+}
+
+func printSearchPageSummary(w io.Writer, shown int, total int) {
+	if total > shown {
+		fmt.Fprintf(w, "showing %d/%d skills\n", shown, total)
+	}
+}
+
+func tableWidths(columns []tableColumn, rows [][]string) []int {
+	widths := make([]int, len(columns))
+	for i, column := range columns {
+		widths[i] = len(column.Header)
+	}
+	for _, row := range rows {
+		for i := range columns {
+			if i >= len(row) {
+				continue
+			}
+			for _, line := range strings.Split(row[i], "\n") {
+				if width := len(line); width > widths[i] {
+					widths[i] = width
+				}
+			}
 		}
-		seen[value] = struct{}{}
-		out = append(out, value)
+	}
+	for i, column := range columns {
+		if column.MaxWidth > 0 && widths[i] > column.MaxWidth {
+			widths[i] = column.MaxWidth
+		}
+		if widths[i] < len(column.Header) {
+			widths[i] = len(column.Header)
+		}
+	}
+	return widths
+}
+
+func columnHeaders(columns []tableColumn) []string {
+	headers := make([]string, len(columns))
+	for i, column := range columns {
+		headers[i] = column.Header
+	}
+	return headers
+}
+
+func tableRules(widths []int) []string {
+	rules := make([]string, len(widths))
+	for i, width := range widths {
+		rules[i] = strings.Repeat("-", width)
+	}
+	return rules
+}
+
+func printTableLine(w io.Writer, cells []string, widths []int) {
+	for i, width := range widths {
+		if i > 0 {
+			fmt.Fprint(w, "  ")
+		}
+		cell := ""
+		if i < len(cells) {
+			cell = cells[i]
+		}
+		fmt.Fprint(w, padRight(cell, width))
+	}
+	fmt.Fprintln(w)
+}
+
+func wrapTableRow(row []string, widths []int) [][]string {
+	wrapped := make([][]string, len(widths))
+	for i, width := range widths {
+		cell := ""
+		if i < len(row) {
+			cell = row[i]
+		}
+		wrapped[i] = wrapCell(cell, width)
+	}
+	return wrapped
+}
+
+func tableRowHeight(wrapped [][]string) int {
+	height := 1
+	for _, lines := range wrapped {
+		if len(lines) > height {
+			height = len(lines)
+		}
+	}
+	return height
+}
+
+func wrapCell(text string, width int) []string {
+	if width <= 0 {
+		return []string{text}
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return []string{""}
+	}
+	var out []string
+	for _, rawLine := range strings.Split(text, "\n") {
+		out = append(out, wrapLine(rawLine, width)...)
 	}
 	return out
 }
 
-func defaultSourceName(source string) string {
-	source = strings.TrimSuffix(source, ".git")
-	source = strings.Trim(source, "/")
-	if source == "" {
-		return "source"
+func wrapLine(text string, width int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
 	}
-	parts := strings.FieldsFunc(source, func(r rune) bool {
-		return r == '/' || r == ':' || r == '\\'
-	})
-	return library.NormalizeName(parts[len(parts)-1])
+	var lines []string
+	line := ""
+	for _, word := range words {
+		for len(word) > width {
+			if line != "" {
+				lines = append(lines, line)
+				line = ""
+			}
+			lines = append(lines, word[:width])
+			word = word[width:]
+		}
+		if line == "" {
+			line = word
+			continue
+		}
+		if len(line)+1+len(word) <= width {
+			line += " " + word
+			continue
+		}
+		lines = append(lines, line)
+		line = word
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func padRight(text string, width int) string {
+	if len(text) >= width {
+		return text
+	}
+	return text + strings.Repeat(" ", width-len(text))
+}
+
+func sourceSkillDisplay(skill library.SourceSkill) string {
+	if skill.Name == "" || library.NormalizeName(skill.Name) == skill.StoreName {
+		return skill.StoreName
+	}
+	return fmt.Sprintf("%s (%s)", skill.StoreName, skill.Name)
+}
+
+type sourceRow struct {
+	Name        string `json:"name,omitempty"`
+	DisplayName string `json:"display_name"`
+	Source      string `json:"source"`
+	Ref         string `json:"ref,omitempty"`
+	Subpath     string `json:"subpath,omitempty"`
+	CanonicalID string `json:"canonical_id"`
+}
+
+func sourceRows(sources map[string]config.Source) []sourceRow {
+	records := config.SourceRecords(sources)
+	rows := make([]sourceRow, 0, len(records))
+	for _, source := range records {
+		rows = append(rows, sourceRow{
+			Name:        source.Name,
+			DisplayName: config.SourceDisplayName(source),
+			Source:      source.Source,
+			Ref:         source.Ref,
+			Subpath:     source.Subpath,
+			CanonicalID: config.SourceKey(source),
+		})
+	}
+	return rows
+}
+
+func upsertSourceRecord(sources map[string]config.Source, source config.Source) (config.Source, string, bool) {
+	if existingKey, ok := findSourceRecordByIdentity(sources, source); ok {
+		existing := sources[existingKey]
+		if source.Name == "" && existing.Name != "" {
+			source.Name = existing.Name
+		}
+		key := config.SourceKey(source)
+		if existingKey != key {
+			delete(sources, existingKey)
+		}
+		return source, key, true
+	}
+	return source, config.SourceKey(source), false
+}
+
+func findSourceRecordByIdentity(sources map[string]config.Source, source config.Source) (string, bool) {
+	keys := make([]string, 0, len(sources))
+	for key := range sources {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if sameSourceIdentity(sources[key], source) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+func sameSourceIdentity(left config.Source, right config.Source) bool {
+	return left.Source == right.Source &&
+		left.Ref == right.Ref &&
+		filepath.ToSlash(left.Subpath) == filepath.ToSlash(right.Subpath)
 }
 
 func parseFlags(args []string, handlers map[string]func(string) error, positionals ...*[]string) error {
@@ -1623,7 +2473,7 @@ func parseFlagsWithValues(args []string, handlers map[string]func(string) error,
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--source-dir", "--operation":
+	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--operation":
 		return true
 	default:
 		return false
@@ -1653,7 +2503,7 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printDirectHelp(args, w, helpUse)
 	case "list", "ls":
 		return printDirectHelp(args, w, helpList)
-	case "find":
+	case "find", "search":
 		return printDirectHelp(args, w, helpFind)
 	case "remove", "rm":
 		return printDirectHelp(args, w, helpRemove)
@@ -1669,12 +2519,10 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printNestedHelp(args[1:], w, printSourceHelp, map[string]string{
 			"list":   helpSourceList,
 			"add":    helpSourceAdd,
+			"skills": helpSourceSkills,
+			"find":   helpSourceFind,
+			"search": helpSourceFind,
 			"remove": helpSourceRemove,
-		})
-	case "vault":
-		return printNestedHelp(args[1:], w, printVaultHelp, map[string]string{
-			"init":   helpVaultInit,
-			"status": helpVaultStatus,
 		})
 	case "draft":
 		return printNestedHelp(args[1:], w, printDraftHelp, map[string]string{
@@ -1729,7 +2577,7 @@ func printNestedHelp(args []string, w io.Writer, parent func(io.Writer), usages 
 		return true
 	}
 	if len(args) > 1 && isHelp(args[1]) {
-		usage, ok := usages[args[0]]
+		usage, ok := nestedUsage(usages, args[0])
 		if !ok {
 			return false
 		}
@@ -1737,6 +2585,22 @@ func printNestedHelp(args []string, w io.Writer, parent func(io.Writer), usages 
 		return true
 	}
 	return false
+}
+
+func nestedUsage(usages map[string]string, command string) (string, bool) {
+	if usage, ok := usages[command]; ok {
+		return usage, true
+	}
+	switch command {
+	case "ls":
+		usage, ok := usages["list"]
+		return usage, ok
+	case "rm":
+		usage, ok := usages["remove"]
+		return usage, ok
+	default:
+		return "", false
+	}
 }
 
 func printUsage(w io.Writer, usage string) {
@@ -1756,8 +2620,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  sync     Update skills and render overlays")
 	fmt.Fprintln(w, "  init     Create a new skill bundle")
 	fmt.Fprintln(w, "  workon   Create or open a mutable draft")
-	fmt.Fprintln(w, "  source   Manage named skill sources")
-	fmt.Fprintln(w, "  vault    Manage filesystem skill vaults")
+	fmt.Fprintln(w, "  source   Manage skill sources")
 	fmt.Fprintln(w, "  draft    Manage mutable skill drafts")
 	fmt.Fprintln(w, "  overlay  Manage skill overlays")
 	fmt.Fprintln(w, "  render   Render skills with overlays")
@@ -1784,21 +2647,13 @@ func printSourceHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage: upskill source <command> [args]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "commands:")
-	fmt.Fprintln(w, "  list    List named sources")
-	fmt.Fprintln(w, "  add     Add or update a named source")
-	fmt.Fprintln(w, "  remove  Remove a named source")
+	fmt.Fprintln(w, "  list    List configured sources")
+	fmt.Fprintln(w, "  add     Add, rename, or update a source")
+	fmt.Fprintln(w, "  skills  List skills available in a source")
+	fmt.Fprintln(w, "  find    Search skills in a source")
+	fmt.Fprintln(w, "  remove  Remove a configured source")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, `Run "upskill source <command> --help" for command help.`)
-}
-
-func printVaultHelp(w io.Writer) {
-	fmt.Fprintln(w, "usage: upskill vault <command> [args]")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "commands:")
-	fmt.Fprintln(w, "  init    Create a vault layout and configure it as a local source")
-	fmt.Fprintln(w, "  status  Show vault source, overlay, draft, and import state")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, `Run "upskill vault <command> --help" for command help.`)
 }
 
 func printDraftHelp(w io.Writer) {

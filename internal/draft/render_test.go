@@ -111,11 +111,11 @@ func TestDiffRebaseAndPromote(t *testing.T) {
 	if !dryRun.DryRun || dryRun.Destination != filepath.Join(destRoot, "demo") || len(dryRun.Files) != 1 {
 		t.Fatalf("dry run = %#v", dryRun)
 	}
-	sourceDryRun, err := Promote(cfg, "demo", PromoteOptions{ToPath: destRoot, ToSource: "vault", DryRun: true})
+		sourceDryRun, err := Promote(cfg, "demo", PromoteOptions{ToPath: destRoot, ToSource: "local", DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sourceDryRun.Source != "vault" || !strings.Contains(strings.Join(sourceDryRun.NextSteps, "\n"), "upskill add vault") {
+		if sourceDryRun.Source != "local" || !strings.Contains(strings.Join(sourceDryRun.NextSteps, "\n"), "upskill add local") {
 		t.Fatalf("source dry run = %#v", sourceDryRun)
 	}
 	if _, err := os.Stat(filepath.Join(destRoot, "demo")); !os.IsNotExist(err) {

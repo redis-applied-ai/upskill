@@ -53,6 +53,7 @@ type Result struct {
 	CopiedTo     []string
 	Overlays     []string
 	Mode         string
+	Skipped      bool
 }
 
 type marker struct {
@@ -61,6 +62,7 @@ type marker struct {
 	Agent         string   `json:"agent,omitempty"`
 	Mode          string   `json:"mode"`
 	BasePath      string   `json:"base_path"`
+	BaseHash      string   `json:"base_hash"`
 	Overlays      []string `json:"overlays"`
 	OverlayHash   string   `json:"overlay_hash"`
 	RenderedAt    string   `json:"rendered_at"`
@@ -143,6 +145,30 @@ func (r Renderer) renderOne(skill string, agent string, baseOnly bool) (Result, 
 		agentKey = "generic"
 	}
 	finalDir := filepath.Join(r.Config.RenderedDir, agentKey, skill)
+	overlays := []string{}
+	if !baseOnly {
+		overlays = overlay.Chain(r.Config, skill, agent)
+	}
+	mode := "with-overlays"
+	if baseOnly {
+		mode = "base-only"
+	}
+	baseHash, err := treeHash(baseDir)
+	if err != nil {
+		return Result{}, err
+	}
+	overlayDigest := overlayHash(overlays)
+	if renderCurrent(finalDir, skill, agent, mode, baseDir, baseHash, overlays, overlayDigest) {
+		return Result{
+			Skill:        skill,
+			Agent:        agent,
+			RenderedPath: finalDir,
+			Overlays:     overlays,
+			Mode:         mode,
+			Skipped:      true,
+		}, nil
+	}
+
 	tmpDir := finalDir + ".tmp"
 	if err := removeAll(tmpDir); err != nil {
 		return Result{}, err
@@ -161,9 +187,7 @@ func (r Renderer) renderOne(skill string, agent string, baseOnly bool) (Result, 
 		return Result{}, err
 	}
 
-	overlays := []string{}
 	if !baseOnly {
-		overlays = overlay.Chain(r.Config, skill, agent)
 		for _, dir := range overlays {
 			if err := state.applyOverlay(dir); err != nil {
 				return Result{}, err
@@ -171,11 +195,7 @@ func (r Renderer) renderOne(skill string, agent string, baseOnly bool) (Result, 
 		}
 	}
 
-	mode := "with-overlays"
-	if baseOnly {
-		mode = "base-only"
-	}
-	if err := writeMarker(tmpDir, skill, agent, mode, baseDir, overlays); err != nil {
+	if err := writeMarker(tmpDir, skill, agent, mode, baseDir, baseHash, overlays, overlayDigest); err != nil {
 		return Result{}, err
 	}
 	if err := removeAll(finalDir); err != nil {
@@ -536,20 +556,61 @@ func copyToAgentOutput(skill string, rendered string, output config.AgentOutput)
 	return dst, nil
 }
 
-func writeMarker(dir string, skill string, agent string, mode string, baseDir string, overlays []string) error {
+func writeMarker(dir string, skill string, agent string, mode string, baseDir string, baseHash string, overlays []string, overlayDigest string) error {
 	m := marker{
 		SchemaVersion: 1,
 		Skill:         skill,
 		Agent:         agent,
 		Mode:          mode,
 		BasePath:      baseDir,
+		BaseHash:      "sha256:" + baseHash,
 		Overlays:      overlays,
-		OverlayHash:   "sha256:" + overlayHash(overlays),
+		OverlayHash:   "sha256:" + overlayDigest,
 		RenderedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	data, _ := json.MarshalIndent(m, "", "  ")
 	data = append(data, '\n')
 	return os.WriteFile(filepath.Join(dir, MarkerFile), data, 0o644)
+}
+
+func renderCurrent(dir string, skill string, agent string, mode string, baseDir string, baseHash string, overlays []string, overlayDigest string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, MarkerFile))
+	if err != nil {
+		return false
+	}
+	var m marker
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false
+	}
+	return m.SchemaVersion == 1 &&
+		m.Skill == skill &&
+		m.Agent == agent &&
+		m.Mode == mode &&
+		m.BasePath == baseDir &&
+		m.BaseHash == "sha256:"+baseHash &&
+		equalStrings(m.Overlays, overlays) &&
+		m.OverlayHash == "sha256:"+overlayDigest
+}
+
+func treeHash(root string) (string, error) {
+	hash := sha256.New()
+	files, err := fsutil.WalkFiles(root)
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(files)
+	for _, file := range files {
+		rel, _ := filepath.Rel(root, file)
+		hash.Write([]byte(filepath.ToSlash(rel)))
+		hash.Write([]byte{0})
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		hash.Write(data)
+		hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func overlayHash(paths []string) string {
@@ -560,15 +621,30 @@ func overlayHash(paths []string) string {
 		if err != nil {
 			continue
 		}
+		sort.Strings(files)
 		for _, file := range files {
 			rel, _ := filepath.Rel(root, file)
-			hash.Write([]byte(rel))
+			hash.Write([]byte(filepath.ToSlash(rel)))
+			hash.Write([]byte{0})
 			if data, err := os.ReadFile(file); err == nil {
 				hash.Write(data)
+				hash.Write([]byte{0})
 			}
 		}
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func equalStrings(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func diffDirs(base string, rendered string) (string, error) {

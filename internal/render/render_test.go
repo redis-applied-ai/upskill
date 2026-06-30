@@ -79,6 +79,68 @@ func TestRenderAppliesGlobalAndAgentOverlaysAndCopies(t *testing.T) {
 	if marker["mode"] != "with-overlays" || marker["agent"] != "codex" {
 		t.Fatalf("unexpected marker: %#v", marker)
 	}
+	if marker["base_hash"] == "" || marker["overlay_hash"] == "" {
+		t.Fatalf("marker missing hashes: %#v", marker)
+	}
+}
+
+func TestRenderSkipsUnchangedInputs(t *testing.T) {
+	cfg := testConfig(t)
+	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Base.\n")
+	writeFile(t, filepath.Join(cfg.OverlaysDir, "redis", "SKILL.append.md"), "Overlay.\n")
+	renderer := Renderer{Config: cfg}
+
+	results, err := renderer.Render(Options{Skill: "redis", Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Skipped {
+		t.Fatalf("first render should not skip: %#v", results)
+	}
+	markerPath := filepath.Join(cfg.RenderedDir, "codex", "redis", MarkerFile)
+	firstMarker := readFile(t, markerPath)
+
+	results, err = renderer.Render(Options{Skill: "redis", Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].Skipped {
+		t.Fatalf("second render should skip: %#v", results)
+	}
+	if secondMarker := readFile(t, markerPath); secondMarker != firstMarker {
+		t.Fatalf("skipped render rewrote marker:\nfirst=%s\nsecond=%s", firstMarker, secondMarker)
+	}
+
+	writeFile(t, filepath.Join(cfg.OverlaysDir, "redis", "SKILL.append.md"), "Changed overlay.\n")
+	results, err = renderer.Render(Options{Skill: "redis", Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Skipped {
+		t.Fatalf("overlay change should render: %#v", results)
+	}
+	if rendered := readFile(t, filepath.Join(cfg.RenderedDir, "codex", "redis", "SKILL.md")); !strings.Contains(rendered, "Changed overlay.") {
+		t.Fatalf("changed overlay not rendered:\n%s", rendered)
+	}
+
+	results, err = renderer.Render(Options{Skill: "redis", Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].Skipped {
+		t.Fatalf("post-change render should skip: %#v", results)
+	}
+	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Changed base.\n")
+	results, err = renderer.Render(Options{Skill: "redis", Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Skipped {
+		t.Fatalf("base change should render: %#v", results)
+	}
+	if rendered := readFile(t, filepath.Join(cfg.RenderedDir, "codex", "redis", "SKILL.md")); !strings.Contains(rendered, "Changed base.") {
+		t.Fatalf("changed base not rendered:\n%s", rendered)
+	}
 }
 
 func TestFilesRefuseOverwriteAndReplaceOverwrites(t *testing.T) {

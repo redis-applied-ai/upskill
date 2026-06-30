@@ -61,8 +61,8 @@ For creating a new skill or drafting a new upstream version, use draft tools:
   draft of an existing base skill.
 - Use `promote_skill_draft` only to copy a finished draft into a local upstream
   checkout or configured local source. Prefer `to_source` when the user has an
-  upskill vault or named local source. Promotion defaults to dry-run; review
-  the planned writes before setting `dry_run` to false.
+  upskill named local source. Promotion defaults to dry-run; review the planned
+  writes before setting `dry_run` to false.
 - After promotion, the skill is not automatically installed. For a new skill,
   tell the user to run `upskill add <source> --skill <skill-name>` or use the
   equivalent workflow. For an existing locked skill, use `sync_skills` or

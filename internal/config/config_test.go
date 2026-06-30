@@ -80,16 +80,16 @@ func TestSaveConfig(t *testing.T) {
 	cfg := Config{
 		Home:         filepath.Join(root, "home"),
 		StoreDir:     filepath.Join(root, "store"),
-		OverlaysDir:  filepath.Join(root, "vault", "overlays"),
-		DraftsDir:    filepath.Join(root, "vault", "drafts"),
-		ImportsDir:   filepath.Join(root, "vault", "imports"),
-		ImportDirs:   []string{filepath.Join(root, "vault", "imports")},
+			OverlaysDir:  filepath.Join(root, "workspace", "overlays"),
+			DraftsDir:    filepath.Join(root, "workspace", "drafts"),
+			ImportsDir:   filepath.Join(root, "workspace", "imports"),
+			ImportDirs:   []string{filepath.Join(root, "workspace", "imports")},
 		RenderedDir:  filepath.Join(root, "rendered"),
 		SourceIgnore: []string{".git", "overlays"},
 		ConfigPath:   filepath.Join(root, "config.json"),
 		LockPath:     filepath.Join(root, "lock.json"),
 		SkillsBin:    "skills",
-		Sources:      map[string]Source{"vault": {Name: "vault", Source: filepath.Join(root, "vault", "source")}},
+			Sources:      map[string]Source{"local": {Name: "local", Source: filepath.Join(root, "workspace", "source")}},
 	}
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestSaveConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.OverlaysDir != cfg.OverlaysDir || loaded.Sources["vault"].Source != cfg.Sources["vault"].Source {
+		if loaded.OverlaysDir != cfg.OverlaysDir || loaded.Sources["local"].Source != cfg.Sources["local"].Source {
 		t.Fatalf("loaded = %#v", loaded)
 	}
 	if !hasString(loaded.SourceIgnore, "overlays") {

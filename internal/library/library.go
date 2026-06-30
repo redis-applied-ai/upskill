@@ -99,6 +99,14 @@ type UpdatePreview struct {
 	Diff        []string `json:"diff,omitempty"`
 }
 
+type SourceSkill struct {
+	StoreName     string `json:"store_name"`
+	Name          string `json:"name"`
+	Description   string `json:"description,omitempty"`
+	SourceSubpath string `json:"source_subpath"`
+	SkillPath     string `json:"skill_path"`
+}
+
 func ParseSource(input string) (ParsedSource, error) {
 	if strings.TrimSpace(input) == "" {
 		return ParsedSource{}, fmt.Errorf("source is required")
@@ -168,9 +176,50 @@ func ApplySourceOverrides(parsed ParsedSource, ref string, subpath string, skill
 	return parsed, nil
 }
 
+func CanonicalSource(input string, name string, ref string, subpath string) (config.Source, string, error) {
+	parsed, err := ParseSource(input)
+	if err != nil {
+		return config.Source{}, "", err
+	}
+	parsed, err = ApplySourceOverrides(parsed, ref, subpath, "")
+	if err != nil {
+		return config.Source{}, "", err
+	}
+	source := config.Source{Name: name, Ref: parsed.Ref, Subpath: parsed.Subpath}
+	if parsed.Type == "local" {
+		source.Source = parsed.LocalPath
+	} else {
+		source.Source = parsed.URL
+	}
+	return source, config.SourceKey(source), nil
+}
+
 func ResolveNamedSource(cfg config.Config, name string) (config.Source, bool) {
 	source, ok := cfg.Sources[name]
 	return source, ok
+}
+
+func ResolveSource(cfg config.Config, source string, opts InstallOptions) (ParsedSource, bool, error) {
+	namedSource := false
+	if named, ok := ResolveNamedSource(cfg, source); ok {
+		namedSource = true
+		source = named.Source
+		if opts.Ref == "" {
+			opts.Ref = named.Ref
+		}
+		if opts.Subpath == "" {
+			opts.Subpath = named.Subpath
+		}
+	}
+	parsed, err := ParseSource(source)
+	if err != nil {
+		return ParsedSource{}, namedSource, err
+	}
+	parsed, err = ApplySourceOverrides(parsed, opts.Ref, opts.Subpath, opts.SkillFilter)
+	if err != nil {
+		return ParsedSource{}, namedSource, err
+	}
+	return parsed, namedSource, nil
 }
 
 func DiscoverSkills(root string, subpath string) ([]Skill, error) {
@@ -236,20 +285,7 @@ func ResolveLocalSourceDestination(cfg config.Config, name string) (string, erro
 }
 
 func InstallSource(cfg config.Config, source string, opts InstallOptions) ([]InstalledSkill, error) {
-	if named, ok := ResolveNamedSource(cfg, source); ok {
-		source = named.Source
-		if opts.Ref == "" {
-			opts.Ref = named.Ref
-		}
-		if opts.Subpath == "" {
-			opts.Subpath = named.Subpath
-		}
-	}
-	parsed, err := ParseSource(source)
-	if err != nil {
-		return nil, err
-	}
-	parsed, err = ApplySourceOverrides(parsed, opts.Ref, opts.Subpath, opts.SkillFilter)
+	parsed, _, err := ResolveSource(cfg, source, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -447,46 +483,55 @@ func ListInstalled(cfg config.Config) ([]Skill, error) {
 	return skills, nil
 }
 
-func FindInstalled(cfg config.Config, query string, limit int) ([]Skill, error) {
+func FindInstalled(cfg config.Config, query string, limit int) ([]Skill, int, error) {
 	skills, err := ListInstalled(cfg)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if strings.TrimSpace(query) == "" {
+		total := len(skills)
 		if limit > 0 && len(skills) > limit {
-			return skills[:limit], nil
+			return skills[:limit], total, nil
 		}
-		return skills, nil
+		return skills, total, nil
 	}
 	q := strings.ToLower(query)
 	var matches []Skill
+	total := 0
 	for _, skill := range skills {
 		text := strings.ToLower(strings.Join([]string{skill.StoreName, skill.Name, skill.Description, skill.Body}, "\n"))
 		if strings.Contains(text, q) {
-			matches = append(matches, skill)
+			total++
 			if limit > 0 && len(matches) >= limit {
-				break
+				continue
 			}
+			matches = append(matches, skill)
 		}
 	}
-	return matches, nil
+	return matches, total, nil
+}
+
+func SearchSource(cfg config.Config, source string, query string, opts InstallOptions, limit int) ([]SourceSkill, int, error) {
+	parsed, _, err := ResolveSource(cfg, source, opts)
+	if err != nil {
+		return nil, 0, fmt.Errorf("source resolution failed: %w", err)
+	}
+	root, cleanup, err := materialize(parsed)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cleanup()
+	skills, err := DiscoverSkillsWithIgnore(root, parsed.Subpath, cfg.SourceIgnore)
+	if err != nil {
+		return nil, 0, err
+	}
+	skills = filterSkills(skills, parsed.SkillFilter)
+	skills, total := filterSkillsByQuery(skills, query, limit)
+	return sourceSkillRows(root, skills), total, nil
 }
 
 func ReadSourceSkill(cfg config.Config, source string, opts InstallOptions) (Skill, error) {
-	if named, ok := ResolveNamedSource(cfg, source); ok {
-		source = named.Source
-		if opts.Ref == "" {
-			opts.Ref = named.Ref
-		}
-		if opts.Subpath == "" {
-			opts.Subpath = named.Subpath
-		}
-	}
-	parsed, err := ParseSource(source)
-	if err != nil {
-		return Skill{}, err
-	}
-	parsed, err = ApplySourceOverrides(parsed, opts.Ref, opts.Subpath, opts.SkillFilter)
+	parsed, _, err := ResolveSource(cfg, source, opts)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -504,6 +549,85 @@ func ReadSourceSkill(cfg config.Config, source string, opts InstallOptions) (Ski
 		return Skill{}, fmt.Errorf("no skills found")
 	}
 	return skills[0], nil
+}
+
+func InspectSource(cfg config.Config, source string, opts InstallOptions) ([]SourceSkill, error) {
+	parsed, _, err := ResolveSource(cfg, source, opts)
+	if err != nil {
+		return nil, fmt.Errorf("source resolution failed: %w", err)
+	}
+	root, cleanup, err := materialize(parsed)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	skills, err := DiscoverSkillsWithIgnore(root, parsed.Subpath, cfg.SourceIgnore)
+	if err != nil {
+		return nil, err
+	}
+	skills = filterSkills(skills, parsed.SkillFilter)
+	if len(skills) == 0 {
+		return nil, fmt.Errorf("no skills found")
+	}
+	return sourceSkillRows(root, skills), nil
+}
+
+func filterSkillsByQuery(skills []Skill, query string, limit int) ([]Skill, int) {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		total := len(skills)
+		if limit > 0 && len(skills) > limit {
+			return skills[:limit], total
+		}
+		return skills, total
+	}
+	matches := make([]Skill, 0, len(skills))
+	total := 0
+	for _, skill := range skills {
+		text := strings.ToLower(strings.Join([]string{
+			skill.StoreName,
+			skill.Name,
+			skill.Description,
+			skill.Body,
+			skill.SkillPath,
+			skill.Path,
+		}, "\n"))
+		if !strings.Contains(text, q) {
+			continue
+		}
+		total++
+		if limit > 0 && len(matches) >= limit {
+			continue
+		}
+		matches = append(matches, skill)
+	}
+	return matches, total
+}
+
+func sourceSkillRows(root string, skills []Skill) []SourceSkill {
+	rows := make([]SourceSkill, 0, len(skills))
+	for _, skill := range skills {
+		rel, err := filepath.Rel(root, skill.Path)
+		if err != nil {
+			rel = skill.Path
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			rel = ""
+		}
+		skillPath := filepath.ToSlash(filepath.Join(rel, "SKILL.md"))
+		if rel == "" {
+			skillPath = "SKILL.md"
+		}
+		rows = append(rows, SourceSkill{
+			StoreName:     skill.StoreName,
+			Name:          skill.Name,
+			Description:   skill.Description,
+			SourceSubpath: rel,
+			SkillPath:     skillPath,
+		})
+	}
+	return rows
 }
 
 func RemoveSkills(cfg config.Config, names []string, deleteOverlays bool) ([]string, error) {

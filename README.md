@@ -34,11 +34,14 @@ make coverage
 
 ## Commands
 
+Run any leaf command with `--help` for context, options, side effects, defaults,
+and examples.
+
 ```bash
 upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
 upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
 upskill list|ls [--json] [--agent AGENT]
-upskill find [query] [--json] [--limit N]
+upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
@@ -52,22 +55,17 @@ upskill mcp
 Source shortcuts:
 
 ```bash
-upskill source list [--json]
+upskill source list|ls [--json]
 upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
-upskill source remove <name>
-```
-
-Vault-backed local sources:
-
-```bash
-upskill vault init <path> [--name NAME] [--source-dir DIR] [--no-config]
-upskill vault status [--name NAME] [--json]
+upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
+upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref REF] [--subpath PATH]
+upskill source remove|rm <source-or-name>
 ```
 
 Overlay rendering:
 
 ```bash
-upskill overlay list [--skill NAME] [--agent AGENT] [--json]
+upskill overlay list|ls [--skill NAME] [--agent AGENT] [--json]
 upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]
 upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation OPERATION] [--no-edit]
 upskill overlay diff <skill-name> [--agent AGENT]
@@ -78,7 +76,7 @@ upskill render <skill-name> --print [--file SKILL.md] [--base-only]
 Drafts:
 
 ```bash
-upskill draft list [--json]
+upskill draft list|ls [--json]
 upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME] [--no-edit]
 upskill draft edit <skill-name> [--file PATH] [--no-edit]
 upskill draft path <skill-name>
@@ -90,7 +88,7 @@ upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-o
 upskill draft diff <skill-name>
 upskill draft rebase <skill-name>
 upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
-upskill draft remove <skill-name>
+upskill draft remove|rm <skill-name>
 ```
 
 Interactive draft commands use `$VISUAL` or `$EDITOR`: `workon`, `draft
@@ -168,38 +166,43 @@ imports/
 rendered/
 ```
 
-`doctor` does not create `config.json`; create that file when you want explicit
-agent output directories or import allowlists. Use `upskill status` to inspect
-the current home, store path, installed skill count, overlay count, and draft
-count.
+Most commands create the managed files and directories they need automatically.
+Use `upskill status` to inspect the current home, store path, installed skill
+count, overlay count, and draft count.
 
-## Vaults
+## Local Sources
 
-A vault is a local, editable skills workspace that `upskill` treats as a named
-source. Use one when your skills already live as normal files in an Obsidian
-vault, a synced folder, or a personal/team skills directory, and you want a
-low-friction place to draft and revise skills before installing them into the
-managed `store/`.
+A source is where skills come from. It can be a GitHub repo, a Git URL, a GitHub
+subdirectory, or a local directory such as an Obsidian skills folder. `upskill`
+does not require local skills to be moved into a special layout.
 
 The important distinction is:
 
-- `source/` is your editable upstream skill collection.
+- A source is the upstream skill collection.
 - `store/` is the installed copy that `upskill` renders from and agents read.
-- `overlays/`, `drafts/`, and `imports/` are local working state kept alongside
-  the source, but ignored when discovering base skills.
+- `overlays/`, `drafts/`, and `imports/` are managed `upskill` working state.
 
-You do not need a vault if you only install from Git repositories. Use a vault
-when you want local files to be the upstream source of truth.
-
-To create one:
+Add an existing local directory as a named source:
 
 ```bash
-upskill vault init ~/SkillVault --name personal
-upskill add personal
+upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian
+upskill source skills Obsidian
+upskill source find Obsidian redis
+upskill add Obsidian --skill redis
 ```
 
-`upskill vault init` creates `source/`, `overlays/`, `drafts/`, and `imports/`,
-then records the vault source in `config.json` under the name you choose.
+You can also install directly from a raw path or Git source. Raw sources are
+recorded automatically and are displayed by their canonical source string:
+
+```bash
+upskill add ~/Documents/Notes/Memory/Skills --skill redis
+upskill add owner/repo --subpath skills --skill redis
+```
+
+`upskill find` and `upskill search` search installed skills in the local store.
+`upskill source find` and `upskill source search` search one live source by
+skill ID, display name, description, `SKILL.md` body, and path without
+installing anything.
 
 ## Agent Outputs
 
@@ -250,6 +253,8 @@ During render, `upskill` builds the effective skill in this order:
 
 Rendering is repeatable, not a one-time migration. `add`, `update`, and `sync`
 render by default unless a command has a `--no-render` flag and you use it.
+Render output is skipped when the base skill, overlays, mode, and agent are
+unchanged.
 Run `upskill render <skill-name> --agent <agent>` manually while iterating on
 overlay files. `sync` always renders the final base-plus-overlay state; use
 `render --print --base-only` when you want to inspect the synced base by itself.
@@ -385,7 +390,8 @@ agent, base path, overlay paths, overlay hash, and timestamp.
 
 ## Current Limits
 
-- Search is local only; remote registry search is not implemented.
+- Installed-skill search is local to the store. Source search inspects one
+  requested source live. Broad remote registry search is not implemented.
 - Draft promotion writes to a local checkout or named local source. It does not
   create branches, commit, push, or open pull requests.
 - `sync` updates locked skills and renders outputs. It does not discover a new

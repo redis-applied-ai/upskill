@@ -94,26 +94,32 @@ upskill render hello-skill --print --agent codex
 upskill status
 ```
 
-## Use A Vault When Local Files Are The Source
+## Use A Local Directory As A Source
 
-A vault is a local editable skill workspace that `upskill` treats as a named
-source. Use it when your upstream skills live in normal files, such as an
-Obsidian vault, a synced folder, or a personal/team skills directory.
+Use a local source when upstream skills already live in normal files, such as an
+Obsidian skills directory, a synced folder, or a personal/team skills directory.
+You do not need to move those files into a special layout.
 
-Create a vault:
-
-```bash
-upskill vault init ~/SkillVault --name personal
-```
-
-Put skill bundles under `~/SkillVault/source/`, then install from the named
-source:
+Add the existing directory as a named source and inspect what skills it contains:
 
 ```bash
-upskill add personal --skill hello-skill --agent codex
+upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian
+upskill source skills Obsidian
+upskill source find Obsidian hello
 ```
 
-You do not need a vault when installing directly from Git repositories.
+Install from the named source:
+
+```bash
+upskill add Obsidian --skill hello-skill --agent codex
+```
+
+You can also install from a raw path. `upskill` records that source
+automatically and displays it by path in `upskill source list` / `upskill source ls`:
+
+```bash
+upskill add ~/Documents/Notes/Memory/Skills --skill hello-skill --agent codex
+```
 
 ## Configure MCP
 
