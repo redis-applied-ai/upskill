@@ -162,7 +162,7 @@ func TestHelpCommands(t *testing.T) {
 	if !strings.Contains(top, "usage: upskill <command> [args]") || !strings.Contains(top, "commands:") {
 		t.Fatalf("help output = %q", top)
 	}
-	for _, want := range []string{"add      Install", "find     Search", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run"} {
+	for _, want := range []string{"add      Install", "find     Search", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run", "version  Print"} {
 		if !strings.Contains(top, want) {
 			t.Fatalf("help output missing %q: %q", want, top)
 		}
@@ -297,6 +297,7 @@ func TestHelpCommands(t *testing.T) {
 		{"overlay", "edit", "--help"},
 		{"render", "--help"},
 		{"mcp", "--help"},
+		{"version", "--help"},
 		{"status", "--help"},
 		{"doctor", "--help"},
 	}
@@ -626,6 +627,41 @@ func TestRunConfigLoadError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"render"}, &stdout, &stderr); code == 0 {
 		t.Fatalf("expected config load error")
+	}
+}
+
+func TestVersionCommandReportsVersionWithoutConfig(t *testing.T) {
+	oldVersion := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = oldVersion })
+
+	root := t.TempDir()
+	badConfig := filepath.Join(root, "bad.json")
+	writeTestFile(t, badConfig, "{bad", 0o644)
+	t.Setenv("UPSKILL_HOME", filepath.Join(root, "home"))
+	t.Setenv("UPSKILL_CONFIG", badConfig)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"version"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != "upskill v1.2.3\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"version", "extra"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("unexpected argument exit code = %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unexpected argument: extra") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 

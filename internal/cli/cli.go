@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,8 @@ var (
 	cliEditor       = editorCommand
 	cliRunEditor    = runEditorCommand
 )
+
+var version = "dev"
 
 const (
 	helpAdd = `usage: upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
@@ -674,6 +677,18 @@ notes:
 examples:
   upskill mcp`
 
+	helpVersion = `usage: upskill version
+
+summary:
+  Print the current Upskill version.
+
+notes:
+  Version comes from release build metadata when available. Local builds fall
+  back to VCS metadata or dev.
+
+examples:
+  upskill version`
+
 	helpStatus = `usage: upskill status
 
 summary:
@@ -702,6 +717,10 @@ examples:
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	if printRequestedHelp(args, stdout) {
 		return 0
+	}
+
+	if args[0] == "version" {
+		return runVersion(args[1:], stdout, stderr)
 	}
 
 	cfg, err := config.Load()
@@ -747,6 +766,47 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "upskill: unknown command: %s\n", args[0])
 		return 2
 	}
+}
+
+func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintf(stderr, "upskill: unexpected argument: %s\n", args[0])
+		return 2
+	}
+	fmt.Fprintf(stdout, "upskill %s\n", currentVersion())
+	return 0
+}
+
+func currentVersion() string {
+	if version != "" && version != "dev" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version
+	}
+	if info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	if revision := buildSetting(info, "vcs.revision"); revision != "" {
+		if len(revision) > 12 {
+			revision = revision[:12]
+		}
+		if buildSetting(info, "vcs.modified") == "true" {
+			return revision + "-dirty"
+		}
+		return revision
+	}
+	return version
+}
+
+func buildSetting(info *debug.BuildInfo, key string) string {
+	for _, setting := range info.Settings {
+		if setting.Key == key {
+			return setting.Value
+		}
+	}
+	return ""
 }
 
 func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -2565,6 +2625,8 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printDirectHelp(args, w, helpRender)
 	case "mcp":
 		return printDirectHelp(args, w, helpMCP)
+	case "version":
+		return printDirectHelp(args, w, helpVersion)
 	case "status":
 		return printDirectHelp(args, w, helpStatus)
 	case "doctor":
@@ -2639,6 +2701,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  overlay  Manage skill overlays")
 	fmt.Fprintln(w, "  render   Render skills with overlays")
 	fmt.Fprintln(w, "  mcp      Run the MCP server")
+	fmt.Fprintln(w, "  version  Print the current version")
 	fmt.Fprintln(w, "  status   Show local upskill state")
 	fmt.Fprintln(w, "  doctor   Check and create local directories")
 	fmt.Fprintln(w)
