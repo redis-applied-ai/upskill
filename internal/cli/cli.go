@@ -2191,6 +2191,9 @@ func printResults(w io.Writer, results []render.Result) {
 		if agent == "" {
 			agent = "generic"
 		}
+		if result.Skipped && len(result.CopiedTo) == 0 {
+			continue
+		}
 		copied := "not copied"
 		if len(result.CopiedTo) > 0 {
 			copied = strings.Join(result.CopiedTo, ", ")
@@ -2199,6 +2202,17 @@ func printResults(w io.Writer, results []render.Result) {
 			copied = "unchanged; " + copied
 		}
 		fmt.Fprintf(w, "%s [%s] -> %s (%s)\n", result.Skill, agent, result.RenderedPath, copied)
+	}
+	unchanged := 0
+	for _, result := range results {
+		if result.Skipped && len(result.CopiedTo) == 0 {
+			unchanged++
+		}
+	}
+	if unchanged == len(results) && unchanged > 0 {
+		fmt.Fprintln(w, "all rendered skills unchanged")
+	} else if unchanged > 0 {
+		fmt.Fprintf(w, "%d rendered skills unchanged\n", unchanged)
 	}
 }
 

@@ -449,12 +449,19 @@ func TestCopyAgentOutputExistingFileError(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cfg.AgentOutputs[1].Path, "redis", "old.md")); !os.IsNotExist(err) {
 		t.Fatal("existing destination directory should be replaced")
 	}
+	results, err := (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex", Copy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].Skipped || len(results[0].CopiedTo) != 0 {
+		t.Fatalf("unchanged copied output should skip render and copy: %#v", results)
+	}
 
 	cfg = testConfig(t)
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Base.\n")
 	writeFile(t, filepath.Join(cfg.AgentOutputs[1].Path, "redis"), "file-not-dir")
 
-	_, err := (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex", Copy: true})
+	_, err = (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex", Copy: true})
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("expected destination file error, got %v", err)
 	}
@@ -466,7 +473,7 @@ func TestCopyAgentOutputExistingFileError(t *testing.T) {
 		t.Fatal("expected destination stat error")
 	}
 
-	if _, err := copyToAgentOutput("redis", filepath.Join(t.TempDir(), "missing-rendered"), config.AgentOutput{Path: t.TempDir()}); err == nil {
+	if _, _, err := copyToAgentOutput("redis", filepath.Join(t.TempDir(), "missing-rendered"), config.AgentOutput{Path: t.TempDir()}); err == nil {
 		t.Fatal("expected copyToAgentOutput missing rendered error")
 	}
 }
@@ -886,7 +893,7 @@ func TestInjectedFilesystemErrors(t *testing.T) {
 			}
 			return os.RemoveAll(path)
 		}
-		if _, err := copyToAgentOutput("redis", rendered, config.AgentOutput{Path: destPath}); err == nil {
+		if _, _, err := copyToAgentOutput("redis", rendered, config.AgentOutput{Path: destPath}); err == nil {
 			t.Fatal("expected copy destination remove error")
 		}
 	})
@@ -903,7 +910,7 @@ func TestInjectedFilesystemErrors(t *testing.T) {
 			}
 			return os.MkdirAll(path, perm)
 		}
-		if _, err := copyToAgentOutput("redis", rendered, config.AgentOutput{Path: destPath}); err == nil {
+		if _, _, err := copyToAgentOutput("redis", rendered, config.AgentOutput{Path: destPath}); err == nil {
 			t.Fatal("expected copy destination mkdir error")
 		}
 	})

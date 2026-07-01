@@ -93,11 +93,13 @@ func (r Renderer) Render(opts Options) ([]Result, error) {
 				return nil, err
 			}
 			if opts.Copy {
-				copied, err := copyToAgentOutput(skill, result.RenderedPath, output)
+				copied, changed, err := copyToAgentOutput(skill, result.RenderedPath, output)
 				if err != nil {
 					return nil, err
 				}
-				result.CopiedTo = append(result.CopiedTo, copied)
+				if changed {
+					result.CopiedTo = append(result.CopiedTo, copied)
+				}
 			}
 			results = append(results, result)
 		}
@@ -535,25 +537,47 @@ func templateKey(path string) string {
 	return "/" + path
 }
 
-func copyToAgentOutput(skill string, rendered string, output config.AgentOutput) (string, error) {
+func copyToAgentOutput(skill string, rendered string, output config.AgentOutput) (string, bool, error) {
 	dst := filepath.Join(output.Path, skill)
+	if copiedOutputCurrent(rendered, dst) {
+		return dst, false, nil
+	}
 	if info, err := os.Stat(dst); err == nil {
 		if !info.IsDir() {
-			return "", fmt.Errorf("%s exists and is not a directory", dst)
+			return "", false, fmt.Errorf("%s exists and is not a directory", dst)
 		}
 		if err := removeAll(dst); err != nil {
-			return "", err
+			return "", false, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
+		return "", false, err
 	}
 	if err := mkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := fsutil.CopyDir(rendered, dst, nil); err != nil {
-		return "", err
+		return "", false, err
 	}
-	return dst, nil
+	return dst, true, nil
+}
+
+func copiedOutputCurrent(rendered string, dst string) bool {
+	renderedMarker, err := readMarker(filepath.Join(rendered, MarkerFile))
+	if err != nil {
+		return false
+	}
+	dstMarker, err := readMarker(filepath.Join(dst, MarkerFile))
+	if err != nil {
+		return false
+	}
+	return renderedMarker.SchemaVersion == dstMarker.SchemaVersion &&
+		renderedMarker.Skill == dstMarker.Skill &&
+		renderedMarker.Agent == dstMarker.Agent &&
+		renderedMarker.Mode == dstMarker.Mode &&
+		renderedMarker.BasePath == dstMarker.BasePath &&
+		renderedMarker.BaseHash == dstMarker.BaseHash &&
+		equalStrings(renderedMarker.Overlays, dstMarker.Overlays) &&
+		renderedMarker.OverlayHash == dstMarker.OverlayHash
 }
 
 func writeMarker(dir string, skill string, agent string, mode string, baseDir string, baseHash string, overlays []string, overlayDigest string) error {
@@ -573,13 +597,21 @@ func writeMarker(dir string, skill string, agent string, mode string, baseDir st
 	return os.WriteFile(filepath.Join(dir, MarkerFile), data, 0o644)
 }
 
-func renderCurrent(dir string, skill string, agent string, mode string, baseDir string, baseHash string, overlays []string, overlayDigest string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, MarkerFile))
+func readMarker(path string) (marker, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return marker{}, err
 	}
 	var m marker
 	if err := json.Unmarshal(data, &m); err != nil {
+		return marker{}, err
+	}
+	return m, nil
+}
+
+func renderCurrent(dir string, skill string, agent string, mode string, baseDir string, baseHash string, overlays []string, overlayDigest string) bool {
+	m, err := readMarker(filepath.Join(dir, MarkerFile))
+	if err != nil {
 		return false
 	}
 	return m.SchemaVersion == 1 &&

@@ -596,6 +596,24 @@ func TestPrintResultsSortsAndFormatsGeneric(t *testing.T) {
 	if strings.Index(got, "alpha") > strings.Index(got, "zulu") {
 		t.Fatalf("results not sorted: %q", got)
 	}
+
+	stdout.Reset()
+	printResults(&stdout, []render.Result{
+		{Skill: "alpha", Agent: "codex", RenderedPath: "/rendered/alpha", Skipped: true},
+		{Skill: "bravo", Agent: "codex", RenderedPath: "/rendered/bravo", Skipped: true},
+	})
+	if strings.TrimSpace(stdout.String()) != "all rendered skills unchanged" {
+		t.Fatalf("unchanged output = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	printResults(&stdout, []render.Result{
+		{Skill: "alpha", Agent: "codex", RenderedPath: "/rendered/alpha", Skipped: true},
+		{Skill: "bravo", Agent: "codex", RenderedPath: "/rendered/bravo", CopiedTo: []string{"/target/bravo"}},
+	})
+	if !strings.Contains(stdout.String(), "bravo") || !strings.Contains(stdout.String(), "1 rendered skills unchanged") || strings.Contains(stdout.String(), "alpha [codex]") {
+		t.Fatalf("mixed unchanged output = %q", stdout.String())
+	}
 }
 
 func TestRunConfigLoadError(t *testing.T) {
