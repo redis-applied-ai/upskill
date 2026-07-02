@@ -812,6 +812,11 @@ store/template-skill/SKILL.md.j2
 Base template:
 
 ```jinja
+---
+name: Template Skill
+description: Example skill with a Jinja-rendered entrypoint
+---
+
 # Template Skill
 
 {% block guidance %}

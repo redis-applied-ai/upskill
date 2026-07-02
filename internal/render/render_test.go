@@ -110,6 +110,23 @@ func TestRenderSkipsUnchangedInputs(t *testing.T) {
 	if secondMarker := readFile(t, markerPath); secondMarker != firstMarker {
 		t.Fatalf("skipped render rewrote marker:\nfirst=%s\nsecond=%s", firstMarker, secondMarker)
 	}
+	var oldMarker map[string]any
+	if err := json.Unmarshal([]byte(firstMarker), &oldMarker); err != nil {
+		t.Fatal(err)
+	}
+	oldMarker["schema_version"] = float64(1)
+	oldMarkerData, err := json.MarshalIndent(oldMarker, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, markerPath, string(oldMarkerData)+"\n")
+	results, err = renderer.Render(Options{Skill: "redis", Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Skipped {
+		t.Fatalf("old marker schema should render: %#v", results)
+	}
 
 	writeFile(t, filepath.Join(cfg.OverlaysDir, "redis", "SKILL.append.md"), "Changed overlay.\n")
 	results, err = renderer.Render(Options{Skill: "redis", Agent: "codex"})
@@ -415,6 +432,22 @@ func TestJinjaErrorBranchesAndIgnoredTemplateFiles(t *testing.T) {
 	writeFile(t, filepath.Join(cfg.OverlaysDir, "redis", "templates", "BROKEN.md.j2"), `{% if`)
 	if _, err := (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex"}); err == nil {
 		t.Fatal("expected bad overlay template error")
+	}
+}
+
+func TestTemplateOverlayRejectsJSONVariableMap(t *testing.T) {
+	cfg := testConfig(t)
+	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
+	writeFile(t, filepath.Join(cfg.OverlaysDir, "redis", "templates", "SKILL.md.j2"), `{
+  "tone": "casual"
+}`)
+
+	_, err := (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex"})
+	if err == nil {
+		t.Fatal("JSON template overlay unexpectedly rendered")
+	}
+	if !strings.Contains(err.Error(), "JSON variable map") || !strings.Contains(err.Error(), "SKILL.md.j2") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

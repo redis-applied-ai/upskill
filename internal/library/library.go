@@ -23,6 +23,8 @@ import (
 
 const LockSchemaVersion = 1
 
+var skillEntrypoints = []string{"SKILL.md.j2", "SKILL.md"}
+
 var (
 	githubShorthand  = regexp.MustCompile(`^([^/\s:]+)/([^/\s:@#]+)(?:/(.+))?$`)
 	absPath          = filepath.Abs
@@ -615,10 +617,11 @@ func sourceSkillRows(root string, skills []Skill) []SourceSkill {
 		if rel == "." {
 			rel = ""
 		}
-		skillPath := filepath.ToSlash(filepath.Join(rel, "SKILL.md"))
-		if rel == "" {
-			skillPath = "SKILL.md"
+		skillPath, err := filepath.Rel(root, skill.SkillPath)
+		if err != nil {
+			skillPath = filepath.Join(rel, filepath.Base(skill.SkillPath))
 		}
+		skillPath = filepath.ToSlash(skillPath)
 		rows = append(rows, SourceSkill{
 			StoreName:     skill.StoreName,
 			Name:          skill.Name,
@@ -948,11 +951,19 @@ func installSkill(cfg config.Config, sourceRoot string, parsed ParsedSource, ski
 		SourceURL:   parsed.URL,
 		Ref:         parsed.Ref,
 		Subpath:     rel,
-		SkillPath:   filepath.ToSlash(filepath.Join(rel, "SKILL.md")),
+		SkillPath:   relativeSkillPath(sourceRoot, skill, rel),
 		Hash:        hash,
 		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 	return InstalledSkill{StoreName: storeName, Name: skill.Name, Hash: hash, Path: dst}, entry, nil
+}
+
+func relativeSkillPath(root string, skill Skill, fallbackDir string) string {
+	rel, err := filepath.Rel(root, skill.SkillPath)
+	if err != nil {
+		return filepath.ToSlash(filepath.Join(fallbackDir, filepath.Base(skill.SkillPath)))
+	}
+	return filepath.ToSlash(rel)
 }
 
 func filterSkills(skills []Skill, filter string) []Skill {
@@ -1001,8 +1012,8 @@ func walkSkillDirs(root string, depth int, maxDepth int, ignore map[string]struc
 }
 
 func hasSkill(dir string) bool {
-	info, err := os.Stat(filepath.Join(dir, "SKILL.md"))
-	return err == nil && !info.IsDir()
+	_, ok := skillEntrypoint(dir)
+	return ok
 }
 
 func skipDir(name string, ignore map[string]struct{}) bool {
@@ -1027,7 +1038,10 @@ func ignoreNameSet(ignore []string) map[string]struct{} {
 }
 
 func readSkill(dir string) (Skill, error) {
-	path := filepath.Join(dir, "SKILL.md")
+	path, ok := skillEntrypoint(dir)
+	if !ok {
+		return Skill{}, os.ErrNotExist
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Skill{}, err
@@ -1047,6 +1061,17 @@ func readSkill(dir string) (Skill, error) {
 		Body:        body,
 		Frontmatter: frontmatter,
 	}, nil
+}
+
+func skillEntrypoint(dir string) (string, bool) {
+	for _, name := range skillEntrypoints {
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path, true
+		}
+	}
+	return "", false
 }
 
 func parseFrontmatter(text string) (map[string]string, string) {

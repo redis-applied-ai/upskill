@@ -553,19 +553,23 @@ literal files.
 
 ### Author A Skill With Blocks
 
-Skill discovery still requires `SKILL.md`. If the rendered entrypoint should be
-templated, include a minimal `SKILL.md` for discovery and a `SKILL.md.j2` for
-rendering:
+Skill discovery accepts `SKILL.md.j2` directly. For a templated skill, make
+`SKILL.md.j2` the source entrypoint; do not maintain a parallel placeholder
+`SKILL.md` just for discovery:
 
 ```text
 examples/template-skill/
-  SKILL.md
   SKILL.md.j2
 ```
 
 Example `SKILL.md.j2`:
 
 ```jinja
+---
+name: Template Skill
+description: Example skill with a Jinja-rendered entrypoint
+---
+
 # Template Skill
 
 {% block guidance %}
@@ -577,7 +581,8 @@ Base examples.
 {% endblock %}
 ```
 
-The rendered output strips `.j2`, so `SKILL.md.j2` renders to `SKILL.md`.
+The rendered output strips `.j2`, so `SKILL.md.j2` renders to the final
+`SKILL.md` that agents load.
 
 ### User Override With `super()`
 

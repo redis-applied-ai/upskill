@@ -25,6 +25,7 @@ import (
 )
 
 const MarkerFile = ".upskill-render.json"
+const markerSchemaVersion = 2
 
 const appendSeparator = "\n\n---\n\n<!-- upskill overlay -->\n\n"
 
@@ -434,6 +435,9 @@ func (s *templateState) applyTemplates(root string) error {
 		if err != nil {
 			return err
 		}
+		if looksLikeJSON(raw) {
+			return fmt.Errorf("template overlay %s must contain Jinja template content, not a JSON variable map", path)
+		}
 		rel = filepath.ToSlash(rel)
 		parentName := s.currentByPath[rel]
 		content := string(raw)
@@ -537,6 +541,14 @@ func templateKey(path string) string {
 	return "/" + path
 }
 
+func looksLikeJSON(content []byte) bool {
+	trimmed := strings.TrimSpace(string(content))
+	if trimmed == "" {
+		return false
+	}
+	return json.Valid([]byte(trimmed)) && (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "["))
+}
+
 func copyToAgentOutput(skill string, rendered string, output config.AgentOutput) (string, bool, error) {
 	dst := filepath.Join(output.Path, skill)
 	if copiedOutputCurrent(rendered, dst) {
@@ -582,7 +594,7 @@ func copiedOutputCurrent(rendered string, dst string) bool {
 
 func writeMarker(dir string, skill string, agent string, mode string, baseDir string, baseHash string, overlays []string, overlayDigest string) error {
 	m := marker{
-		SchemaVersion: 1,
+		SchemaVersion: markerSchemaVersion,
 		Skill:         skill,
 		Agent:         agent,
 		Mode:          mode,
@@ -614,7 +626,7 @@ func renderCurrent(dir string, skill string, agent string, mode string, baseDir 
 	if err != nil {
 		return false
 	}
-	return m.SchemaVersion == 1 &&
+	return m.SchemaVersion == markerSchemaVersion &&
 		m.Skill == skill &&
 		m.Agent == agent &&
 		m.Mode == mode &&

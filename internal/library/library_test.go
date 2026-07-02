@@ -261,6 +261,45 @@ func TestLocalSourceDiscoveryAndResolution(t *testing.T) {
 	}
 }
 
+func TestInstallTemplateOnlySkill(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "template-source")
+	writeFile(t, filepath.Join(source, "github-issue-triage", "SKILL.md.j2"), `---
+name: GitHub Issue Triage
+description: Triage GitHub issues and PRs
+---
+
+# GitHub Issue Triage
+
+{% block guidance %}Base guidance.{% endblock %}
+`)
+
+	installed, err := InstallSource(cfg, source, InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installed) != 1 || installed[0].StoreName != "github-issue-triage" {
+		t.Fatalf("installed = %#v", installed)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StoreDir, "github-issue-triage", "SKILL.md.j2")); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := ReadLock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Skills["github-issue-triage"].SkillPath != "github-issue-triage/SKILL.md.j2" {
+		t.Fatalf("lock = %#v", lock.Skills["github-issue-triage"])
+	}
+	listed, err := ListInstalled(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].Description != "Triage GitHub issues and PRs" || !strings.HasSuffix(listed[0].SkillPath, "SKILL.md.j2") {
+		t.Fatalf("listed = %#v", listed)
+	}
+}
+
 func TestSearchSource(t *testing.T) {
 	cfg := testConfig(t)
 	sourceRoot := filepath.Join(cfg.Home, "source-root")

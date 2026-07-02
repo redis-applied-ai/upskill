@@ -302,6 +302,11 @@ Only `.j2` files are rendered through Jinja-style templates using
 Base template:
 
 ```jinja
+---
+name: Template Skill
+description: Example skill with a Jinja-rendered entrypoint
+---
+
 # Template Skill
 
 {% block guidance %}
