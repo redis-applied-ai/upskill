@@ -297,7 +297,7 @@ upskill source search local-examples hello
 upskill add local-examples --skill hello-skill
 ```
 
-## Instruct An LLM To Use upskill MCP
+## Instruct An LLM To Use Skills
 
 Run the server:
 
@@ -351,16 +351,18 @@ rules are:
 
 - Use `find_skills`, `read_skill`, `list_skill_files`, and `read_skill_file`
   for skill retrieval.
-- Treat base skills as read-only.
-- Use overlay tools for local customization.
-- Use draft tools for new skills and upstream revisions.
+- Treat rendered agent-local skill files as generated output, not edit targets.
+- Treat synced base skills as read-only.
+- Use overlay tools for local or agent-specific customization.
+- Use draft tools for new skills and upstream base-skill revisions.
 
 Example prompt:
 
 ```text
-Use the upskill MCP server for skill work. Find hello-skill, read the rendered
+Use the skill instructions in AGENTS.md. Find hello-skill, read the rendered
 hello-skill body and support files for Codex, then follow that skill's
-instructions for this task. Do not use built-in skill storage for skill edits.
+instructions for this task. If a skill needs to change, do not edit rendered
+skill files; use an overlay or draft.
 ```
 
 Expected MCP sequence:

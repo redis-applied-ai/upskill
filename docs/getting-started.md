@@ -180,17 +180,20 @@ Claude Desktop also supports desktop extensions for local MCP servers. `upskill`
 currently documents direct stdio configuration; packaging a `.mcpb` extension is
 separate release work.
 
-## Teach Agents To Use upskill
+## Teach Agents To Use Skills
 
 Copy or adapt `prompts/AGENTS.md` into the agent or project instructions for
-clients that should use `upskill` as the skill server.
+clients that should use `upskill` as the skill server. The copied instructions
+must tell agents that local skill files are rendered output. When asked to fix a
+skill, agents should write an overlay for local or agent-specific behavior, or
+create a draft for an upstream base-skill change.
 
 A first verification prompt:
 
 ```text
-Use the upskill MCP server for skill work. List available skills, read
+Use the skill instructions in AGENTS.md. List available skills, read
 hello-skill rendered for Codex, read its referenced support files, and tell me
-which files you used.
+which files you used. Do not edit rendered skill files.
 ```
 
 Expected MCP flow:

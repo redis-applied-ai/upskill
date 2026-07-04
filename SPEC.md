@@ -46,8 +46,9 @@ discovery by `SKILL.md`, and agent-aware installation.
 - Let agents import draft skill bundles and resource files from a configured
   shared filesystem inbox or from verified URLs, without sending large files
   through MCP arguments.
-- Ship a copyable `AGENTS.md` prompt that teaches agents to use the `upskill`
-  MCP server for skill work instead of built-in skill servers.
+- Ship a copyable `AGENTS.md` prompt with a `Using Skills` section that teaches
+  agents to use the `upskill` MCP server for skill work instead of built-in
+  skill servers.
 
 ## Non-Goals
 
@@ -1110,6 +1111,8 @@ configuration. It must instruct agents to:
 
 - Use the `upskill` MCP server for skill listing, searching, reading, and
   overlay edits.
+- Treat rendered agent-local skill files as generated output, not as the source
+  to edit when a user asks to fix a skill.
 - Treat base skills returned by `upskill` as read-only.
 - Use draft tools for creating new skills or iterating on upstream revisions.
 - Use local archive import from the configured import inbox for skill bundles
@@ -1224,5 +1227,5 @@ configuration. It must instruct agents to:
 
 ### Prompt
 
-- `prompts/AGENTS.md` exists and tells agents to use `upskill` MCP tools for
-  skill operations, drafts, imports, and overlays.
+- `prompts/AGENTS.md` exists, has a `Using Skills` heading, and tells agents to
+  use `upskill` MCP tools for skill operations, drafts, imports, and overlays.

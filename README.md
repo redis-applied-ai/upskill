@@ -376,6 +376,8 @@ rejects managed upskill directories such as `store/`, `rendered/`, `overlays/`,
 
 Copy `prompts/AGENTS.md` into an agent configuration when you want an agent to
 use `upskill` MCP tools for skill management instead of built-in skill servers.
+The prompt's `Using Skills` section tells agents that agent-local `SKILL.md`
+files are rendered output, not the source to edit when a skill needs to change.
 
 ## Sync Semantics
 

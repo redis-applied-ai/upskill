@@ -1,11 +1,31 @@
-# Skill Management
+# Using Skills
 
 Use the `upskill` MCP server for skill work whenever its tools are available.
 Do not use built-in skill servers for listing, searching, reading, creating, or
 customizing skills unless the `upskill` MCP server is unavailable.
 
-Base skills from `upskill` are read-only. Treat synced base skill files as
-vendor-managed content.
+Treat every skill file visible in an agent-local skill directory as rendered
+output. A rendered skill is the effective result of:
+
+1. The installed base skill.
+2. Global overlays.
+3. Agent-specific overlays.
+
+Rendered skill directories are generated output and are safe to delete or
+regenerate. Do not edit rendered `SKILL.md` files, rendered support files,
+agent output directories such as `~/.codex/skills` or `~/.claude/skills`, or
+the synced base store to fix a skill.
+
+Use the right write target:
+
+- Use an overlay when the requested change is local, team-specific, or
+  agent-specific behavior.
+- Use a draft when the base skill itself should change upstream or when you are
+  creating a new skill.
+- Ask for scope only when the user's requested fix could reasonably be either
+  a local overlay or an upstream base-skill revision.
+
+## Reading Skills
 
 - Start by calling `find_skills` with no query to list available base skills and
   drafts. Use a `query` only when narrowing the list.
@@ -13,26 +33,47 @@ vendor-managed content.
   `draft:<skill-name>` and should be passed back exactly as returned.
 - Use `read_skill`, `list_skill_files`, and `read_skill_file` to inspect base
   or draft skill bodies and support files.
-- When using a rendered skill, read the skill body first, then list/read any
-  support files referenced by the skill before acting on it.
+- When using a rendered skill, call `read_skill` with `rendered: true`, read the
+  skill body first, then list/read any support files referenced by the skill
+  before acting on it.
+
+## Changing Skills With Overlays
 
 For lightweight customization of an existing skill, write overlays through
 `upskill` MCP tools:
 
-- Use `upsert_skill_overlay_file` to add append, replace, file, template, or
-  JSON Patch overlays.
+- Use `upsert_skill_overlay_file` to add `append`, `root_append`, `files`,
+  `replace`, `template`, or JSON Patch overlays.
 - Use `delete_skill_overlay_file` only for overlay files.
+- Prefer agent-specific overlays when a change should apply only to one agent.
+  Use global overlays only for customization that should affect every agent.
 - Use `render_skill` to inspect the effective result after overlay edits.
 - After writing an overlay, render the skill and read the rendered skill again
   to verify the intended text or file change is present.
 - Use `sync_skills` when synced base skills and rendered agent outputs should be
   refreshed. Treat its `updated_count`, `rendered_count`, and warnings as the
   source of truth for what happened.
-- Template overlays must be full Jinja template files with `.j2` paths. Do not
-  send JSON variable maps as template overlays.
+- Template overlays must be complete Jinja template files with `.j2` paths. Do
+  not send JSON or YAML variable maps as template overlays.
 
-Prefer agent-specific overlays when a change should apply only to one agent.
-Use global overlays only for customization that should affect every agent.
+The equivalent CLI workflow is:
+
+```bash
+upskill render <skill-name> --print --agent <agent>
+upskill render <skill-name> --print --base-only --agent <agent>
+upskill overlay edit <skill-name> --agent <agent>
+upskill overlay diff <skill-name> --agent <agent>
+upskill render <skill-name> --agent <agent>
+```
+
+For a template overlay:
+
+```bash
+upskill overlay edit <skill-name> --agent <agent> --operation template --file SKILL.md.j2
+upskill render <skill-name> --print --agent <agent>
+```
+
+## Changing Base Skills With Drafts
 
 For creating a new skill or drafting a new upstream version, use draft tools:
 
@@ -68,11 +109,26 @@ For creating a new skill or drafting a new upstream version, use draft tools:
   equivalent workflow. For an existing locked skill, use `sync_skills` or
   `upskill update <skill-name>` after the source change is ready.
 
+The equivalent CLI workflow is:
+
+```bash
+upskill draft create <draft-name> --from <skill-name>
+upskill draft edit <draft-name>
+upskill draft render <draft-name> --agent <agent> --copy=false
+upskill draft diff <draft-name>
+upskill draft promote <draft-name> --to-source <source-name> --dry-run
+```
+
+Use `--from-rendered` only when the draft should intentionally start from the
+rendered effective skill, including local overlays.
+
 Never attempt to overwrite base `SKILL.md` files or base support files through
 the MCP server. If a base skill needs to change, create a version draft, iterate
 locally, promote it into an upstream checkout or named source, and then use the
 normal upstream review process.
 
 If the `upskill` MCP server or any of these tools are unavailable, tell the user
-which tool is missing and ask them to configure or restart the MCP server. Do
-not silently fall back to a built-in skill store for writes.
+which tool is missing and ask them to configure or restart the MCP server. If
+the CLI is available, use `upskill <command> --help` for the matching overlay,
+draft, render, sync, or source workflow. Do not silently fall back to editing a
+built-in skill store or rendered agent-local files.
