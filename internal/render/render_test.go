@@ -84,6 +84,36 @@ func TestRenderAppliesGlobalAndAgentOverlaysAndCopies(t *testing.T) {
 	}
 }
 
+func TestRenderInfersFrontmatterForBareMarkdownSkill(t *testing.T) {
+	cfg := testConfig(t)
+	writeFile(t, filepath.Join(cfg.StoreDir, "new-sesons-groceries", "SKILL.md"), `# New Seasons Market
+
+Store-specific notes for grocery runs at New Seasons Market on Instacart.
+
+## Setup
+
+- Store slug: `+"`new-seasons-market`"+`
+`)
+
+	results, err := (Renderer{Config: cfg}).Render(Options{Skill: "new-sesons-groceries", Agent: "codex", Copy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || len(results[0].CopiedTo) != 1 {
+		t.Fatalf("results = %#v", results)
+	}
+	rendered := readFile(t, filepath.Join(cfg.AgentOutputs[1].Path, "new-sesons-groceries", "SKILL.md"))
+	for _, want := range []string{
+		"---\nname: \"new-sesons-groceries\"",
+		"description: \"Store-specific notes for grocery runs at New Seasons Market on Instacart.\"",
+		"# New Seasons Market",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
 func TestRenderSkipsUnchangedInputs(t *testing.T) {
 	cfg := testConfig(t)
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "Base.\n")

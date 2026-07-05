@@ -886,7 +886,7 @@ func runUse(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
-	fmt.Fprint(stdout, sourceSkill.Body)
+	fmt.Fprint(stdout, sourceSkill.EntrypointText())
 	return 0
 }
 

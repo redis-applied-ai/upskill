@@ -115,6 +115,11 @@ writing. `upskill update --diff` previews incoming file changes. `upskill
 update` applies updates, and `upskill sync` updates all locked skills and
 renders final agent outputs.
 
+When a `SKILL.md` has no frontmatter block, Upskill infers default `name` and
+`description` values from the directory name and first prose paragraph for
+search/list output and rendered agent copies. The original source file is left
+unchanged.
+
 The primary local example source is `./examples`:
 
 ```bash

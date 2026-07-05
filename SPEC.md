@@ -195,6 +195,9 @@ Rules:
 - `SKILL.md` frontmatter `name` is preferred as the skill name.
 - If frontmatter has no name, the directory name is used.
 - `description` is optional but included in search/list output when present.
+- If a `SKILL.md` has no frontmatter block, Upskill infers default `name` and
+  `description` metadata from the directory name and first prose paragraph for
+  search/list output and rendered agent copies.
 - Installed skill names are normalized to lowercase kebab-case for store paths.
 - The full skill directory, including support files, is copied into the store.
 
@@ -866,9 +869,11 @@ For each skill and output agent:
 4. Render base `.j2` templates into non-`.j2` output files.
 5. Apply the global overlay, if present.
 6. Apply the agent overlay, if present.
-7. Write `.upskill-render.json`.
-8. Replace the final rendered cache directory atomically when possible.
-9. If copy is enabled, replace only the output skill directory.
+7. If the final `SKILL.md` has no frontmatter block, prepend inferred default
+   `name` and `description` frontmatter without changing the stored source.
+8. Write `.upskill-render.json`.
+9. Replace the final rendered cache directory atomically when possible.
+10. If copy is enabled, replace only the output skill directory.
 
 Within each overlay layer, operations apply in this order:
 
@@ -884,7 +889,7 @@ Every rendered skill contains `.upskill-render.json`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "skill": "redis",
   "agent": "codex",
   "mode": "with-overlays",
