@@ -1,9 +1,9 @@
 # upskill
 
 `upskill` is a standalone Go CLI and stdio MCP server for agent skills. It can
-install skills from local or Git sources, update the synced base store, render
-global and agent-specific overlays, and expose skills to agents through MCP
-without allowing agents to overwrite base skills.
+install skills from local or Git sources, update the synced base store, build
+generated output from local customizations, and expose skills to agents through
+MCP without allowing agents to overwrite base skills.
 
 ## Quick Start
 
@@ -13,7 +13,7 @@ mkdir -p ~/.local/bin
 install -m 0755 bin/upskill ~/.local/bin/upskill
 upskill doctor
 upskill add ./examples --skill hello-skill --agent codex
-upskill render hello-skill --print --agent codex
+upskill show hello-skill --agent codex
 ```
 
 The binary is written to `bin/upskill`. Installing it to `~/.local/bin` is
@@ -22,8 +22,8 @@ optional; you can also run `bin/upskill` directly.
 Start with [docs/getting-started.md](docs/getting-started.md) for installation,
 first-run config, the local example skill, and MCP setup. Use
 [docs/workflows.md](docs/workflows.md) for task-oriented examples covering
-overlays through MCP, drafts, promotion to PRs, updates, and Jinja template
-overlays.
+local customizations through MCP, drafts, promotion to PRs, updates, and Jinja
+template customizations.
 
 For repository validation:
 
@@ -39,12 +39,13 @@ and examples.
 
 ```bash
 upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
-upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
+upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
 upskill list|ls [--json] [--agent AGENT]
 upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
+upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
 upskill init [name] [--dir DIR]
 upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
 upskill status
@@ -62,13 +63,18 @@ upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref 
 upskill source remove|rm <source-or-name>
 ```
 
-Overlay rendering:
+Local customizations:
 
 ```bash
 upskill overlay list|ls [--skill NAME] [--agent AGENT] [--json]
 upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]
 upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation OPERATION] [--no-edit]
 upskill overlay diff <skill-name> [--agent AGENT]
+```
+
+Generated output:
+
+```bash
 upskill render [skill-name] [--agent AGENT] [--copy=false]
 upskill render <skill-name> --print [--file SKILL.md] [--base-only]
 ```
@@ -168,7 +174,16 @@ rendered/
 
 Most commands create the managed files and directories they need automatically.
 Use `upskill status` to inspect the current home, store path, installed skill
-count, overlay count, and draft count.
+count, overlay count, and draft count. `doctor` and `status` warn when
+configured agent output directories contain skill folders that are not installed
+in Upskill from configured sources. Use `upskill migrate` to copy those
+unmanaged agent-output skills into a local source, install them from that
+source, and render managed output. By default, `migrate` reads from unmanaged
+agent output directories and writes to a `local-skills` source at
+`~/Documents/Upskill/local-skills`. The command is a dry run unless `--yes` is
+passed. Duplicate skill names are preserved with numeric suffixes such as
+`redis`, `redis-2`, and `redis-3`. `migrate` can also copy from one configured
+local source to another with `--from SOURCE --to-source NAME`.
 
 ## Local Sources
 
@@ -222,42 +237,40 @@ directories that already exist.
 
 ## Overlays
 
-An overlay is a local customization layered on top of an installed base skill.
-Use overlays when you want to change how a skill behaves for yourself, a team,
-or a specific agent without editing the synced copy in `store/`. The base skill
-can still update from its source; your overlay is reapplied the next time the
-skill is rendered.
+An overlay is a local customization layer for an installed skill. Use one when
+you want to change how a skill behaves for yourself, a team, or a specific agent
+without editing the synced copy in `store/`. The base skill can still update
+from its source; your overlay is reapplied the next time generated output is
+built.
+
+An overlay can append to `SKILL.md`, add a support file, replace a file, apply a
+JSON Patch to a JSON file, or provide a `.j2` template file. `upskill` applies
+those changes when it builds the effective skill output.
 
 For CLI users, overlays are editor-first. `upskill overlay add` creates the
-overlay file and opens `$VISUAL` or `$EDITOR` immediately. `upskill overlay
-edit` revisits an existing overlay or creates the requested overlay file before
-opening the editor. `--path` and `--no-edit` are available for scripts.
-MCP-connected agents can create overlays with `upsert_skill_overlay_file`.
+default `SKILL.md` append file and opens `$VISUAL` or `$EDITOR` immediately.
+`upskill overlay edit` revisits an existing overlay file or creates the
+requested operation file before opening the editor. `--path` and `--no-edit` are
+available for scripts. MCP-connected agents can create overlays with
+`upsert_skill_overlay_file`.
 
 Example: add Codex-only guidance to `hello-skill`:
 
 ```bash
 upskill add ./examples --skill hello-skill --agent codex
 upskill overlay add hello-skill --agent codex
-upskill render hello-skill --print --agent codex
+upskill render hello-skill --agent codex
+upskill show hello-skill --agent codex
 ```
 
 The editor opens the Codex-specific append overlay for `SKILL.md`. Save the
-guidance there, then render or sync to apply it.
+guidance there, then render or sync to build generated output.
 
 During render, `upskill` builds the effective skill in this order:
 
 1. Base skill from `store/<skill-name>/`
 2. Global overlay from `overlays/<skill-name>/`
 3. Agent overlay from `overlays/<skill-name>/agents/<agent>/`
-
-Rendering is repeatable, not a one-time migration. `add`, `update`, and `sync`
-render by default unless a command has a `--no-render` flag and you use it.
-Render output is skipped when the base skill, overlays, mode, and agent are
-unchanged.
-Run `upskill render <skill-name> --agent <agent>` manually while iterating on
-overlay files. `sync` always renders the final base-plus-overlay state; use
-`render --print --base-only` when you want to inspect the synced base by itself.
 
 The overlay directory layout controls the operation:
 
@@ -267,7 +280,7 @@ overlays/<skill>/agents/codex/SKILL.append.md       # append only for Codex
 overlays/<skill>/files/<path>                       # add a new file
 overlays/<skill>/replace/<path>                     # replace or create a file
 overlays/<skill>/patches/*.json                     # JSON Patch for a JSON file
-overlays/<skill>/templates/<path>.j2                # Jinja template overlay
+overlays/<skill>/templates/<path>.j2                # Jinja template file
 ```
 
 `files/<path>` adds a new file and fails if the file already exists.
@@ -293,6 +306,17 @@ AGENTS.append.md -> AGENTS.md
   ]
 }
 ```
+
+## Generated Output
+
+Most commands build generated output automatically. `add`, `update`, and `sync`
+render by default unless a command has a `--no-render` flag and you use it.
+
+Use `upskill render` when you need to rebuild or inspect generated output
+without updating base skills. This is useful after editing overlay files
+directly, changing agent output config, recreating `rendered/`, or checking the
+base skill with `--base-only`. Output is skipped when the base skill, overlays,
+mode, and agent are unchanged.
 
 ## Jinja Templates
 
@@ -369,7 +393,7 @@ promote_skill_draft
 ```
 
 MCP writes are limited to overlays and mutable drafts. Agents can read base or
-rendered skills, but they cannot overwrite `store/` through the MCP server.
+generated skills, but they cannot overwrite `store/` through the MCP server.
 Draft promotion can write only to a local checkout or named local source and
 rejects managed upskill directories such as `store/`, `rendered/`, `overlays/`,
 `drafts/`, and `imports/`.
@@ -377,12 +401,12 @@ rejects managed upskill directories such as `store/`, `rendered/`, `overlays/`,
 Copy `prompts/AGENTS.md` into an agent configuration when you want an agent to
 use `upskill` MCP tools for skill management instead of built-in skill servers.
 The prompt's `Using Skills` section tells agents that agent-local `SKILL.md`
-files are rendered output, not the source to edit when a skill needs to change.
+files are generated output, not the source to edit when a skill needs to change.
 
 ## Sync Semantics
 
-`upskill sync` updates locked base skills, renders overlays, and copies the
-effective final skill directories to configured outputs. If overlays exist,
+`upskill sync` updates locked base skills, builds generated output, and copies
+the effective final skill directories to configured outputs. If overlays exist,
 they are always applied. There is no `--with-overlays` or `--without-overlays`
 mode.
 
@@ -404,5 +428,5 @@ agent, base path, overlay paths, overlay hash, and timestamp.
 - `sync` updates locked skills and renders outputs. It does not discover a new
   skill that has never been installed; run `upskill add <source> --skill <name>`
   once for new skills.
-- Template overlays are full `.j2` files. They are not JSON or YAML variable
-  maps.
+- Template customization files are full `.j2` files. They are not JSON or YAML
+  variable maps.

@@ -15,9 +15,9 @@ fresh checkout without a remote skills repository.
 
 ## Configure Outputs
 
-`upskill` stores synced base skills under `~/.skills/store`, overlays under
-`~/.skills/overlays`, drafts under `~/.skills/drafts`, and generated output
-under `~/.skills/rendered`.
+`upskill` stores synced base skills under `~/.skills/store`, local
+customizations under `~/.skills/overlays`, drafts under `~/.skills/drafts`, and
+generated output under `~/.skills/rendered`.
 
 Configure agent output directories in `~/.skills/config.json`:
 
@@ -36,6 +36,38 @@ When a command prints a rendered path, use that path as the source of truth.
 If agents are configured, render output is agent-specific, such as
 `~/.skills/rendered/codex/<skill-name>`.
 
+## Migrate Existing Skills
+
+Use `migrate` when skill bundles already exist outside an Upskill source and
+you want them managed from a normal local source directory.
+
+The default migration reads unmanaged skills from configured agent output
+directories and writes them to a `local-skills` source:
+
+```bash
+upskill migrate
+upskill migrate --yes
+```
+
+The first command is a dry run. The second command copies the bundles into
+`~/Documents/Upskill/local-skills`, records that source if needed, installs the
+copied skills into `store/`, and renders managed output. Duplicate names are
+kept with numeric suffixes such as `redis`, `redis-2`, and `redis-3`.
+
+Limit migration to one agent or skill when reviewing a noisy system:
+
+```bash
+upskill migrate --from unmanaged --agent codex
+upskill migrate --from unmanaged --skill redis
+```
+
+You can also copy from one configured local source to another without deleting
+from the original source:
+
+```bash
+upskill migrate --from personal --to-source local-skills --skill redis --yes
+```
+
 ## Use An Obsidian Or Filesystem Directory
 
 Use a local source when skills already live in normal editable files and
@@ -49,7 +81,7 @@ upskill add personal --skill hello-skill --agent codex
 
 The local directory is the upstream skill source. `~/.skills/store` is the
 installed copy and should not be edited directly. Overlays, drafts, imports, and
-rendered output stay in the managed `upskill` home unless configured otherwise.
+generated output stay in the managed `upskill` home unless configured otherwise.
 
 You can also install directly from a raw local path:
 
@@ -81,7 +113,7 @@ After setup:
   writing base skills directly.
 
 For current limits such as local-only search, promotion boundaries, sync
-discovery behavior, and template overlay rules, see `README.md`.
+discovery behavior, and Jinja template customization rules, see `README.md`.
 
 ## Add One Skill
 
@@ -125,18 +157,19 @@ upskill source add ./examples --name local-examples
 upskill add local-examples --agent codex
 ```
 
-## Change A Skill With An Agent Using An Overlay
+## Customize An Installed Skill With An Agent
 
-Use overlays for local behavior changes after a run, especially when the base
-skill should stay upstream-managed.
+Use an overlay, which is a local customization layer, for behavior changes after
+a run. This is the right target when the base skill should stay
+upstream-managed.
 
 Example user instruction to an agent connected to the `upskill` MCP server:
 
 ```text
 The last run of hello-skill was too verbose. Use upskill to find hello-skill,
-read the rendered skill, add a Codex-specific overlay that tells it to
-answer concisely, render it, then read the rendered skill again to verify the
-overlay is present.
+read the rendered skill, add a Codex-specific local customization that tells it
+to answer concisely, build generated output, then read the rendered skill again
+to verify the customization is present.
 ```
 
 The agent should use MCP tools in this shape:
@@ -182,25 +215,26 @@ The agent should use MCP tools in this shape:
 ```
 
 Then the agent should call `read_skill` again with `rendered: true` and confirm
-the overlay text appears. MCP writes are overlay-only; agents cannot overwrite
-base skills through the MCP server.
+the customization text appears. MCP writes are overlay-only; agents cannot
+overwrite base skills through the MCP server.
 
 The equivalent CLI inspection command is:
 
 ```bash
-upskill render hello-skill --print --agent codex
+upskill show hello-skill --agent codex
 ```
 
-To author the same kinds of overlays without an MCP client:
+To author the same kinds of local customizations without an MCP client:
 
 ```bash
 upskill overlay edit hello-skill
 upskill overlay edit hello-skill --operation replace --file references/checklist.md
 upskill overlay edit hello-skill --operation patch --file metadata.patch.json
-upskill render hello-skill --print --agent codex
+upskill render hello-skill --agent codex
+upskill show hello-skill --agent codex
 ```
 
-Those overlay forms demonstrate root append, file replacement, and JSON Patch
+Those operations demonstrate root append, file replacement, and JSON Patch
 against `metadata.json`.
 
 ## Check For Updates
@@ -256,7 +290,7 @@ upskill sync --agent codex
 
 `sync` always applies overlays. There is no `--without-overlays` mode because
 sync publishes the effective local skill state. To inspect the base skill
-without overlays:
+without local customizations:
 
 ```bash
 upskill render hello-skill --print --base-only
@@ -286,7 +320,7 @@ If you want to inspect a known source without installing it:
 
 ```bash
 upskill source find ./examples hello
-upskill use ./examples --skill hello-skill
+upskill show ./examples --skill hello-skill
 ```
 
 If you want to make a common source easy to reuse, add it as a named source:
@@ -548,7 +582,7 @@ Important detail: `sync` updates locked skills. It does not discover brand-new
 skills that were not already installed. After a new skill PR merges, run
 `upskill add <source> --skill <new-skill>` once.
 
-## Advanced Jinja Template Overlays
+## Advanced Jinja Template Customizations
 
 Jinja rendering is enabled only for files ending in `.j2`. Non-`.j2` files are
 literal files.
@@ -586,9 +620,9 @@ Base examples.
 The rendered output strips `.j2`, so `SKILL.md.j2` renders to the final
 `SKILL.md` that agents load.
 
-### User Override With `super()`
+### Customize Template Blocks With `super()`
 
-Create a template overlay:
+Create a Jinja template customization:
 
 ```bash
 upskill overlay edit template-skill --operation template --file SKILL.md.j2
@@ -613,7 +647,7 @@ upskill render template-skill --copy=false
 upskill render template-skill --print
 ```
 
-For agent-specific template overrides:
+For agent-specific template customizations:
 
 ```bash
 upskill overlay edit template-skill --agent codex --operation template --file SKILL.md.j2

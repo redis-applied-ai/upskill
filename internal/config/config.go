@@ -15,7 +15,6 @@ var (
 )
 
 var WellKnownAgentOutputs = map[string]string{
-	"claude":      "~/.claude/skills",
 	"claude-code": "~/.claude/skills",
 	"codex":       "~/.codex/skills",
 }

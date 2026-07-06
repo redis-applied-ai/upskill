@@ -162,7 +162,7 @@ func TestHelpCommands(t *testing.T) {
 	if !strings.Contains(top, "usage: upskill <command> [args]") || !strings.Contains(top, "commands:") {
 		t.Fatalf("help output = %q", top)
 	}
-	for _, want := range []string{"add      Install", "find     Search", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run", "version  Print"} {
+	for _, want := range []string{"add      Install", "find     Search", "migrate  Migrate", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run", "version  Print"} {
 		if !strings.Contains(top, want) {
 			t.Fatalf("help output missing %q: %q", want, top)
 		}
@@ -258,7 +258,7 @@ func TestHelpCommands(t *testing.T) {
 
 	helpCommands := [][]string{
 		{"add", "--help"},
-		{"use", "--help"},
+		{"show", "--help"},
 		{"list", "--help"},
 		{"ls", "--help"},
 		{"find", "--help"},
@@ -267,6 +267,7 @@ func TestHelpCommands(t *testing.T) {
 		{"rm", "--help"},
 		{"update", "--help"},
 		{"sync", "--help"},
+		{"migrate", "--help"},
 		{"init", "--help"},
 		{"workon", "--help"},
 		{"source", "list", "--help"},
@@ -331,7 +332,9 @@ func TestHelpCommands(t *testing.T) {
 		t.Fatalf("draft import help missing checksum note: %q", draftImportHelp)
 	}
 	overlayEditHelp := runHelp("overlay", "edit", "--help")
-	if !strings.Contains(overlayEditHelp, "root-append") || !strings.Contains(overlayEditHelp, "files adds new files") {
+	if !strings.Contains(overlayEditHelp, "Default: root-append") ||
+		!strings.Contains(overlayEditHelp, "By default, this appends text to SKILL.md") ||
+		!strings.Contains(overlayEditHelp, "provide a Jinja template file") {
 		t.Fatalf("overlay edit help missing operation context: %q", overlayEditHelp)
 	}
 }
@@ -603,7 +606,7 @@ func TestPrintResultsSortsAndFormatsGeneric(t *testing.T) {
 		{Skill: "alpha", Agent: "codex", RenderedPath: "/rendered/alpha", Skipped: true},
 		{Skill: "bravo", Agent: "codex", RenderedPath: "/rendered/bravo", Skipped: true},
 	})
-	if strings.TrimSpace(stdout.String()) != "all rendered skills unchanged" {
+	if strings.TrimSpace(stdout.String()) != "codex: 2 rendered skills unchanged" {
 		t.Fatalf("unchanged output = %q", stdout.String())
 	}
 
@@ -612,7 +615,7 @@ func TestPrintResultsSortsAndFormatsGeneric(t *testing.T) {
 		{Skill: "alpha", Agent: "codex", RenderedPath: "/rendered/alpha", Skipped: true},
 		{Skill: "bravo", Agent: "codex", RenderedPath: "/rendered/bravo", CopiedTo: []string{"/target/bravo"}},
 	})
-	if !strings.Contains(stdout.String(), "bravo") || !strings.Contains(stdout.String(), "1 rendered skills unchanged") || strings.Contains(stdout.String(), "alpha [codex]") {
+	if !strings.Contains(stdout.String(), "bravo") || !strings.Contains(stdout.String(), "codex: 1 rendered skills unchanged") || strings.Contains(stdout.String(), "alpha [codex]") {
 		t.Fatalf("mixed unchanged output = %q", stdout.String())
 	}
 }
@@ -720,11 +723,11 @@ func TestStandaloneLibraryCommands(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"use", "redis-cache", "--agent", "codex"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("use code = %d stderr=%s", code, stderr.String())
+	if code := Run([]string{"show", "redis-cache", "--agent", "codex"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("show code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Use Redis 8.") {
-		t.Fatalf("use stdout = %q", stdout.String())
+		t.Fatalf("show stdout = %q", stdout.String())
 	}
 
 	writeTestFile(t, filepath.Join(sourceRoot, "skills", "redis", "SKILL.md"), "---\nname: Redis Cache\ndescription: fast cache\n---\n\nUse Redis 8.2.\n", 0o644)
@@ -906,6 +909,178 @@ func TestSourceInitStatusDoctorCommands(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "installed skills") {
 		t.Fatalf("status stdout = %q", stdout.String())
+	}
+}
+
+func TestStatusAndDoctorWarnAboutUnmanagedAgentOutputSkill(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "codex-skills", "gitnexus-repo-redis-sre-agent", "SKILL.md"), "# GitNexus\n", 0o644)
+
+	for _, command := range []string{"status", "doctor"} {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{command}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s code = %d stderr=%s", command, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "warning:") ||
+			!strings.Contains(stderr.String(), "gitnexus-repo-redis-sre-agent") ||
+			!strings.Contains(stderr.String(), "not installed in Upskill from any configured source") {
+			t.Fatalf("%s warning missing unmanaged skill context: %q", command, stderr.String())
+		}
+	}
+}
+
+func TestMigrateUnmanagedDryRunAndApply(t *testing.T) {
+	root, _ := setupEnv(t)
+	t.Setenv("HOME", root)
+	sourcePath := filepath.Join(root, "Documents", "Upskill", "local-skills")
+	writeTestFile(t, filepath.Join(root, "codex-skills", "orphan-skill", "SKILL.md"), "---\nname: orphan-skill\ndescription: orphan\n---\n\n# Orphan\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"migrate", "--agent", "codex"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("dry run code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "dry run: migrate from unmanaged; create source local-skills") ||
+		!strings.Contains(stdout.String(), sourcePath) ||
+		!strings.Contains(stdout.String(), "copy orphan-skill [codex]") {
+		t.Fatalf("dry run stdout = %q", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(sourcePath, "orphan-skill", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote source file: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"migrate", "--agent", "codex", "--yes"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: migrating 1 skill(s) from unmanaged") {
+		t.Fatalf("apply stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "installed orphan-skill") {
+		t.Fatalf("apply stdout = %q", stdout.String())
+	}
+	for _, path := range []string{
+		filepath.Join(sourcePath, "orphan-skill", "SKILL.md"),
+		filepath.Join(root, "home", "store", "orphan-skill", "SKILL.md"),
+		filepath.Join(root, "codex-skills", "orphan-skill", render.MarkerFile),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("missing migrated file %s: %v", path, err)
+		}
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sources["local-skills"].Source != sourcePath {
+		t.Fatalf("sources = %#v", cfg.Sources)
+	}
+}
+
+func TestMigrateUnmanagedPreservesDuplicateSkillNames(t *testing.T) {
+	root, configPath := setupEnv(t)
+	t.Setenv("HOME", root)
+	cfg := map[string]any{
+		"agents": map[string]string{
+			"claude-code": filepath.Join(root, "claude-skills"),
+			"codex":       filepath.Join(root, "codex-skills"),
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, configPath, string(data), 0o644)
+	sourcePath := filepath.Join(root, "Documents", "Upskill", "local-skills")
+	writeTestFile(t, filepath.Join(root, "claude-skills", "shared", "SKILL.md"), "---\nname: shared\ndescription: claude\n---\n\nClaude.\n", 0o644)
+	writeTestFile(t, filepath.Join(root, "codex-skills", "shared", "SKILL.md"), "---\nname: shared\ndescription: codex\n---\n\nCodex.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"migrate", "--yes"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("migrate code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "copy shared [claude-code]") ||
+		!strings.Contains(stdout.String(), "copy shared as shared-2 [codex]") ||
+		!strings.Contains(stdout.String(), "installed shared-2") {
+		t.Fatalf("migrate stdout = %q", stdout.String())
+	}
+	if body := readTestFile(t, filepath.Join(sourcePath, "shared-2", "SKILL.md")); !strings.Contains(body, "name: shared-2") || !strings.Contains(body, "Codex.") {
+		t.Fatalf("renamed duplicate body = %q", body)
+	}
+	for _, path := range []string{
+		filepath.Join(sourcePath, "shared", "SKILL.md"),
+		filepath.Join(sourcePath, "shared-2", "SKILL.md"),
+		filepath.Join(root, "home", "store", "shared", "SKILL.md"),
+		filepath.Join(root, "home", "store", "shared-2", "SKILL.md"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("missing migrated duplicate file %s: %v", path, err)
+		}
+	}
+}
+
+func TestMigrateLocalSourceToLocalSource(t *testing.T) {
+	root, _ := setupEnv(t)
+	fromPath := filepath.Join(root, "personal")
+	toPath := filepath.Join(root, "local-skills")
+	writeTestFile(t, filepath.Join(fromPath, "alpha", "SKILL.md"), "---\nname: Alpha\ndescription: source skill\n---\n\nAlpha.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", fromPath, "--name", "personal"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"migrate", "--from", "personal", "--to-source", "local-skills", "--to-source-path", toPath, "--skill", "alpha", "--yes"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("migrate source code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "apply: migrate from personal; create source local-skills") ||
+		!strings.Contains(stdout.String(), "copy alpha [personal]") ||
+		!strings.Contains(stdout.String(), "installed alpha") {
+		t.Fatalf("migrate source stdout = %q", stdout.String())
+	}
+	for _, path := range []string{
+		filepath.Join(fromPath, "alpha", "SKILL.md"),
+		filepath.Join(toPath, "alpha", "SKILL.md"),
+		filepath.Join(root, "home", "store", "alpha", "SKILL.md"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("missing source migration file %s: %v", path, err)
+		}
+	}
+}
+
+func TestMigrateHasNoLegacyAliases(t *testing.T) {
+	setupEnv(t)
+	var stdout, stderr bytes.Buffer
+	legacyCommand := "migrate-" + "unmanaged"
+	if code := Run([]string{legacyCommand, "--help"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("legacy migrate command unexpectedly succeeded: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown command: "+legacyCommand) {
+		t.Fatalf("legacy migrate command stderr = %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	legacyFlag := "--" + "source"
+	if code := Run([]string{"migrate", legacyFlag, "local-skills"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("legacy migrate flag unexpectedly succeeded: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown flag: "+legacyFlag) {
+		t.Fatalf("legacy migrate flag stderr = %q", stderr.String())
+	}
+}
+
+func TestShowHasNoOldCommandAlias(t *testing.T) {
+	setupEnv(t)
+	var stdout, stderr bytes.Buffer
+	oldCommand := "u" + "se"
+	if code := Run([]string{oldCommand, "--help"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("old show command unexpectedly succeeded: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown command: "+oldCommand) {
+		t.Fatalf("old show command stderr = %q", stderr.String())
 	}
 }
 
@@ -1515,7 +1690,7 @@ func TestCLIAdditionalBranches(t *testing.T) {
 
 	for _, args := range [][]string{
 		{"add"},
-		{"use"},
+		{"show"},
 		{"source"},
 	} {
 		stdout.Reset()
@@ -1528,8 +1703,8 @@ func TestCLIAdditionalBranches(t *testing.T) {
 	for _, args := range [][]string{
 		{"add", "bad source: value"},
 		{"add", ".", "--bad"},
-		{"use", "missing"},
-		{"use", ".", "--bad"},
+		{"show", "missing"},
+		{"show", ".", "--bad"},
 		{"list", "--bad"},
 		{"find", "--limit", "bad"},
 		{"remove"},
@@ -1629,11 +1804,11 @@ func TestCLIMoreFlagBranches(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"use", source, "--ref", "ignored", "--subpath", "skills", "--skill", "redis"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("use source flags code = %d stderr=%s", code, stderr.String())
+	if code := Run([]string{"show", source, "--ref", "ignored", "--subpath", "skills", "--skill", "redis"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("show source flags code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Base.") {
-		t.Fatalf("use source stdout = %q", stdout.String())
+		t.Fatalf("show source stdout = %q", stdout.String())
 	}
 	if code := Run([]string{"list", "--agent", "codex"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("list agent code = %d stderr=%s", code, stderr.String())
@@ -1919,8 +2094,8 @@ func TestCLICompletionBranches(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "home", "store", "redis"), "file-not-dir", 0o644)
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"use", "redis"}, &stdout, &stderr); code == 0 {
-		t.Fatal("use with file skill unexpectedly succeeded")
+	if code := Run([]string{"show", "redis"}, &stdout, &stderr); code == 0 {
+		t.Fatal("show with file skill unexpectedly succeeded")
 	}
 	if err := os.Remove(filepath.Join(root, "home", "store", "redis")); err != nil {
 		t.Fatal(err)

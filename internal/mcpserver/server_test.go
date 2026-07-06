@@ -211,6 +211,22 @@ func TestToolCallsReadAndOverlayOnlyWrites(t *testing.T) {
 	}
 }
 
+func TestMCPSyncWarnsAboutUnmanagedAgentOutputSkill(t *testing.T) {
+	cfg := testConfig(t)
+	writeFile(t, filepath.Join(cfg.AgentOutputs[0].Path, "gitnexus-repo-redis-sre-agent", "SKILL.md"), "# GitNexus\n")
+
+	synced, err := callTool(cfg, "sync_skills", map[string]any{"agent": "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := mustJSON(synced)
+	if !strings.Contains(text, `"warnings"`) ||
+		!strings.Contains(text, "gitnexus-repo-redis-sre-agent") ||
+		!strings.Contains(text, "not installed in Upskill from any configured source") {
+		t.Fatalf("sync warnings missing unmanaged skill context: %s", text)
+	}
+}
+
 func TestMCPDraftWorkflow(t *testing.T) {
 	cfg := testConfig(t)
 	created, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"})
@@ -430,19 +446,19 @@ func TestMCPTranscriptRegressionWorkflow(t *testing.T) {
 	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
 		t.Fatal(err)
 	}
-		sourceRoot := filepath.Join(t.TempDir(), "local", "source")
-		cfg.Sources["local"] = config.Source{Name: "local", Source: sourceRoot}
-		promoted, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "local", "dry_run": false})
+	sourceRoot := filepath.Join(t.TempDir(), "local", "source")
+	cfg.Sources["local"] = config.Source{Name: "local", Source: sourceRoot}
+	promoted, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "local", "dry_run": false})
 	if err != nil {
 		t.Fatal(err)
 	}
-		if !strings.Contains(mustJSON(promoted), `"source":"local"`) || !strings.Contains(readFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md")), "Base.") {
+	if !strings.Contains(mustJSON(promoted), `"source":"local"`) || !strings.Contains(readFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md")), "Base.") {
 		t.Fatalf("promoted = %#v", promoted)
 	}
 	if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_path": cfg.StoreDir}); err == nil {
 		t.Fatal("managed store promotion unexpectedly succeeded")
 	}
-		if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_path": sourceRoot, "to_source": "local"}); err == nil {
+	if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_path": sourceRoot, "to_source": "local"}); err == nil {
 		t.Fatal("to_path plus to_source unexpectedly succeeded")
 	}
 	cfg.Sources["remote"] = config.Source{Name: "remote", Source: "owner/repo"}

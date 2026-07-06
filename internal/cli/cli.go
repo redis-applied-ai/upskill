@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"upskill/internal/audit"
 	"upskill/internal/config"
 	"upskill/internal/draft"
 	"upskill/internal/fsutil"
@@ -66,10 +67,10 @@ examples:
   upskill add owner/repo --subpath skills --skill redis
   upskill add owner/repo --ref v1.2.0 --skill redis --no-render`
 
-	helpUse = `usage: upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
+	helpShow = `usage: upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
 
 summary:
-  Print an installed skill or preview a skill directly from a source.
+  Show an installed skill or preview a skill directly from a source.
 
 arguments:
   <source-or-skill> Installed skill ID, configured source name, local path,
@@ -87,10 +88,10 @@ notes:
   Reading an installed skill applies overlays for the selected agent.
 
 examples:
-  upskill use redis
-  upskill use redis --agent codex
-  upskill use Obsidian --skill redis
-  upskill use owner/repo --subpath skills --skill redis`
+  upskill show redis
+  upskill show redis --agent codex
+  upskill show Obsidian --skill redis
+  upskill show owner/repo --subpath skills --skill redis`
 
 	helpList = `usage: upskill list|ls [--json] [--agent AGENT]
 
@@ -181,19 +182,48 @@ examples:
 	helpSync = `usage: upskill sync [--agent AGENT]
 
 summary:
-  Update all locked skills and render the effective skill output.
+  Update all locked skills and build effective generated output.
 
 options:
-  --agent AGENT     Render only for one configured agent.
+  --agent AGENT     Build output only for one configured agent.
 
 notes:
-  sync is equivalent to updating locked skills, then rendering with overlays.
-  It writes installed store updates, lock metadata, rendered output, and agent
+  sync is equivalent to updating locked skills, then building generated output
+  with local customizations.
+  It writes installed store updates, lock metadata, generated output, and agent
   output copies when configured.
 
 examples:
   upskill sync
   upskill sync --agent codex`
+
+	helpMigrate = `usage: upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
+
+summary:
+  Migrate skill bundles into a local Upskill source.
+
+options:
+  --from SOURCE       Source to migrate from: unmanaged or a configured local
+                      source. Default: unmanaged.
+  --agent AGENT       With --from unmanaged, migrate one configured agent output.
+  --skill NAME        Migrate one skill by normalized name.
+  --to-source NAME    Source name to create or reuse. Default: local-skills.
+  --to-source-path DIR
+                      Local source directory for a new source. Default:
+                      ~/Documents/Upskill/local-skills.
+  --yes               Apply the migration. Without --yes, prints a dry run.
+
+notes:
+  The command copies skill folders into the target local source, installs them
+  from that source, then renders managed output back to configured agent
+  outputs. It does not delete from the source. Duplicate skill names are
+  preserved with numeric suffixes such as redis, redis-2, redis-3.
+
+examples:
+  upskill migrate
+  upskill migrate --from unmanaged --agent codex
+  upskill migrate --from unmanaged --agent codex --yes
+  upskill migrate --from personal --to-source local-skills --skill redis --yes`
 
 	helpInit = `usage: upskill init [name] [--dir DIR]
 
@@ -570,11 +600,11 @@ examples:
 	helpOverlayList = `usage: upskill overlay list|ls [--skill NAME] [--agent AGENT] [--json]
 
 summary:
-  List local overlay files.
+  List local customization files.
 
 options:
-  --skill NAME      Show overlays for one installed skill.
-  --agent AGENT     Show overlays for one agent.
+  --skill NAME      Show customizations for one installed skill.
+  --agent AGENT     Show customizations for one agent.
   --json            Print machine-readable JSON.
 
 examples:
@@ -585,15 +615,15 @@ examples:
 	helpOverlayAdd = `usage: upskill overlay add <skill-name> [--agent AGENT] [--path] [--no-edit]
 
 summary:
-  Create an overlay file for an installed skill.
+  Create a local customization file for an installed skill.
 
 arguments:
   <skill-name>      Installed skill ID.
 
 options:
-  --agent AGENT     Create an agent-specific overlay.
-  --path            Print the overlay path after creating it.
-  --no-edit         Create the overlay without launching an editor.
+  --agent AGENT     Create an agent-specific customization.
+  --path            Print the customization path after creating it.
+  --no-edit         Create the customization without launching an editor.
 
 examples:
   upskill overlay add redis
@@ -602,22 +632,21 @@ examples:
 	helpOverlayEdit = `usage: upskill overlay edit <skill-name> [--agent AGENT] [--file PATH] [--operation root-append|append|files|replace|template|patch] [--no-edit]
 
 summary:
-  Edit an overlay operation file for an installed skill.
+  Edit a local customization file for an installed skill.
 
 arguments:
   <skill-name>      Installed skill ID.
 
 options:
-  --agent AGENT       Edit an agent-specific overlay.
+  --agent AGENT       Edit an agent-specific customization.
   --file PATH         Relative file path for file-scoped operations.
-  --operation OP      Overlay operation. Default: root-append.
-  --no-edit           Create or verify the overlay file without launching an
-                      editor.
+  --operation OP      Customization operation. Default: root-append.
+  --no-edit           Create or verify the customization file without launching
+                      an editor.
 
 notes:
-  append adds to a base file, files adds new files, replace replaces files,
-  template adds template overrides, patch stores patch files, and root-append
-  appends to SKILL.md.
+  By default, this appends text to SKILL.md. Use --operation to add a file,
+  replace a file, apply a JSON patch, or provide a Jinja template file.
 
 examples:
   upskill overlay edit redis
@@ -627,42 +656,47 @@ examples:
 	helpOverlayDiff = `usage: upskill overlay diff <skill-name> [--agent AGENT]
 
 summary:
-  Show the rendered changes produced by overlays.
+  Show generated output changes produced by local customizations.
 
 arguments:
   <skill-name>      Installed skill ID.
 
 options:
-  --agent AGENT     Include overlays for one agent.
+  --agent AGENT     Include customizations for one agent.
 
 examples:
   upskill overlay diff redis
   upskill overlay diff redis --agent codex`
 
-	helpRender = `usage: upskill render [skill-name] [--agent AGENT] [--copy=false] [--print] [--base-only]
+	helpRender = `usage: upskill render [skill-name] [--agent AGENT] [--copy=false]
+       upskill render <skill-name> --print [--file PATH] [--base-only] [--agent AGENT]
 
 summary:
-  Render installed skills with overlays into effective skill output.
+  Build or inspect generated skill output.
 
 arguments:
   [skill-name]      Optional installed skill ID. Omit to render all installed
                     skills.
 
 options:
-  --agent AGENT     Render for one configured agent.
-  --copy=false      Render without copying to agent output directories.
-  --print           Print one rendered skill file to stdout.
-  --base-only       With --print, print the installed base file without overlays.
+  --agent AGENT     Build output for one configured agent.
+  --copy=false      Build without copying to agent output directories.
+  --print           Print one generated skill file to stdout.
+  --file PATH       With --print, print this relative file. Default: SKILL.md.
+  --base-only       With --print, print the installed base file without
+                    customizations.
 
 notes:
-  Rendering writes Upskill's rendered directory. Copying writes configured agent
-  output directories.
-  If the base skill, overlays, mode, and agent are unchanged, render reuses the
-  existing rendered directory.
+  add, update, and sync build generated output automatically. Use this command
+  when you need a local rebuild without updating base skills, or when you want
+  to inspect the effective output with --print or --base-only.
+  If the base skill, customizations, mode, and agent are unchanged, render reuses
+  the existing rendered directory.
 
 examples:
   upskill render redis --agent codex
   upskill render --copy=false
+  upskill render redis --print --file references/checklist.md
   upskill render redis --print --base-only`
 
 	helpMCP = `usage: upskill mcp
@@ -697,6 +731,9 @@ summary:
 notes:
   status reads configured store, overlay, and draft state. It does not create
   missing directories; use doctor for that.
+  It warns when configured agent output directories contain skill folders that
+  are not installed in Upskill from configured sources. Run upskill migrate to
+  copy those skills into a local source.
 
 examples:
   upskill status`
@@ -709,6 +746,9 @@ summary:
 notes:
   doctor creates the home, store, overlays, drafts, imports, and rendered
   directories when needed. It does not install or update skills.
+  It warns when configured agent output directories contain skill folders that
+  are not installed in Upskill from configured sources. Run upskill migrate to
+  copy those skills into a local source.
 
 examples:
   upskill doctor`
@@ -732,8 +772,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	switch args[0] {
 	case "add":
 		return runAdd(cfg, args[1:], stdout, stderr)
-	case "use":
-		return runUse(cfg, args[1:], stdout, stderr)
+	case "show":
+		return runShow(cfg, args[1:], stdout, stderr)
 	case "list", "ls":
 		return runList(cfg, args[1:], stdout, stderr)
 	case "find", "search":
@@ -744,6 +784,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runUpdate(cfg, args[1:], stdout, stderr)
 	case "sync":
 		return runSync(cfg, args[1:], stdout, stderr)
+	case "migrate":
+		return runMigrate(cfg, args[1:], stdout, stderr)
 	case "init":
 		return runInit(args[1:], stdout, stderr)
 	case "workon":
@@ -855,9 +897,9 @@ func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 	return renderInstalled(cfg, installed, agent, stdout, stderr)
 }
 
-func runUse(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+func runShow(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		printUsage(stdout, helpUse)
+		printUsage(stdout, helpShow)
 		return 0
 	}
 	input := args[0]
@@ -1055,7 +1097,406 @@ func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 		return 1
 	}
 	printResults(stdout, results)
+	warnAgentOutputSkills(cfg, agent, stderr)
 	return 0
+}
+
+const (
+	migrationSourceUnmanaged = "unmanaged"
+	defaultMigrationToSource = "local-skills"
+	defaultMigrationToPath   = "~/Documents/Upskill/local-skills"
+)
+
+type migrationCandidate struct {
+	Skill             string
+	OriginalSkill     string
+	OriginalStoreName string
+	Origin            string
+	SourcePath        string
+	DestinationPath   string
+}
+
+type migrationPlan struct {
+	From       string
+	Agent      string
+	ToSource   string
+	ToPath     string
+	ToRecord   config.Source
+	ToExists   bool
+	Candidates []migrationCandidate
+}
+
+func runMigrate(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+	from := migrationSourceUnmanaged
+	agent := ""
+	skill := ""
+	toSource := defaultMigrationToSource
+	toPath := ""
+	apply := false
+	if err := parseFlags(args, map[string]func(string) error{
+		"--from": func(v string) error {
+			from = strings.TrimSpace(v)
+			return nil
+		},
+		"--agent": func(v string) error { agent = v; return nil },
+		"--skill": func(v string) error {
+			skill = library.NormalizeName(v)
+			return nil
+		},
+		"--to-source":      func(v string) error { toSource = v; return nil },
+		"--to-source-path": func(v string) error { toPath = v; return nil },
+		"--yes":            func(_ string) error { apply = true; return nil },
+	}); err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 2
+	}
+	plan, err := buildMigrationPlan(cfg, from, agent, skill, toSource, toPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	printMigrationPlan(stdout, plan, !apply)
+	if len(plan.Candidates) == 0 {
+		return 0
+	}
+	if !apply {
+		return 0
+	}
+	fmt.Fprintf(stderr, "warning: migrating %d skill(s) from %s into source %s at %s\n", len(plan.Candidates), plan.From, plan.ToSource, plan.ToPath)
+	if err := applyMigration(&cfg, plan); err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	var installed []library.InstalledSkill
+	for _, candidate := range plan.Candidates {
+		items, err := library.InstallSource(cfg, plan.ToSource, library.InstallOptions{SkillFilter: candidate.Skill})
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		installed = append(installed, items...)
+	}
+	printInstalled(stdout, installed, "installed")
+	return renderInstalled(cfg, installed, agent, stdout, stderr)
+}
+
+func buildMigrationPlan(cfg config.Config, from string, agent string, skill string, toSource string, toPath string) (migrationPlan, error) {
+	from = strings.TrimSpace(from)
+	if from == "" {
+		from = migrationSourceUnmanaged
+	}
+	toSource = strings.TrimSpace(toSource)
+	if toSource == "" {
+		return migrationPlan{}, fmt.Errorf("--to-source must not be empty")
+	}
+	toRecord, toExists, resolvedPath, err := resolveMigrationTarget(cfg, toSource, toPath)
+	if err != nil {
+		return migrationPlan{}, err
+	}
+	var candidates []migrationCandidate
+	switch from {
+	case migrationSourceUnmanaged:
+		candidates, err = unmanagedMigrationCandidates(cfg, agent, skill, resolvedPath)
+	default:
+		if agent != "" {
+			return migrationPlan{}, fmt.Errorf("--agent can only be used with --from unmanaged")
+		}
+		candidates, err = sourceMigrationCandidates(cfg, from, skill, resolvedPath)
+	}
+	if err != nil {
+		return migrationPlan{}, err
+	}
+	return migrationPlan{
+		From:       from,
+		Agent:      agent,
+		ToSource:   toSource,
+		ToPath:     resolvedPath,
+		ToRecord:   toRecord,
+		ToExists:   toExists,
+		Candidates: candidates,
+	}, nil
+}
+
+func resolveMigrationTarget(cfg config.Config, sourceName string, sourcePath string) (config.Source, bool, string, error) {
+	if _, ok := library.ResolveNamedSource(cfg, sourceName); ok {
+		if sourcePath != "" {
+			return config.Source{}, false, "", fmt.Errorf("--to-source-path cannot be used when source %s already exists", sourceName)
+		}
+		resolved, err := library.ResolveLocalSourceDestination(cfg, sourceName)
+		if err != nil {
+			return config.Source{}, false, "", err
+		}
+		source, _ := library.ResolveNamedSource(cfg, sourceName)
+		return source, true, resolved, nil
+	}
+	if sourcePath == "" {
+		sourcePath = defaultMigrationToPath
+	}
+	source, _, err := library.CanonicalSource(sourcePath, sourceName, "", "")
+	if err != nil {
+		return config.Source{}, false, "", err
+	}
+	parsed, err := library.ParseSource(source.Source)
+	if err != nil {
+		return config.Source{}, false, "", err
+	}
+	if parsed.Type != "local" {
+		return config.Source{}, false, "", fmt.Errorf("migration source path must be a local directory")
+	}
+	return source, false, parsed.LocalPath, nil
+}
+
+func unmanagedMigrationCandidates(cfg config.Config, agent string, skillFilter string, targetRoot string) ([]migrationCandidate, error) {
+	candidates := []migrationCandidate{}
+	for _, warning := range audit.AgentOutputWarnings(cfg, agent) {
+		if warning.Skill == "" || !strings.Contains(warning.Reason, "not installed in Upskill") {
+			continue
+		}
+		storeName := library.NormalizeName(warning.Skill)
+		if skillFilter != "" && storeName != skillFilter {
+			continue
+		}
+		candidates = append(candidates, migrationCandidate{
+			Skill:             storeName,
+			OriginalSkill:     storeName,
+			OriginalStoreName: skillStoreNameForMigration(warning.SkillPath, storeName),
+			Origin:            warning.Agent,
+			SourcePath:        warning.SkillPath,
+		})
+	}
+	return assignMigrationDestinations(candidates, targetRoot)
+}
+
+func sourceMigrationCandidates(cfg config.Config, sourceName string, skillFilter string, targetRoot string) ([]migrationCandidate, error) {
+	sourceRoot, err := library.ResolveLocalSourceDestination(cfg, sourceName)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Clean(sourceRoot) == filepath.Clean(targetRoot) {
+		return nil, fmt.Errorf("source %s and target source resolve to the same directory", sourceName)
+	}
+	skills, err := library.DiscoverSkillsWithIgnore(sourceRoot, "", cfg.SourceIgnore)
+	if err != nil {
+		return nil, err
+	}
+	candidates := []migrationCandidate{}
+	for _, skill := range skills {
+		if skillFilter != "" && skill.StoreName != skillFilter {
+			continue
+		}
+		candidates = append(candidates, migrationCandidate{
+			Skill:             skill.StoreName,
+			OriginalSkill:     skill.StoreName,
+			OriginalStoreName: skill.StoreName,
+			Origin:            sourceName,
+			SourcePath:        skill.Path,
+		})
+	}
+	return assignMigrationDestinations(candidates, targetRoot)
+}
+
+func assignMigrationDestinations(candidates []migrationCandidate, targetRoot string) ([]migrationCandidate, error) {
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Skill != candidates[j].Skill {
+			return candidates[i].Skill < candidates[j].Skill
+		}
+		if candidates[i].Origin != candidates[j].Origin {
+			return candidates[i].Origin < candidates[j].Origin
+		}
+		return candidates[i].SourcePath < candidates[j].SourcePath
+	})
+	used := map[string]struct{}{}
+	for i := range candidates {
+		name, err := nextMigrationSkillName(targetRoot, candidates[i].Skill, used)
+		if err != nil {
+			return nil, err
+		}
+		used[name] = struct{}{}
+		candidates[i].Skill = name
+		candidates[i].DestinationPath = filepath.Join(targetRoot, name)
+	}
+	return candidates, nil
+}
+
+func nextMigrationSkillName(targetRoot string, base string, used map[string]struct{}) (string, error) {
+	if base == "" {
+		return "", fmt.Errorf("cannot migrate skill with empty name")
+	}
+	for n := 1; ; n++ {
+		name := base
+		if n > 1 {
+			name = fmt.Sprintf("%s-%d", base, n)
+		}
+		if _, ok := used[name]; ok {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(targetRoot, name))
+		if err == nil {
+			if !info.IsDir() {
+				return "", fmt.Errorf("%s exists and is not a directory", filepath.Join(targetRoot, name))
+			}
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		return name, nil
+	}
+}
+
+func printMigrationPlan(w io.Writer, plan migrationPlan, dryRun bool) {
+	if len(plan.Candidates) == 0 {
+		fmt.Fprintln(w, "no skills to migrate")
+		return
+	}
+	mode := "apply"
+	if dryRun {
+		mode = "dry run"
+	}
+	status := "create"
+	if plan.ToExists {
+		status = "reuse"
+	}
+	fmt.Fprintf(w, "%s: migrate from %s; %s source %s at %s\n", mode, plan.From, status, plan.ToSource, plan.ToPath)
+	for _, candidate := range plan.Candidates {
+		label := candidate.OriginalSkill
+		if candidate.Skill != candidate.OriginalSkill {
+			label = fmt.Sprintf("%s as %s", candidate.OriginalSkill, candidate.Skill)
+		}
+		fmt.Fprintf(w, "copy %s [%s] -> %s\n", label, candidate.Origin, candidate.DestinationPath)
+	}
+	if dryRun {
+		fmt.Fprintln(w, "dry run: rerun with --yes to migrate and render managed output")
+	}
+}
+
+func applyMigration(cfg *config.Config, plan migrationPlan) error {
+	if cfg.Sources == nil {
+		cfg.Sources = map[string]config.Source{}
+	}
+	if !plan.ToExists {
+		cfg.Sources[config.SourceKey(plan.ToRecord)] = plan.ToRecord
+	}
+	for _, candidate := range plan.Candidates {
+		if err := copyMigrationCandidate(candidate); err != nil {
+			return err
+		}
+	}
+	if !plan.ToExists {
+		if err := config.SaveSources(*cfg, cfg.Sources); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyMigrationCandidate(candidate migrationCandidate) error {
+	tmp := candidate.DestinationPath + ".tmp"
+	if err := os.RemoveAll(tmp); err != nil {
+		return err
+	}
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.RemoveAll(tmp)
+		}
+	}()
+	if err := fsutil.CopyDir(candidate.SourcePath, tmp, nil); err != nil {
+		return err
+	}
+	if candidate.OriginalStoreName != "" && candidate.OriginalStoreName != candidate.Skill {
+		if err := rewriteMigratedSkillName(tmp, candidate.Skill); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(candidate.DestinationPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, candidate.DestinationPath); err != nil {
+		return err
+	}
+	removeTmp = false
+	return nil
+}
+
+func skillStoreNameForMigration(skillPath string, fallback string) string {
+	data, err := os.ReadFile(filepath.Join(skillPath, "SKILL.md"))
+	if err != nil {
+		return fallback
+	}
+	name, ok := skillFrontmatterName(string(data))
+	if !ok || name == "" {
+		return fallback
+	}
+	storeName := library.NormalizeName(name)
+	if storeName == "" {
+		return fallback
+	}
+	return storeName
+}
+
+func rewriteMigratedSkillName(root string, name string) error {
+	path := filepath.Join(root, "SKILL.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	updated, changed := rewriteFrontmatterName(string(data), name)
+	if !changed {
+		return nil
+	}
+	return os.WriteFile(path, []byte(updated), 0o644)
+}
+
+func skillFrontmatterName(text string) (string, bool) {
+	if !strings.HasPrefix(text, "---\n") && !strings.HasPrefix(text, "---\r\n") {
+		return "", false
+	}
+	lines := strings.SplitAfter(text, "\n")
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "---" {
+			return "", false
+		}
+		if strings.HasPrefix(line, "name:") {
+			name := strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+			name = strings.Trim(name, `"'`)
+			return name, true
+		}
+	}
+	return "", false
+}
+
+func rewriteFrontmatterName(text string, name string) (string, bool) {
+	if !strings.HasPrefix(text, "---\n") && !strings.HasPrefix(text, "---\r\n") {
+		return text, false
+	}
+	lines := strings.SplitAfter(text, "\n")
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "name:") {
+			lines[i] = "name: " + name + migrationLineEnding(lines[i])
+			return strings.Join(lines, ""), true
+		}
+		if line == "---" {
+			ending := migrationLineEnding(lines[0])
+			next := append([]string{}, lines[:i]...)
+			next = append(next, "name: "+name+ending)
+			next = append(next, lines[i:]...)
+			return strings.Join(next, ""), true
+		}
+	}
+	return text, false
+}
+
+func migrationLineEnding(line string) string {
+	if strings.HasSuffix(line, "\r\n") {
+		return "\r\n"
+	}
+	return "\n"
 }
 
 func runInit(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -2151,6 +2592,9 @@ func runRender(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		return 1
 	}
 	printResults(stdout, results)
+	if copyOutput && !baseOnly {
+		warnAgentOutputSkills(cfg, agent, stderr)
+	}
 	return 0
 }
 
@@ -2179,6 +2623,7 @@ func runStatus(cfg config.Config, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "home: %s\nstore: %s\ninstalled skills: %d\noverlays: %d\ndrafts: %d\n", cfg.Home, cfg.StoreDir, len(skills), len(overlays), len(drafts))
+	warnAgentOutputSkills(cfg, "", stderr)
 	return 0
 }
 
@@ -2190,6 +2635,7 @@ func runDoctor(cfg config.Config, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	fmt.Fprintln(stdout, "ok")
+	warnAgentOutputSkills(cfg, "", stderr)
 	return 0
 }
 
@@ -2202,7 +2648,28 @@ func renderInstalled(cfg config.Config, installed []library.InstalledSkill, agen
 		}
 		printResults(stdout, results)
 	}
+	warnAgentOutputSkills(cfg, agent, stderr)
 	return 0
+}
+
+func warnAgentOutputSkills(cfg config.Config, agent string, stderr io.Writer) {
+	warnings := audit.AgentOutputWarnings(cfg, agent)
+	migratable := false
+	for _, warning := range warnings {
+		if warning.Skill != "" && strings.Contains(warning.Reason, "not installed in Upskill") {
+			migratable = true
+		}
+	}
+	for _, warning := range audit.AgentOutputWarningMessages(cfg, agent) {
+		fmt.Fprintf(stderr, "warning: %s\n", warning)
+	}
+	if migratable {
+		command := "upskill migrate"
+		if agent != "" {
+			command += " --agent " + agent
+		}
+		fmt.Fprintf(stderr, "hint: run %q to copy unmanaged skills into a local source, or add --yes to apply\n", command)
+	}
 }
 
 func printInstalled(w io.Writer, installed []library.InstalledSkill, verb string) {
@@ -2264,16 +2731,30 @@ func printResults(w io.Writer, results []render.Result) {
 		fmt.Fprintf(w, "%s [%s] -> %s (%s)\n", result.Skill, agent, result.RenderedPath, copied)
 	}
 	unchanged := 0
+	unchangedByAgent := map[string]int{}
 	for _, result := range results {
 		if result.Skipped && len(result.CopiedTo) == 0 {
 			unchanged++
+			unchangedByAgent[resultAgent(result)]++
 		}
 	}
-	if unchanged == len(results) && unchanged > 0 {
-		fmt.Fprintln(w, "all rendered skills unchanged")
-	} else if unchanged > 0 {
-		fmt.Fprintf(w, "%d rendered skills unchanged\n", unchanged)
+	if unchanged > 0 {
+		agents := make([]string, 0, len(unchangedByAgent))
+		for agent := range unchangedByAgent {
+			agents = append(agents, agent)
+		}
+		sort.Strings(agents)
+		for _, agent := range agents {
+			fmt.Fprintf(w, "%s: %d rendered skills unchanged\n", agent, unchangedByAgent[agent])
+		}
 	}
+}
+
+func resultAgent(result render.Result) string {
+	if result.Agent == "" {
+		return "generic"
+	}
+	return result.Agent
 }
 
 type tableColumn struct {
@@ -2547,7 +3028,7 @@ func parseFlagsWithValues(args []string, handlers map[string]func(string) error,
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--operation":
+	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--to-source-path", "--operation":
 		return true
 	default:
 		return false
@@ -2573,8 +3054,8 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 	switch args[0] {
 	case "add":
 		return printDirectHelp(args, w, helpAdd)
-	case "use":
-		return printDirectHelp(args, w, helpUse)
+	case "show":
+		return printDirectHelp(args, w, helpShow)
 	case "list", "ls":
 		return printDirectHelp(args, w, helpList)
 	case "find", "search":
@@ -2585,6 +3066,8 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printDirectHelp(args, w, helpUpdate)
 	case "sync":
 		return printDirectHelp(args, w, helpSync)
+	case "migrate":
+		return printDirectHelp(args, w, helpMigrate)
 	case "init":
 		return printDirectHelp(args, w, helpInit)
 	case "workon":
@@ -2688,18 +3171,19 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  add      Install skills from a source")
-	fmt.Fprintln(w, "  use      Print a source or installed skill")
+	fmt.Fprintln(w, "  show     Show a source or installed skill")
 	fmt.Fprintln(w, "  list     List installed skills")
 	fmt.Fprintln(w, "  find     Search installed skills")
 	fmt.Fprintln(w, "  remove   Remove installed skills")
 	fmt.Fprintln(w, "  update   Update installed skills from their locked sources")
-	fmt.Fprintln(w, "  sync     Update skills and render overlays")
+	fmt.Fprintln(w, "  sync     Update skills and build generated output")
+	fmt.Fprintln(w, "  migrate  Migrate skill bundles into a local source")
 	fmt.Fprintln(w, "  init     Create a new skill bundle")
 	fmt.Fprintln(w, "  workon   Create or open a mutable draft")
 	fmt.Fprintln(w, "  source   Manage skill sources")
 	fmt.Fprintln(w, "  draft    Manage mutable skill drafts")
-	fmt.Fprintln(w, "  overlay  Manage skill overlays")
-	fmt.Fprintln(w, "  render   Render skills with overlays")
+	fmt.Fprintln(w, "  overlay  Manage local skill customizations")
+	fmt.Fprintln(w, "  render   Build or inspect generated skill output")
 	fmt.Fprintln(w, "  mcp      Run the MCP server")
 	fmt.Fprintln(w, "  version  Print the current version")
 	fmt.Fprintln(w, "  status   Show local upskill state")
@@ -2712,10 +3196,10 @@ func printOverlayHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage: upskill overlay <command> [args]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "commands:")
-	fmt.Fprintln(w, "  list  List overlays")
-	fmt.Fprintln(w, "  add   Create and edit an overlay")
-	fmt.Fprintln(w, "  edit  Edit an overlay file")
-	fmt.Fprintln(w, "  diff  Show rendered overlay changes")
+	fmt.Fprintln(w, "  list  List customizations")
+	fmt.Fprintln(w, "  add   Create and edit a customization")
+	fmt.Fprintln(w, "  edit  Edit a customization file")
+	fmt.Fprintln(w, "  diff  Show generated customization changes")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, `Run "upskill overlay <command> --help" for command help.`)
 }

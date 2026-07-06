@@ -70,6 +70,29 @@ Use only the agents you need. If no agents are configured, `upskill` still
 renders under `~/.skills/rendered`, but it copies to agent directories only when
 they are configured or auto-detected.
 
+## Migrate Existing Agent Skills
+
+If you already have skill folders in agent output directories such as
+`~/.codex/skills` or `~/.claude/skills`, `doctor` and `status` warn when those
+skills are not installed from a configured Upskill source.
+
+Inspect the migration plan:
+
+```bash
+upskill migrate
+```
+
+By default, this is a dry run. It reads unmanaged agent-output skills and plans
+to copy them into a `local-skills` source at
+`~/Documents/Upskill/local-skills`. Duplicate skill names are preserved with
+numeric suffixes such as `redis`, `redis-2`, and `redis-3`.
+
+Apply the migration only after reviewing the plan:
+
+```bash
+upskill migrate --yes
+```
+
 ## Install The Example Skill
 
 From this repository root:
@@ -83,14 +106,14 @@ What this does:
 - Discovers `examples/hello-skill/SKILL.md`.
 - Copies the skill into `~/.skills/store/hello-skill`.
 - Records the source in `~/.skills/upskill-lock.json`.
-- Renders the effective skill into `~/.skills/rendered/codex/hello-skill`.
-- Copies the rendered skill to the configured `codex` output directory.
+- Builds the effective skill into `~/.skills/rendered/codex/hello-skill`.
+- Copies the generated skill to the configured `codex` output directory.
 
 Search and inspect it:
 
 ```bash
 upskill find hello
-upskill render hello-skill --print --agent codex
+upskill show hello-skill --agent codex
 upskill status
 ```
 
@@ -184,9 +207,9 @@ separate release work.
 
 Copy or adapt `prompts/AGENTS.md` into the agent or project instructions for
 clients that should use `upskill` as the skill server. The copied instructions
-must tell agents that local skill files are rendered output. When asked to fix a
-skill, agents should write an overlay for local or agent-specific behavior, or
-create a draft for an upstream base-skill change.
+must tell agents that local skill files are generated output. When asked to fix a
+skill, agents should write a local customization overlay for local or
+agent-specific behavior, or create a draft for an upstream base-skill change.
 
 A first verification prompt:
 
@@ -206,10 +229,10 @@ Expected MCP flow:
 
 ## Next Steps
 
-- Use `docs/workflows.md` for overlays, update checks, draft creation, archive
-  import, promotion, and Jinja template overlays.
+- Use `docs/workflows.md` for local customizations, update checks, draft
+  creation, archive import, promotion, and Jinja template customizations.
 - Use `upskill update --check` to preview source updates.
-- Use `upskill sync --agent codex` to update locked skills and render final
+- Use `upskill sync --agent codex` to update locked skills and build final
   outputs.
 
 ## MCP Client References

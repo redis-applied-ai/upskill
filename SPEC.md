@@ -32,8 +32,8 @@ discovery by `SKILL.md`, and agent-aware installation.
   skill directories.
 - Apply overlays by default whenever syncing, updating, or copying skills to
   agents.
-- Support agent-specific overrides for well-known agents such as `claude`,
-  `claude-code`, and `codex`.
+- Support agent-specific overrides for well-known agents such as `claude-code`
+  and `codex`.
 - Support non-template overlays: append, replace, files, and JSON Patch.
 - Support Jinja-style template inheritance only for files named `.j2` using the
   maintained `github.com/nikolalohinski/gonja/v2` implementation.
@@ -73,12 +73,13 @@ discovery by `SKILL.md`, and agent-aware installation.
 
 ```bash
 upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
-upskill use <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
+upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
 upskill list|ls [--json] [--agent AGENT]
 upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
+upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
 upskill init [name] [--dir DIR]
 upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
 
@@ -142,7 +143,6 @@ Aliases:
 ```text
 ls -> list
 rm -> remove
-claude -> claude-code, when resolving built-in agent defaults
 ```
 
 ## Source Strings
@@ -389,7 +389,6 @@ directories that already exist:
 
 ```text
 claude-code -> ${CLAUDE_CONFIG_DIR:-~/.claude}/skills
-claude      -> ${CLAUDE_CONFIG_DIR:-~/.claude}/skills
 codex       -> ${CODEX_HOME:-~/.codex}/skills
 ```
 
@@ -446,12 +445,12 @@ Rules:
 - Existing overlays are preserved.
 - `--no-render` installs only into the base store.
 
-### `use`
+### `show`
 
-`upskill use <source-or-skill>` prints a selected skill body for immediate agent
-use. If the argument names an installed skill, it prints the rendered
-`SKILL.md`. If the argument is a source string, it resolves the source in a
-temporary directory and prints the selected `SKILL.md` without installing.
+`upskill show <source-or-skill>` shows a selected skill body for inspection. If
+the argument names an installed skill, it shows the rendered `SKILL.md`. If the
+argument is a source string, it resolves the source in a temporary directory and
+shows the selected `SKILL.md` without installing.
 
 ### `list` / `ls`
 
@@ -496,6 +495,26 @@ If overlays exist, they are always applied. There is no `--with-overlays` flag
 because overlays are the default. There is no `--without-overlays` flag because
 sync publishes the effective final state. Use `render --print --base-only` to
 inspect the base state.
+
+### `migrate`
+
+`upskill migrate` copies skill bundles into a local source and installs them
+from that source. It is a dry run unless `--yes` is passed.
+
+- Default source mode: `--from unmanaged`, which reads unmanaged skill folders
+  from configured agent output directories.
+- Default target source name: `local-skills`.
+- Default target source path: `~/Documents/Upskill/local-skills`.
+- `--from SOURCE` can copy from another configured local source.
+- `--agent AGENT` limits unmanaged migration to one configured agent output.
+- `--skill NAME` limits migration to one normalized skill name.
+- With `--yes`, the command copies matching skill bundles into the target local
+  source, records that source if needed, installs those skills into `store/` and
+  `upskill-lock.json`, then renders managed output back to the selected agent
+  output or to all configured agent outputs when `--agent` is omitted.
+- The command does not delete from the source.
+- Duplicate skill names are preserved with numeric suffixes such as `redis`,
+  `redis-2`, and `redis-3`.
 
 ### `init`
 

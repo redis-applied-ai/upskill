@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"upskill/internal/audit"
 	"upskill/internal/config"
 	"upskill/internal/library"
 	"upskill/internal/overlay"
@@ -118,47 +119,47 @@ func toolList() []map[string]any {
 			"query": stringProp("Optional search text."),
 			"limit": intProp("Maximum number of skills to return."),
 		}, []string{}),
-		tool("read_skill", "Read a base or rendered skill entrypoint and optional file manifest.", map[string]any{
+		tool("read_skill", "Read a base or generated skill entrypoint and optional file manifest.", map[string]any{
 			"skill_id":      stringProp("Skill identifier."),
-			"agent":         stringProp("Optional agent name for rendered overlays."),
-			"rendered":      boolProp("Read rendered output when true; read base skill when false."),
-			"base_only":     boolProp("Render without overlays."),
+			"agent":         stringProp("Optional agent name for generated output customizations."),
+			"rendered":      boolProp("Read generated output when true; read base skill when false."),
+			"base_only":     boolProp("Build without customizations."),
 			"include_files": boolProp("Include a file manifest."),
 			"file_limit":    intProp("Maximum number of files to include in the manifest."),
 		}, []string{"skill_id"}),
-		tool("list_skill_files", "List files in a base or rendered skill bundle.", map[string]any{
+		tool("list_skill_files", "List files in a base or generated skill bundle.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),
-			"agent":          stringProp("Optional agent name for rendered overlays."),
-			"rendered":       boolProp("List rendered output when true; list base skill when false."),
-			"base_only":      boolProp("Render without overlays."),
+			"agent":          stringProp("Optional agent name for generated output customizations."),
+			"rendered":       boolProp("List generated output when true; list base skill when false."),
+			"base_only":      boolProp("Build without customizations."),
 			"path_prefix":    stringProp("Optional relative path prefix."),
 			"recursive":      boolProp("Recurse into nested directories."),
 			"include_hashes": boolProp("Include SHA-256 hashes for files."),
 			"limit":          intProp("Maximum number of entries to return."),
 		}, []string{"skill_id"}),
-		tool("read_skill_file", "Read one text file from a base or rendered skill bundle.", map[string]any{
+		tool("read_skill_file", "Read one text file from a base or generated skill bundle.", map[string]any{
 			"skill_id":  stringProp("Skill identifier."),
 			"path":      stringProp("Relative file path."),
-			"agent":     stringProp("Optional agent name for rendered overlays."),
-			"rendered":  boolProp("Read rendered output when true; read base skill when false."),
-			"base_only": boolProp("Render without overlays."),
+			"agent":     stringProp("Optional agent name for generated output customizations."),
+			"rendered":  boolProp("Read generated output when true; read base skill when false."),
+			"base_only": boolProp("Build without customizations."),
 			"max_bytes": intProp("Maximum bytes to return."),
 		}, []string{"skill_id", "path"}),
-		tool("render_skill", "Render one skill without mutating base skills.", map[string]any{
+		tool("render_skill", "Build one skill's generated output without mutating base skills.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),
-			"agent":          stringProp("Optional agent name for overlays and configured output selection."),
-			"copy":           boolProp("Copy rendered output to configured agent output directories."),
-			"base_only":      boolProp("Render base skills without overlays."),
-			"apply_overlays": boolProp("Apply overlays when rendering draft skills."),
+			"agent":          stringProp("Optional agent name for customizations and configured output selection."),
+			"copy":           boolProp("Copy generated output to configured agent output directories."),
+			"base_only":      boolProp("Build base skills without customizations."),
+			"apply_overlays": boolProp("Apply customizations when rendering draft skills."),
 		}, []string{"skill_id"}),
-		tool("sync_skills", "Update locked base skills and render final outputs. Returns counts, rendered paths, and warnings.", map[string]any{
-			"agent": stringProp("Optional agent name for rendered output selection."),
+		tool("sync_skills", "Update locked base skills and build final outputs. Returns counts, generated paths, and warnings.", map[string]any{
+			"agent": stringProp("Optional agent name for generated output selection."),
 		}, []string{}),
-		tool("upsert_skill_overlay_file", "Create or update one overlay file. This never writes base skills. Template overlays must be complete Jinja files under a .j2 path, not JSON variable maps.", map[string]any{
+		tool("upsert_skill_overlay_file", "Create or update one local customization file. This never writes base skills. Template customizations must be complete Jinja files under a .j2 path, not JSON variable maps.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),
 			"skill_name":     stringProp("Fallback skill name when skill_id is omitted."),
-			"agent":          stringProp("Optional agent-specific overlay name."),
-			"operation":      stringProp("Overlay operation: append, root_append, files, replace, template, or patch."),
+			"agent":          stringProp("Optional agent-specific customization name."),
+			"operation":      stringProp("Customization operation: append, root_append, files, replace, template, or patch."),
 			"path":           stringProp("Relative overlay path."),
 			"content":        stringProp("Plain-text file content."),
 			"base64_content": stringProp("Base64-encoded file content."),
@@ -322,6 +323,7 @@ func syncSkillsTool(cfg config.Config, args map[string]any) (syncSkillsResult, e
 	if len(updated) == 0 && len(rendered) == 0 {
 		result.Warnings = []string{"no locked or installed skills were found"}
 	}
+	result.Warnings = append(result.Warnings, audit.AgentOutputWarningMessages(cfg, agent)...)
 	return result, nil
 }
 

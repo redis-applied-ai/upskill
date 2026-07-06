@@ -18,12 +18,12 @@ the synced base store to fix a skill.
 
 Use the right write target:
 
-- Use an overlay when the requested change is local, team-specific, or
-  agent-specific behavior.
+- Use a local customization (overlay) when the requested change is local,
+  team-specific, or agent-specific behavior.
 - Use a draft when the base skill itself should change upstream or when you are
   creating a new skill.
 - Ask for scope only when the user's requested fix could reasonably be either
-  a local overlay or an upstream base-skill revision.
+  a local customization or an upstream base-skill revision.
 
 ## Reading Skills
 
@@ -37,24 +37,25 @@ Use the right write target:
   skill body first, then list/read any support files referenced by the skill
   before acting on it.
 
-## Changing Skills With Overlays
+## Changing Skills With Local Customizations
 
-For lightweight customization of an existing skill, write overlays through
-`upskill` MCP tools:
+For lightweight customization of an existing skill, write overlay files through
+`upskill` MCP tools. An overlay is a local customization layer that is applied
+when generated skill output is built.
 
 - Use `upsert_skill_overlay_file` to add `append`, `root_append`, `files`,
-  `replace`, `template`, or JSON Patch overlays.
+  `replace`, `template`, or JSON Patch customizations.
 - Use `delete_skill_overlay_file` only for overlay files.
 - Prefer agent-specific overlays when a change should apply only to one agent.
   Use global overlays only for customization that should affect every agent.
 - Use `render_skill` to inspect the effective result after overlay edits.
-- After writing an overlay, render the skill and read the rendered skill again
+- After writing an overlay, build the skill output and read the rendered skill again
   to verify the intended text or file change is present.
 - Use `sync_skills` when synced base skills and rendered agent outputs should be
   refreshed. Treat its `updated_count`, `rendered_count`, and warnings as the
   source of truth for what happened.
-- Template overlays must be complete Jinja template files with `.j2` paths. Do
-  not send JSON or YAML variable maps as template overlays.
+- Template customizations must be complete Jinja template files with `.j2`
+  paths. Do not send JSON or YAML variable maps as template customizations.
 
 The equivalent CLI workflow is:
 
@@ -66,7 +67,7 @@ upskill overlay diff <skill-name> --agent <agent>
 upskill render <skill-name> --agent <agent>
 ```
 
-For a template overlay:
+For a Jinja template customization:
 
 ```bash
 upskill overlay edit <skill-name> --agent <agent> --operation template --file SKILL.md.j2
