@@ -1946,20 +1946,76 @@ func TestSourceCommands(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"add", "Obsidian", "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"add", "Obsidian", "--skill", "redis", "--agent", "codex"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("add from named source code = %d stderr=%s", code, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(root, "home", "store", "redis", "SKILL.md")); err != nil {
 		t.Fatalf("named source install missing: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(root, "codex-skills", "redis", "SKILL.md")); err != nil {
+		t.Fatalf("named source agent output missing: %v", err)
+	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"source", "remove", "Obsidian"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("source remove named code = %d stderr=%s", code, stderr.String())
+	if code := Run([]string{"list"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("list with source code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "SOURCE") || !strings.Contains(stdout.String(), "Obsidian") {
+		t.Fatalf("list should show source name: %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("list json with source code = %d stderr=%s", code, stderr.String())
+	}
+	var installedRows []installedSkillRow
+	if err := json.Unmarshal(stdout.Bytes(), &installedRows); err != nil {
+		t.Fatalf("list json with source decode: %v\n%s", err, stdout.String())
+	}
+	if len(installedRows) != 1 ||
+		installedRows[0].SourceDisplayName != "Obsidian" ||
+		!installedRows[0].SourceConfigured ||
+		installedRows[0].SourceSubpath != "redis" {
+		t.Fatalf("list json source row = %#v", installedRows)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "remove", "Obsidian"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("source remove warning code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "will remove 1 installed skill(s)") ||
+		!strings.Contains(stderr.String(), "- redis") ||
+		!strings.Contains(stderr.String(), "--yes") {
+		t.Fatalf("source remove warning stderr = %q", stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(root, "home", "store", "redis", "SKILL.md")); err != nil {
-		t.Fatalf("source remove should not remove installed skill: %v", err)
+		t.Fatalf("source remove without yes should keep installed skill: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "remove", "Obsidian", "--yes"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source remove named yes code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "removed source Obsidian") || !strings.Contains(stdout.String(), "removed redis") {
+		t.Fatalf("source remove stdout = %q", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "home", "store", "redis", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("source remove should remove installed skill: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "codex-skills", "redis")); !os.IsNotExist(err) {
+		t.Fatalf("source remove should remove marked agent output: %v", err)
+	}
+	lock, err := library.ReadLock(config.Config{
+		LockPath: filepath.Join(root, "home", "upskill-lock.json"),
+	})
+	if err != nil {
+		t.Fatalf("read lock after source remove: %v", err)
+	}
+	if _, ok := lock.Skills["redis"]; ok {
+		t.Fatalf("source remove should remove lock entry: %#v", lock.Skills["redis"])
 	}
 
 	stdout.Reset()
@@ -2031,6 +2087,30 @@ func TestSourceCommands(t *testing.T) {
 	}
 	if !foundRaw {
 		t.Fatalf("raw source was not auto-registered: %#v", rows)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "remove", rawSource, "--keep-installed"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source remove keep-installed code = %d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "home", "store", "docs", "SKILL.md")); err != nil {
+		t.Fatalf("keep-installed should keep store skill: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("list json after keep-installed code = %d stderr=%s", code, stderr.String())
+	}
+	installedRows = nil
+	if err := json.Unmarshal(stdout.Bytes(), &installedRows); err != nil {
+		t.Fatalf("list json after keep-installed decode: %v\n%s", err, stdout.String())
+	}
+	if len(installedRows) != 1 ||
+		installedRows[0].StoreName != "docs" ||
+		installedRows[0].SourceConfigured ||
+		!strings.Contains(installedRows[0].SourceDisplayName, rawSource) {
+		t.Fatalf("list json after keep-installed = %#v", installedRows)
 	}
 
 	stdout.Reset()

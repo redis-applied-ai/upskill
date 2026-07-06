@@ -96,14 +96,16 @@ examples:
 	helpList = `usage: upskill list|ls [--json] [--agent AGENT]
 
 summary:
-  List installed skills in Upskill's local store.
+  List installed skills, their sources, and overlay counts.
 
 options:
   --json            Print machine-readable JSON.
   --agent AGENT     Show overlay counts for one agent's overlay chain.
 
 notes:
-  This lists installed skills, not every skill available in configured sources.
+  This lists installed skills, not every skill available in configured sources,
+  and marks a skill source as unconfigured when the source record was removed
+  but an old installed copy still exists.
   Use upskill source skills to inspect a source without installing from it.
 
 examples:
@@ -138,7 +140,7 @@ examples:
 	helpRemove = `usage: upskill remove|rm <skill-name>... [--delete-overlays]
 
 summary:
-  Remove installed skills from Upskill's store and lock file.
+  Remove installed skills from Upskill's store, lock file, and managed output.
 
 arguments:
   <skill-name>      One or more installed skill IDs to remove.
@@ -148,7 +150,8 @@ options:
 
 notes:
   Removing an installed skill does not remove configured sources or drafts.
-  Overlays are preserved by default.
+  Managed rendered output and marked agent-output copies are removed. Overlays
+  are preserved by default.
 
 examples:
   upskill rm redis
@@ -358,22 +361,30 @@ examples:
   upskill source search ~/Documents/Notes/Memory/Skills writing --limit 5
   upskill source find owner/repo cache --subpath skills --json`
 
-	helpSourceRemove = `usage: upskill source remove|rm <source-or-name>
+	helpSourceRemove = `usage: upskill source remove|rm <source-or-name> [--yes] [--keep-installed]
 
 summary:
-  Remove a configured source record.
+  Remove a configured source and installed skills from that source.
 
 arguments:
   <source-or-name>  Source name or raw source string matching a configured
                     source identity.
 
+options:
+  --yes             Confirm removal when installed skills will be removed.
+  --keep-installed  Remove only the source record and leave installed skills.
+
 notes:
-  Removing a source does not remove installed skills, lock entries, overlays,
-  drafts, or rendered output.
+  By default, removing a source also removes installed skills whose locked source
+  matches it, plus managed rendered output and marked agent-output copies.
+  When installed skills would be removed, upskill prints the skill list and
+  requires --yes before writing changes.
+  Source files, overlays, and drafts are not deleted.
 
 examples:
-  upskill source rm Obsidian
-  upskill source remove ~/Documents/Notes/Memory/Skills`
+  upskill source rm Obsidian --yes
+  upskill source remove ~/Documents/Notes/Memory/Skills --yes
+  upskill source remove Obsidian --keep-installed`
 
 	helpDraftList = `usage: upskill draft list|ls [--json]
 
@@ -947,8 +958,14 @@ func runList(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
+	lock, err := library.ReadLock(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	listRows := installedSkillRows(cfg, skills, lock, agent)
 	if jsonOut {
-		data, _ := json.MarshalIndent(skills, "", "  ")
+		data, _ := json.MarshalIndent(listRows, "", "  ")
 		fmt.Fprintln(stdout, string(data))
 		return 0
 	}
@@ -956,14 +973,14 @@ func runList(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 		fmt.Fprintln(stdout, "no skills installed")
 		return 0
 	}
-	rows := make([][]string, 0, len(skills))
-	for _, skill := range skills {
-		overlays := overlay.Chain(cfg, skill.StoreName, agent)
-		rows = append(rows, []string{skill.StoreName, skill.Description, strconv.Itoa(len(overlays))})
+	rows := make([][]string, 0, len(listRows))
+	for _, row := range listRows {
+		rows = append(rows, []string{row.StoreName, listSourceText(row), row.Description, strconv.Itoa(row.OverlayCount)})
 	}
 	printTable(stdout, []tableColumn{
-		{Header: "SKILL", MaxWidth: 36},
-		{Header: "DESCRIPTION", MaxWidth: 64},
+		{Header: "SKILL", MaxWidth: 30},
+		{Header: "SOURCE", MaxWidth: 36},
+		{Header: "DESCRIPTION", MaxWidth: 56},
 		{Header: "OVERLAYS", MaxWidth: 8},
 	}, rows)
 	return 0
@@ -1022,6 +1039,10 @@ func runRemove(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 	}
 	removed, err := library.RemoveSkills(cfg, positionals, deleteOverlays)
 	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	if err := removeManagedSkillOutputs(cfg, removed); err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
@@ -1699,31 +1720,66 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		}, rows)
 		return 0
 	case "remove", "rm":
-		if len(args) < 2 {
+		keepInstalled := false
+		yes := false
+		positionals := []string{}
+		if err := parseFlags(args[1:], map[string]func(string) error{
+			"--yes": func(_ string) error {
+				yes = true
+				return nil
+			},
+			"--keep-installed": func(_ string) error {
+				keepInstalled = true
+				return nil
+			},
+		}, &positionals); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		if len(positionals) != 1 {
 			fmt.Fprintln(stderr, "upskill: source remove requires <source-or-name>")
 			return 2
 		}
-		key := args[1]
-		if _, ok := cfg.Sources[key]; !ok {
-			if canonical, canonicalKey, err := library.CanonicalSource(args[1], "", "", ""); err == nil {
-				key = canonicalKey
-				if _, ok := cfg.Sources[key]; !ok {
-					if existingKey, ok := findSourceRecordByIdentity(cfg.Sources, canonical); ok {
-						key = existingKey
-					}
-				}
+		sourceArg := positionals[0]
+		key, ok := resolveConfiguredSourceKey(cfg, sourceArg)
+		if !ok {
+			fmt.Fprintf(stderr, "upskill: source not found: %s\n", sourceArg)
+			return 1
+		}
+		source := cfg.Sources[key]
+		removeSkills := []string{}
+		if !keepInstalled {
+			var err error
+			removeSkills, err = installedSkillsFromSource(cfg, source)
+			if err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
 			}
 		}
-		if _, ok := cfg.Sources[key]; !ok {
-			fmt.Fprintf(stderr, "upskill: source not found: %s\n", args[1])
-			return 1
+		if len(removeSkills) > 0 && !yes {
+			warnSourceRemoveRequiresConfirmation(stderr, sourceArg, removeSkills)
+			return 2
 		}
 		delete(cfg.Sources, key)
 		if err := config.SaveSources(cfg, cfg.Sources); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "removed source %s\n", args[1])
+		fmt.Fprintf(stdout, "removed source %s\n", sourceArg)
+		if len(removeSkills) > 0 {
+			removed, err := library.RemoveSkills(cfg, removeSkills, false)
+			if err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+			if err := removeManagedSkillOutputs(cfg, removed); err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+			for _, name := range removed {
+				fmt.Fprintf(stdout, "removed %s\n", name)
+			}
+		}
 		return 0
 	default:
 		fmt.Fprintf(stderr, "upskill: unknown source command: %s\n", args[0])
@@ -2931,6 +2987,70 @@ func sourceSkillDisplay(skill library.SourceSkill) string {
 	return fmt.Sprintf("%s (%s)", skill.StoreName, skill.Name)
 }
 
+type installedSkillRow struct {
+	StoreName         string            `json:"store_name"`
+	Name              string            `json:"name"`
+	Description       string            `json:"description,omitempty"`
+	Path              string            `json:"path"`
+	SkillPath         string            `json:"skill_path"`
+	Body              string            `json:"body,omitempty"`
+	Frontmatter       map[string]string `json:"frontmatter,omitempty"`
+	Source            string            `json:"source,omitempty"`
+	SourceDisplayName string            `json:"source_display_name,omitempty"`
+	SourceConfigured  bool              `json:"source_configured"`
+	SourceType        string            `json:"source_type,omitempty"`
+	SourceURL         string            `json:"source_url,omitempty"`
+	Ref               string            `json:"ref,omitempty"`
+	SourceSubpath     string            `json:"source_subpath,omitempty"`
+	SourceSkillPath   string            `json:"source_skill_path,omitempty"`
+	Hash              string            `json:"hash,omitempty"`
+	UpdatedAt         string            `json:"updated_at,omitempty"`
+	OverlayCount      int               `json:"overlay_count"`
+}
+
+func installedSkillRows(cfg config.Config, skills []library.Skill, lock library.Lock, agent string) []installedSkillRow {
+	rows := make([]installedSkillRow, 0, len(skills))
+	for _, skill := range skills {
+		row := installedSkillRow{
+			StoreName:    skill.StoreName,
+			Name:         skill.Name,
+			Description:  skill.Description,
+			Path:         skill.Path,
+			SkillPath:    skill.SkillPath,
+			Body:         skill.Body,
+			Frontmatter:  skill.Frontmatter,
+			OverlayCount: len(overlay.Chain(cfg, skill.StoreName, agent)),
+		}
+		if entry, ok := lock.Skills[skill.StoreName]; ok {
+			row.Source = entry.Source
+			row.SourceType = entry.SourceType
+			row.SourceURL = entry.SourceURL
+			row.Ref = entry.Ref
+			row.SourceSubpath = entry.Subpath
+			row.SourceSkillPath = entry.SkillPath
+			row.Hash = entry.Hash
+			row.UpdatedAt = entry.UpdatedAt
+			row.SourceDisplayName, row.SourceConfigured = sourceDisplayForLockEntry(cfg, entry)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func listSourceText(row installedSkillRow) string {
+	source := row.SourceDisplayName
+	if source == "" {
+		source = row.Source
+	}
+	if source == "" {
+		return "-"
+	}
+	if row.SourceConfigured {
+		return source
+	}
+	return source + " (unconfigured)"
+}
+
 type sourceRow struct {
 	Name        string `json:"name,omitempty"`
 	DisplayName string `json:"display_name"`
@@ -2989,6 +3109,132 @@ func sameSourceIdentity(left config.Source, right config.Source) bool {
 	return left.Source == right.Source &&
 		left.Ref == right.Ref &&
 		filepath.ToSlash(left.Subpath) == filepath.ToSlash(right.Subpath)
+}
+
+func resolveConfiguredSourceKey(cfg config.Config, sourceArg string) (string, bool) {
+	if _, ok := cfg.Sources[sourceArg]; ok {
+		return sourceArg, true
+	}
+	canonical, canonicalKey, err := library.CanonicalSource(sourceArg, "", "", "")
+	if err != nil {
+		return "", false
+	}
+	if _, ok := cfg.Sources[canonicalKey]; ok {
+		return canonicalKey, true
+	}
+	if existingKey, ok := findSourceRecordByIdentity(cfg.Sources, canonical); ok {
+		return existingKey, true
+	}
+	return "", false
+}
+
+func installedSkillsFromSource(cfg config.Config, source config.Source) ([]string, error) {
+	lock, err := library.ReadLock(cfg)
+	if err != nil {
+		return nil, err
+	}
+	names := []string{}
+	for name, entry := range lock.Skills {
+		if lockEntryMatchesSource(entry, source) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func warnSourceRemoveRequiresConfirmation(w io.Writer, source string, skills []string) {
+	fmt.Fprintf(w, "warning: removing source %s will remove %d installed skill(s):\n", source, len(skills))
+	for _, skill := range skills {
+		fmt.Fprintf(w, "  - %s\n", skill)
+	}
+	fmt.Fprintln(w, "rerun with --yes to remove the source and these skills, or add --keep-installed to remove only the source record")
+}
+
+func sourceDisplayForLockEntry(cfg config.Config, entry library.LockEntry) (string, bool) {
+	for _, source := range config.SourceRecords(cfg.Sources) {
+		if lockEntryMatchesSource(entry, source) {
+			return config.SourceDisplayName(source), true
+		}
+	}
+	if entry.Source != "" {
+		return entry.Source, false
+	}
+	return entry.SourceURL, false
+}
+
+func lockEntryMatchesSource(entry library.LockEntry, source config.Source) bool {
+	parsed, err := library.ParseSource(source.Source)
+	if err != nil {
+		return false
+	}
+	parsed, err = library.ApplySourceOverrides(parsed, source.Ref, source.Subpath, "")
+	if err != nil {
+		return false
+	}
+	if entry.SourceURL != parsed.URL {
+		return false
+	}
+	if entry.SourceType != "" && parsed.Type != "" && entry.SourceType != parsed.Type {
+		return false
+	}
+	if entry.Ref != parsed.Ref {
+		return false
+	}
+	sourceSubpath := filepath.ToSlash(strings.Trim(parsed.Subpath, "/"))
+	if sourceSubpath == "" {
+		return true
+	}
+	entrySubpath := filepath.ToSlash(strings.Trim(entry.Subpath, "/"))
+	return entrySubpath == sourceSubpath || strings.HasPrefix(entrySubpath, sourceSubpath+"/")
+}
+
+func removeManagedSkillOutputs(cfg config.Config, skills []string) error {
+	for _, skill := range skills {
+		if err := removeRenderedSkillDirs(cfg, skill); err != nil {
+			return err
+		}
+		if err := removeManagedAgentOutputDirs(cfg, skill); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeRenderedSkillDirs(cfg config.Config, skill string) error {
+	agents, err := os.ReadDir(cfg.RenderedDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, agent := range agents {
+		if !agent.IsDir() {
+			continue
+		}
+		if err := cliOsRemoveAll(filepath.Join(cfg.RenderedDir, agent.Name(), skill)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeManagedAgentOutputDirs(cfg config.Config, skill string) error {
+	for _, output := range cfg.AgentOutputs {
+		dst := filepath.Join(output.Path, skill)
+		markerPath := filepath.Join(dst, render.MarkerFile)
+		if _, err := cliOsStat(markerPath); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := cliOsRemoveAll(dst); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func parseFlags(args []string, handlers map[string]func(string) error, positionals ...*[]string) error {

@@ -112,6 +112,12 @@ After setup:
 - Agents should use the `upskill` MCP draft and overlay tools instead of
   writing base skills directly.
 
+Use `upskill list` to see source ownership for installed skills. Removing a
+source also removes skills installed from that source and managed generated
+copies; when skills would be removed, `upskill` prints the affected skill list
+and requires `--yes`. Use `upskill source remove personal --keep-installed` only
+when you want to detach the source record and keep the installed copies.
+
 For current limits such as local-only search, promotion boundaries, sync
 discovery behavior, and Jinja template customization rules, see `README.md`.
 

@@ -64,7 +64,7 @@ upskill source list|ls [--json]
 upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
 upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
 upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref REF] [--subpath PATH]
-upskill source remove|rm <source-or-name>
+upskill source remove|rm <source-or-name> [--yes] [--keep-installed]
 ```
 
 Local customizations:
@@ -206,6 +206,10 @@ The important distinction is:
 - `store/` is the installed copy that `upskill` renders from and agents read.
 - `overlays/`, `drafts/`, and `imports/` are managed `upskill` working state.
 
+Use `upskill list` to see which source owns each installed skill. If a source
+record was removed while an old installed copy remains, `list` marks that source
+as unconfigured.
+
 Add an existing local directory as a named source:
 
 ```bash
@@ -214,6 +218,13 @@ upskill source skills Obsidian
 upskill source find Obsidian redis
 upskill add Obsidian --skill redis
 ```
+
+Removing a source also removes skills installed from that source, plus managed
+rendered output and marked agent-output copies. When installed skills would be
+removed, `upskill` prints the affected skill list and requires `--yes`. Source
+files, overlays, and drafts are left alone. Use
+`upskill source remove <source> --keep-installed` only when you want to detach
+the source record but keep the installed copies.
 
 You can also install directly from a raw path or Git source. Raw sources are
 recorded automatically and are displayed by their canonical source string:

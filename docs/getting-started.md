@@ -113,6 +113,7 @@ Search and inspect it:
 
 ```bash
 upskill find hello
+upskill list
 upskill show hello-skill --agent codex
 upskill status
 ```
@@ -143,6 +144,12 @@ automatically and displays it by path in `upskill source list` / `upskill source
 ```bash
 upskill add ~/Documents/Notes/Memory/Skills --skill hello-skill --agent codex
 ```
+
+Use `upskill list` to see which source owns each installed skill. Removing a
+source removes skills installed from that source and managed generated copies;
+when skills would be removed, `upskill` prints the affected skill list and
+requires `--yes`. Add `--keep-installed` only when you want to remove the source
+record while leaving installed copies in place.
 
 ## Configure MCP
 

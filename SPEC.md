@@ -87,7 +87,7 @@ upskill source list|ls [--json]
 upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
 upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
 upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref REF] [--subpath PATH]
-upskill source remove|rm <source-or-name>
+upskill source remove|rm <source-or-name> [--yes] [--keep-installed]
 
 upskill draft list|ls [--json]
 upskill draft create <skill-name> [--from SKILL] [--from-rendered] [--template NAME] [--no-edit]
@@ -458,7 +458,10 @@ shows the selected `SKILL.md` without installing.
 ### `list` / `ls`
 
 Lists installed base skills with source and overlay status. With `--agent`, the
-overlay status reflects that agent's effective overlay chain.
+overlay status reflects that agent's effective overlay chain. Text output marks
+lock-backed source metadata as unconfigured when no configured source record
+matches it. JSON output includes source metadata, source configuration status,
+and overlay count.
 
 ### `find` / `search`
 
@@ -543,9 +546,15 @@ filters available skills by metadata, body, and path. It accepts `--json`,
 `--limit`, `--ref`, and `--subpath`. It does not install, update, render, record
 the source, or mutate the lock file.
 
-`source remove|rm <source-or-name>` removes a configured source record.
-Removing a source does not remove installed skills, lock entries, overlays,
-drafts, or rendered outputs.
+`source remove|rm <source-or-name>` removes a configured source record and, by
+default, removes installed skills whose locked source matches that source. It
+also removes managed rendered output and marked agent-output copies for those
+skills. If installed skills would be removed and `--yes` is not provided, the
+command prints the affected skill list and exits without writing changes. It
+does not delete upstream source files, overlays, or drafts.
+
+`--keep-installed` removes only the configured source record and leaves
+installed store copies, lock entries, overlays, drafts, and rendered outputs.
 
 ### `workon`
 
