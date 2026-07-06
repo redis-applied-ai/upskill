@@ -1,9 +1,16 @@
 # upskill
 
-`upskill` is a standalone Go CLI and stdio MCP server for agent skills. It can
-install skills from local or Git sources, update the synced base store, build
-generated output from local customizations, and expose skills to agents through
-MCP without allowing agents to overwrite base skills.
+`upskill` is a standalone Go CLI and stdio MCP server for sharing agent skills
+with a team. It can install skills from local or Git sources, keep installed
+skills in sync with upstream sources, build generated output from local
+customizations, and expose skills to agents through MCP or folders on disk
+without allowing agents to overwrite base skills.
+
+What makes Upskill effective for teams is that you can customize the behavior of
+any installed skill without changing the skill. Agents see a rendered version of
+the skill with your changes applied. To make team skills easier to customize,
+you can optionally author skill files as Jinja templates, and users of the skill
+can change them with Jinja syntax.
 
 ## Quick Start
 
@@ -33,9 +40,6 @@ make coverage
 ```
 
 ## Commands
-
-Run any leaf command with `--help` for context, options, side effects, defaults,
-and examples.
 
 ```bash
 upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
@@ -123,6 +127,11 @@ default. `upskill update --check` previews locked source changes without
 writing. `upskill update --diff` previews incoming file changes. `upskill
 update` applies updates, and `upskill sync` updates all locked skills and
 renders final agent outputs.
+
+When a `SKILL.md` has no frontmatter block, Upskill infers default `name` and
+`description` values from the directory name and first prose paragraph for
+search/list output and rendered agent copies. The original source file is left
+unchanged.
 
 The primary local example source is `./examples`:
 

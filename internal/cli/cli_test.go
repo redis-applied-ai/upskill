@@ -136,7 +136,7 @@ func TestRenderPrintBaseOnly(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if stdout.String() != "Base.\n" {
+	if !strings.Contains(stdout.String(), "name: \"redis\"") || !strings.Contains(stdout.String(), "Base.") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(root, "codex-skills", "redis")); !os.IsNotExist(err) {
@@ -1797,7 +1797,7 @@ func TestCLIAdditionalBranches(t *testing.T) {
 func TestCLIMoreFlagBranches(t *testing.T) {
 	root, _ := setupEnv(t)
 	source := filepath.Join(root, "repo")
-	writeTestFile(t, filepath.Join(source, "skills", "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n", 0o644)
+	writeTestFile(t, filepath.Join(source, "skills", "redis", "SKILL.md"), "# Redis\n\nBase.\n", 0o644)
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"add", source, "--ref", "ignored", "--subpath", "skills", "--no-render"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("add ref/subpath code = %d stderr=%s", code, stderr.String())
@@ -1807,7 +1807,9 @@ func TestCLIMoreFlagBranches(t *testing.T) {
 	if code := Run([]string{"show", source, "--ref", "ignored", "--subpath", "skills", "--skill", "redis"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("show source flags code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Base.") {
+	if !strings.Contains(stdout.String(), "name: \"redis\"") ||
+		!strings.Contains(stdout.String(), "description: \"Base.\"") ||
+		!strings.Contains(stdout.String(), "# Redis") {
 		t.Fatalf("show source stdout = %q", stdout.String())
 	}
 	if code := Run([]string{"list", "--agent", "codex"}, &stdout, &stderr); code != 0 {

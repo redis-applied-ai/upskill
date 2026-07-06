@@ -20,12 +20,13 @@ import (
 
 	"upskill/internal/config"
 	"upskill/internal/fsutil"
+	"upskill/internal/library"
 	"upskill/internal/overlay"
 	"upskill/internal/pathutil"
 )
 
 const MarkerFile = ".upskill-render.json"
-const markerSchemaVersion = 2
+const markerSchemaVersion = 3
 
 const appendSeparator = "\n\n---\n\n<!-- upskill overlay -->\n\n"
 
@@ -196,6 +197,9 @@ func (r Renderer) renderOne(skill string, agent string, baseOnly bool) (Result, 
 				return Result{}, err
 			}
 		}
+	}
+	if err := ensureEntrypointFrontmatter(tmpDir, skill); err != nil {
+		return Result{}, err
 	}
 
 	if err := writeMarker(tmpDir, skill, agent, mode, baseDir, baseHash, overlays, overlayDigest); err != nil {
@@ -532,6 +536,19 @@ func replaceParentReference(content string, rel string, parentName string) strin
 	content = strings.ReplaceAll(content, "\"parent/"+rel+"\"", "\""+parentName+"\"")
 	content = strings.ReplaceAll(content, "'parent/"+rel+"'", "'"+parentName+"'")
 	return content
+}
+
+func ensureEntrypointFrontmatter(dir string, skill string) error {
+	path := filepath.Join(dir, "SKILL.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	normalized := library.EnsureDefaultFrontmatter(string(data), skill, "")
+	if normalized == string(data) {
+		return nil
+	}
+	return os.WriteFile(path, []byte(normalized), 0o644)
 }
 
 func templateKey(path string) string {

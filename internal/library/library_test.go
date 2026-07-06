@@ -405,6 +405,26 @@ func TestLibraryAdditionalBranches(t *testing.T) {
 	writeFile(t, filepath.Join(source, "two", "SKILL.md"), "---\nname: Two\ndescription: \"Second\"\n---\n\nTwo body.\n")
 	cfg.Sources["named"] = config.Source{Name: "named", Source: source, Subpath: "two"}
 
+	discovered, err := DiscoverSkills(source, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bare Skill
+	for _, skill := range discovered {
+		if skill.StoreName == "one" {
+			bare = skill
+			break
+		}
+	}
+	if bare.StoreName != "one" || bare.Description != "No frontmatter body." {
+		t.Fatalf("bare skill defaults = %#v", bare)
+	}
+	if !strings.Contains(bare.EntrypointText(), "name: \"one\"") ||
+		!strings.Contains(bare.EntrypointText(), "description: \"No frontmatter body.\"") ||
+		!strings.Contains(bare.EntrypointText(), "No frontmatter body.") {
+		t.Fatalf("bare entrypoint = %q", bare.EntrypointText())
+	}
+
 	installed, err := InstallSource(cfg, "named", InstallOptions{})
 	if err != nil {
 		t.Fatal(err)

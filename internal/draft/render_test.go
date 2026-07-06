@@ -35,8 +35,9 @@ func TestRenderDraftAndCopy(t *testing.T) {
 	if !strings.Contains(marker, `"kind": "draft"`) || !strings.Contains(marker, `"skill_id": "draft:demo"`) {
 		t.Fatalf("marker = %s", marker)
 	}
-	if readFile(t, filepath.Join(root, "codex", "demo", "SKILL.md")) != "# Demo\n" {
-		t.Fatal("draft was not copied to agent output")
+	copiedDraft := readFile(t, filepath.Join(root, "codex", "demo", "SKILL.md"))
+	if !strings.Contains(copiedDraft, "name: \"demo\"") || !strings.Contains(copiedDraft, "# Demo") {
+		t.Fatalf("draft was not copied to agent output with defaults:\n%s", copiedDraft)
 	}
 	if _, err := os.Stat(filepath.Join(results[0].RenderedPath, MetadataFile)); !os.IsNotExist(err) {
 		t.Fatalf("rendered metadata should be omitted: %v", err)
@@ -111,11 +112,11 @@ func TestDiffRebaseAndPromote(t *testing.T) {
 	if !dryRun.DryRun || dryRun.Destination != filepath.Join(destRoot, "demo") || len(dryRun.Files) != 1 {
 		t.Fatalf("dry run = %#v", dryRun)
 	}
-		sourceDryRun, err := Promote(cfg, "demo", PromoteOptions{ToPath: destRoot, ToSource: "local", DryRun: true})
+	sourceDryRun, err := Promote(cfg, "demo", PromoteOptions{ToPath: destRoot, ToSource: "local", DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-		if sourceDryRun.Source != "local" || !strings.Contains(strings.Join(sourceDryRun.NextSteps, "\n"), "upskill add local") {
+	if sourceDryRun.Source != "local" || !strings.Contains(strings.Join(sourceDryRun.NextSteps, "\n"), "upskill add local") {
 		t.Fatalf("source dry run = %#v", sourceDryRun)
 	}
 	if _, err := os.Stat(filepath.Join(destRoot, "demo")); !os.IsNotExist(err) {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,7 @@ type Skill struct {
 	SkillPath   string            `json:"skill_path"`
 	Body        string            `json:"body,omitempty"`
 	Frontmatter map[string]string `json:"frontmatter,omitempty"`
+	Content     string            `json:"-"`
 }
 
 type Lock struct {
@@ -1046,20 +1048,29 @@ func readSkill(dir string) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
-	frontmatter, body := parseFrontmatter(string(data))
+	content := string(data)
+	frontmatter, body := parseFrontmatter(content)
+	hasFrontmatter := HasFrontmatter(content)
 	name := frontmatter["name"]
 	if name == "" {
 		name = filepath.Base(dir)
+		frontmatter["name"] = name
+	}
+	description := frontmatter["description"]
+	if description == "" && !hasFrontmatter {
+		description = DefaultSkillDescription(name, body)
+		frontmatter["description"] = description
 	}
 	storeName := NormalizeName(name)
 	return Skill{
 		StoreName:   storeName,
 		Name:        name,
-		Description: frontmatter["description"],
+		Description: description,
 		Path:        dir,
 		SkillPath:   path,
 		Body:        body,
 		Frontmatter: frontmatter,
+		Content:     content,
 	}, nil
 }
 
@@ -1095,6 +1106,92 @@ func parseFrontmatter(text string) (map[string]string, string) {
 		return fields, text
 	}
 	return fields, strings.Join(lines[bodyStart:], "")
+}
+
+func (skill Skill) EntrypointText() string {
+	content := skill.Content
+	if content == "" {
+		content = skill.Body
+	}
+	return EnsureDefaultFrontmatter(content, skill.Name, skill.Description)
+}
+
+func EnsureDefaultFrontmatter(text string, name string, description string) string {
+	if HasFrontmatter(text) {
+		return text
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "skill"
+	}
+	description = strings.TrimSpace(description)
+	if description == "" {
+		description = DefaultSkillDescription(name, text)
+	}
+	return fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s", frontmatterScalar(name), frontmatterScalar(description), text)
+}
+
+func HasFrontmatter(text string) bool {
+	if !strings.HasPrefix(text, "---\n") && !strings.HasPrefix(text, "---\r\n") {
+		return false
+	}
+	lines := strings.SplitAfter(text, "\n")
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return true
+		}
+	}
+	return false
+}
+
+func DefaultSkillDescription(name string, body string) string {
+	if description := firstDescriptionParagraph(body); description != "" {
+		return limitDescription(description)
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "skill"
+	}
+	return limitDescription(name + " skill instructions")
+}
+
+func firstDescriptionParagraph(body string) string {
+	lines := strings.Split(body, "\n")
+	paragraph := []string{}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if len(paragraph) > 0 {
+				break
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			if len(paragraph) > 0 {
+				break
+			}
+			continue
+		}
+		paragraph = append(paragraph, line)
+	}
+	return strings.Join(strings.Fields(strings.Join(paragraph, " ")), " ")
+}
+
+func limitDescription(description string) string {
+	description = strings.Join(strings.Fields(description), " ")
+	const maxDescription = 240
+	if len(description) <= maxDescription {
+		return description
+	}
+	cut := strings.LastIndex(description[:maxDescription-3], " ")
+	if cut < 80 {
+		cut = maxDescription - 3
+	}
+	return strings.TrimSpace(description[:cut]) + "..."
+}
+
+func frontmatterScalar(value string) string {
+	return strconv.Quote(strings.TrimSpace(value))
 }
 
 func trimScalar(value string) string {
