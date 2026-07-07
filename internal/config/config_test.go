@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,16 +81,16 @@ func TestSaveConfig(t *testing.T) {
 	cfg := Config{
 		Home:         filepath.Join(root, "home"),
 		StoreDir:     filepath.Join(root, "store"),
-			OverlaysDir:  filepath.Join(root, "workspace", "overlays"),
-			DraftsDir:    filepath.Join(root, "workspace", "drafts"),
-			ImportsDir:   filepath.Join(root, "workspace", "imports"),
-			ImportDirs:   []string{filepath.Join(root, "workspace", "imports")},
+		OverlaysDir:  filepath.Join(root, "workspace", "overlays"),
+		DraftsDir:    filepath.Join(root, "workspace", "drafts"),
+		ImportsDir:   filepath.Join(root, "workspace", "imports"),
+		ImportDirs:   []string{filepath.Join(root, "workspace", "imports")},
 		RenderedDir:  filepath.Join(root, "rendered"),
 		SourceIgnore: []string{".git", "overlays"},
 		ConfigPath:   filepath.Join(root, "config.json"),
 		LockPath:     filepath.Join(root, "lock.json"),
 		SkillsBin:    "skills",
-			Sources:      map[string]Source{"local": {Name: "local", Source: filepath.Join(root, "workspace", "source")}},
+		Sources:      map[string]Source{"local": {Name: "local", Source: filepath.Join(root, "workspace", "source")}},
 	}
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -100,7 +101,7 @@ func TestSaveConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-		if loaded.OverlaysDir != cfg.OverlaysDir || loaded.Sources["local"].Source != cfg.Sources["local"].Source {
+	if loaded.OverlaysDir != cfg.OverlaysDir || loaded.Sources["local"].Source != cfg.Sources["local"].Source {
 		t.Fatalf("loaded = %#v", loaded)
 	}
 	if !hasString(loaded.SourceIgnore, "overlays") {
@@ -276,6 +277,9 @@ func TestSourcesParsingAndSaving(t *testing.T) {
 	if object["core"].Name != "core" || object["core"].Ref != "main" {
 		t.Fatalf("object = %#v", object)
 	}
+	if object["core"].ID == "" || object["core"].DefaultUpdatePolicy != UpdatePolicyManual {
+		t.Fatalf("object metadata = %#v", object["core"])
+	}
 	stringsMap, err := parseSources(json.RawMessage(`{"local":"./skills"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -283,12 +287,22 @@ func TestSourcesParsingAndSaving(t *testing.T) {
 	if stringsMap["local"].Source != "./skills" {
 		t.Fatalf("strings = %#v", stringsMap)
 	}
+	if stringsMap["local"].ID != SourceID(Source{Name: "local", Source: "./skills"}) {
+		t.Fatalf("string source id = %s", stringsMap["local"].ID)
+	}
 	list, err := parseSources(json.RawMessage(`[{"name":"one","source":"owner/one"},{"name":"","source":""}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(list) != 1 || list["one"].Source != "owner/one" {
 		t.Fatalf("list = %#v", list)
+	}
+	withMetadata, err := parseSources(json.RawMessage(`[{"id":"src_existing","name":"team","source":"owner/repo","default_update_policy":"auto"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withMetadata["team"].ID != "src_existing" || withMetadata["team"].DefaultUpdatePolicy != UpdatePolicyAuto {
+		t.Fatalf("metadata source = %#v", withMetadata["team"])
 	}
 	if _, err := parseSources(json.RawMessage(`42`)); err == nil {
 		t.Fatal("expected invalid sources error")
@@ -310,6 +324,13 @@ func TestSourcesParsingAndSaving(t *testing.T) {
 	if saved["core"].Source != "owner/repo" {
 		t.Fatalf("saved = %#v", saved)
 	}
+	if saved["core"].ID == "" || saved["core"].DefaultUpdatePolicy != UpdatePolicyManual {
+		t.Fatalf("saved metadata = %#v", saved["core"])
+	}
+	renamed := Source{Name: "renamed", Source: "owner/repo"}
+	if SourceID(saved["core"]) != SourceID(renamed) {
+		t.Fatalf("source id should ignore display name: %s vs %s", SourceID(saved["core"]), SourceID(renamed))
+	}
 	if err := SaveSources(Config{ConfigPath: root}, map[string]Source{}); err == nil {
 		t.Fatal("expected SaveSources read error")
 	}
@@ -322,6 +343,42 @@ func TestSourcesParsingAndSaving(t *testing.T) {
 		t.Fatal("expected SaveSources mkdir error")
 	}
 	makeDirAll = oldMakeDirAll
+}
+
+func TestSaveSourcesDeterministicMetadata(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{ConfigPath: filepath.Join(root, "config.json")}
+	first := map[string]Source{
+		"zeta":  {Name: "zeta", Source: "owner/zeta", DefaultUpdatePolicy: UpdatePolicyAuto},
+		"alpha": {Name: "alpha", Source: "owner/alpha"},
+	}
+	if err := SaveSources(cfg, first); err != nil {
+		t.Fatal(err)
+	}
+	firstBytes, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := map[string]Source{
+		"alpha": {Name: "alpha", Source: "owner/alpha"},
+		"zeta":  {Name: "zeta", Source: "owner/zeta", DefaultUpdatePolicy: UpdatePolicyAuto},
+	}
+	if err := SaveSources(cfg, second); err != nil {
+		t.Fatal(err)
+	}
+	secondBytes, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstBytes) != string(secondBytes) {
+		t.Fatalf("source writes differ:\nfirst=%s\nsecond=%s", firstBytes, secondBytes)
+	}
+	if !strings.Contains(string(firstBytes), `"id": "src_`) ||
+		!strings.Contains(string(firstBytes), `"default_update_policy": "manual"`) ||
+		!strings.Contains(string(firstBytes), `"default_update_policy": "auto"`) {
+		t.Fatalf("source metadata missing from deterministic write: %s", firstBytes)
+	}
 }
 
 func TestConfigErrorBranches(t *testing.T) {

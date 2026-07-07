@@ -151,6 +151,41 @@ when skills would be removed, `upskill` prints the affected skill list and
 requires `--yes`. Add `--keep-installed` only when you want to remove the source
 record while leaving installed copies in place.
 
+Source inspection reads the current source every time. If another skill is added
+to the local directory or upstream Git repo, `upskill source skills` and
+`upskill source find` show it without requiring a separate source sync. New
+source skills are not installed automatically; install them explicitly with
+`upskill add <source> --skill <name>`.
+
+Installed skills are synced copies. Most commands check whether installed skills
+have changed upstream and print notices to stderr when updates are available.
+Preview and apply manual updates with:
+
+```bash
+upskill update --check
+upskill update hello-skill --diff
+upskill sync --agent codex
+```
+
+Use automatic updates when a skill should refresh whenever Upskill runs a normal
+command:
+
+```bash
+upskill add Obsidian --skill hello-skill --update-policy auto --agent codex
+upskill update-policy hello-skill --manual
+```
+
+You can also set a source default for future installs:
+
+```bash
+upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian --default-update-policy auto
+```
+
+Read-only commands such as `upskill update --check`, `upskill update --diff`,
+`upskill source skills`, and `upskill source find` report pending automatic
+updates without applying them. Add `--no-check`, or set `UPSKILL_NO_CHECK=1`,
+when you need to skip preflight checks and notices for one command.
+
 ## Configure MCP
 
 Run the MCP server manually once to verify the command starts:
@@ -238,7 +273,10 @@ Expected MCP flow:
 
 - Use `docs/workflows.md` for local customizations, update checks, draft
   creation, archive import, promotion, and Jinja template customizations.
-- Use `upskill update --check` to preview source updates.
+- Use `upskill source skills <source>` or the MCP `find_source_skills` tool to
+  inspect current source catalogs without installing anything.
+- Use `upskill update --check` or the MCP `check_skill_updates` tool to preview
+  installed source updates.
 - Use `upskill sync --agent codex` to update locked skills and build final
   outputs.
 

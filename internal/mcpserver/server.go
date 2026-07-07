@@ -55,6 +55,24 @@ type syncSkillsResult struct {
 	Warnings      []string                 `json:"warnings,omitempty"`
 }
 
+type notice struct {
+	Type    string `json:"type"`
+	SkillID string `json:"skill_id,omitempty"`
+	Message string `json:"message"`
+	Error   string `json:"error,omitempty"`
+}
+
+type sourceRow struct {
+	ID                  string `json:"id"`
+	Name                string `json:"name,omitempty"`
+	DisplayName         string `json:"display_name"`
+	Source              string `json:"source"`
+	Ref                 string `json:"ref,omitempty"`
+	Subpath             string `json:"subpath,omitempty"`
+	CanonicalID         string `json:"canonical_id"`
+	DefaultUpdatePolicy string `json:"default_update_policy"`
+}
+
 func Serve(cfg config.Config, in io.Reader, out io.Writer) error {
 	reader := bufio.NewReader(in)
 	for {
@@ -102,15 +120,74 @@ func handle(cfg config.Config, req request) response {
 			return resp
 		}
 		result, err := callTool(cfg, params.Name, params.Arguments)
+		notices := updateNotices(cfg)
 		if err != nil {
-			resp.Result = toolResult(err.Error(), true)
+			resp.Result = toolResult(err.Error(), true, notices)
 			return resp
 		}
-		resp.Result = toolResult(result, false)
+		resp.Result = toolResult(result, false, notices)
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found"}
 	}
 	return resp
+}
+
+func attachNotices(cfg config.Config, result any) any {
+	notices := updateNotices(cfg)
+	if len(notices) == 0 {
+		return result
+	}
+	switch value := result.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(value)+1)
+		for key, item := range value {
+			out[key] = item
+		}
+		out["notices"] = notices
+		return out
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			return result
+		}
+		var object map[string]any
+		if err := json.Unmarshal(data, &object); err != nil || object == nil {
+			return result
+		}
+		object["notices"] = notices
+		return object
+	}
+}
+
+func updateNotices(cfg config.Config) []notice {
+	checks, err := library.CheckSkillUpdates(cfg, nil, false)
+	if err != nil {
+		return []notice{{
+			Type:    "update_check_failed",
+			Message: "update check failed",
+			Error:   err.Error(),
+		}}
+	}
+	notices := []notice{}
+	for _, check := range checks {
+		if check.Error != "" {
+			notices = append(notices, notice{
+				Type:    "update_check_failed",
+				SkillID: check.StoreName,
+				Message: fmt.Sprintf("update check failed for %s", check.StoreName),
+				Error:   check.Error,
+			})
+			continue
+		}
+		if check.Changed {
+			notices = append(notices, notice{
+				Type:    "update_available",
+				SkillID: check.StoreName,
+				Message: fmt.Sprintf("update available for %s", check.StoreName),
+			})
+		}
+	}
+	return notices
 }
 
 func toolList() []map[string]any {
@@ -119,6 +196,25 @@ func toolList() []map[string]any {
 			"query": stringProp("Optional search text."),
 			"limit": intProp("Maximum number of skills to return."),
 		}, []string{}),
+		tool("list_sources", "List configured skill sources and source defaults.", map[string]any{}, []string{}),
+		tool("find_source_skills", "Inspect or search the current skills available from a configured or raw source without installing them.", map[string]any{
+			"source":  stringProp("Configured source name, local path, GitHub shorthand, or Git URL."),
+			"query":   stringProp("Optional search text. Omit to list source skills."),
+			"limit":   intProp("Maximum number of source skills to return."),
+			"ref":     stringProp("Optional Git branch, tag, or commit override."),
+			"subpath": stringProp("Optional source subpath override."),
+			"skill":   stringProp("Optional skill ID or name filter."),
+		}, []string{"source"}),
+		tool("check_skill_updates", "Check installed skills against their locked sources without updating them.", map[string]any{
+			"skill_id":     stringProp("Optional installed skill identifier."),
+			"skill_ids":    arrayProp("Optional installed skill identifiers."),
+			"include_diff": boolProp("Include file-level diff entries for changed skills."),
+		}, []string{}),
+		tool("set_skill_update_policy", "Set installed skill update policy while writing only lock metadata.", map[string]any{
+			"skill_id":  stringProp("Optional installed skill identifier."),
+			"skill_ids": arrayProp("Optional installed skill identifiers."),
+			"policy":    stringProp("Update policy: manual or auto."),
+		}, []string{"policy"}),
 		tool("read_skill", "Read a base or generated skill entrypoint and optional file manifest.", map[string]any{
 			"skill_id":      stringProp("Skill identifier."),
 			"agent":         stringProp("Optional agent name for generated output customizations."),
@@ -203,10 +299,22 @@ func intProp(description string) map[string]any {
 	return map[string]any{"type": "integer", "description": description}
 }
 
+func arrayProp(description string) map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": description}
+}
+
 func callTool(cfg config.Config, name string, args map[string]any) (any, error) {
 	switch name {
 	case "find_skills":
 		return findSkills(cfg, strArg(args, "query"), intArg(args, "limit", 10))
+	case "list_sources":
+		return listSources(cfg), nil
+	case "find_source_skills":
+		return findSourceSkills(cfg, args)
+	case "check_skill_updates":
+		return checkSkillUpdates(cfg, args)
+	case "set_skill_update_policy":
+		return setSkillUpdatePolicy(cfg, args)
 	case "read_skill":
 		return readSkill(cfg, args)
 	case "list_skill_files":
@@ -270,6 +378,106 @@ func callTool(cfg config.Config, name string, args map[string]any) (any, error) 
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+func listSources(cfg config.Config) []sourceRow {
+	sources := config.SourceRecords(cfg.Sources)
+	rows := make([]sourceRow, 0, len(sources))
+	for _, source := range sources {
+		rows = append(rows, sourceRow{
+			ID:                  source.ID,
+			Name:                source.Name,
+			DisplayName:         config.SourceDisplayName(source),
+			Source:              source.Source,
+			Ref:                 source.Ref,
+			Subpath:             source.Subpath,
+			CanonicalID:         config.SourceKey(source),
+			DefaultUpdatePolicy: config.NormalizeUpdatePolicy(source.DefaultUpdatePolicy),
+		})
+	}
+	return rows
+}
+
+func findSourceSkills(cfg config.Config, args map[string]any) (map[string]any, error) {
+	source := strArg(args, "source")
+	if source == "" {
+		return nil, fmt.Errorf("source is required")
+	}
+	limit := intArg(args, "limit", 100)
+	skills, total, err := library.SearchSource(cfg, source, strArg(args, "query"), library.InstallOptions{
+		SkillFilter: strArg(args, "skill"),
+		Ref:         strArg(args, "ref"),
+		Subpath:     strArg(args, "subpath"),
+	}, limit)
+	if err != nil {
+		return nil, err
+	}
+	if skills == nil {
+		skills = []library.SourceSkill{}
+	}
+	return map[string]any{
+		"source":       source,
+		"query":        strArg(args, "query"),
+		"total":        total,
+		"skills":       skills,
+		"base_mutated": false,
+	}, nil
+}
+
+func checkSkillUpdates(cfg config.Config, args map[string]any) (map[string]any, error) {
+	names := stringListArg(args, "skill_ids")
+	if skill := strArg(args, "skill_id"); skill != "" {
+		names = append(names, skill)
+	}
+	checks, err := library.CheckSkillUpdates(cfg, names, boolArg(args, "include_diff", false))
+	if err != nil {
+		return nil, err
+	}
+	if checks == nil {
+		checks = []library.UpdateCheck{}
+	}
+	changed := 0
+	failed := 0
+	for _, check := range checks {
+		if check.Error != "" {
+			failed++
+			continue
+		}
+		if check.Changed {
+			changed++
+		}
+	}
+	return map[string]any{
+		"checks":        checks,
+		"checked_count": len(checks),
+		"changed_count": changed,
+		"failed_count":  failed,
+		"base_mutated":  false,
+	}, nil
+}
+
+func setSkillUpdatePolicy(cfg config.Config, args map[string]any) (map[string]any, error) {
+	names := stringListArg(args, "skill_ids")
+	if skill := strArg(args, "skill_id"); skill != "" {
+		names = append(names, skill)
+	}
+	policy := strArg(args, "policy")
+	if policy == "" {
+		return nil, fmt.Errorf("policy is required")
+	}
+	changes, err := library.SetUpdatePolicy(cfg, names, policy)
+	if err != nil {
+		return nil, err
+	}
+	if changes == nil {
+		changes = []library.UpdatePolicyChange{}
+	}
+	return map[string]any{
+		"changes":       changes,
+		"changed_count": len(changes),
+		"lock_mutated":  true,
+		"base_mutated":  false,
+	}, nil
 }
 
 func readSkill(cfg config.Config, args map[string]any) (any, error) {
@@ -412,7 +620,7 @@ func deleteOverlay(cfg config.Config, args map[string]any) (any, error) {
 	return map[string]any{"skill_id": skill, "path": path, "deleted": true, "base_mutated": false}, nil
 }
 
-func toolResult(value any, isError bool) map[string]any {
+func toolResult(value any, isError bool, notices ...[]notice) map[string]any {
 	text := ""
 	switch v := value.(type) {
 	case string:
@@ -421,10 +629,14 @@ func toolResult(value any, isError bool) map[string]any {
 		data, _ := json.MarshalIndent(v, "", "  ")
 		text = string(data)
 	}
-	return map[string]any{
+	result := map[string]any{
 		"content": []map[string]string{{"type": "text", "text": text}},
 		"isError": isError,
 	}
+	if len(notices) > 0 && len(notices[0]) > 0 {
+		result["notices"] = notices[0]
+	}
+	return result
 }
 
 func readMessage(reader *bufio.Reader) ([]byte, error) {
@@ -520,6 +732,27 @@ func intArg(args map[string]any, key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func stringListArg(args map[string]any, key string) []string {
+	value, ok := args[key]
+	if !ok {
+		return nil
+	}
+	switch v := value.(type) {
+	case []string:
+		return append([]string{}, v...)
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if text, ok := item.(string); ok && text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func EncodeForTest(message any) []byte {

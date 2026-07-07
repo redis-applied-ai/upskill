@@ -38,7 +38,7 @@ var (
 var version = "dev"
 
 const (
-	helpAdd = `usage: upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
+	helpAdd = `usage: upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--update-policy manual|auto] [--no-render]
 
 summary:
   Install one or more skills from a configured source, local directory, GitHub
@@ -52,6 +52,9 @@ options:
                     SKILL.md name.
   --ref REF         Git branch, tag, or commit to read.
   --subpath PATH    Relative directory inside the source to scan.
+  --update-policy manual|auto
+                    Set whether this installed skill updates only manually or
+                    automatically during Upskill preflight.
   --agent AGENT     Render output for one configured agent after installing.
   --no-render       Install to Upskill's store and lock only; skip rendering.
 
@@ -200,6 +203,26 @@ examples:
   upskill sync
   upskill sync --agent codex`
 
+	helpUpdatePolicy = `usage: upskill update-policy <skill-name>... (--manual | --auto)
+
+summary:
+  Change installed skill update policy metadata.
+
+arguments:
+  <skill-name>      One or more installed skill IDs.
+
+options:
+  --auto            Automatically update during normal Upskill preflight.
+  --manual          Update only when sync or update is run explicitly.
+
+notes:
+  This command updates only lock metadata. It does not fetch sources, update
+  installed skill files, render output, or copy agent outputs.
+
+examples:
+  upskill update-policy redis --auto
+  upskill update-policy redis docs --manual`
+
 	helpMigrate = `usage: upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
 
 summary:
@@ -286,7 +309,7 @@ examples:
   upskill source list
   upskill source ls --json`
 
-	helpSourceAdd = `usage: upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
+	helpSourceAdd = `usage: upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH] [--default-update-policy manual|auto]
 
 summary:
   Add, rename, or update a configured source without installing skills.
@@ -298,6 +321,9 @@ options:
   --name NAME       Shortcut name for repeated commands.
   --ref REF         Git branch, tag, or commit to read.
   --subpath PATH    Relative directory inside the source to scan.
+  --default-update-policy manual|auto
+                    Default update policy copied into future installs from
+                    this source.
 
 notes:
   Source identity is source location plus ref plus subpath. Re-adding the same
@@ -766,6 +792,7 @@ examples:
 )
 
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
+	args, noCheck := stripGlobalNoCheck(args)
 	if printRequestedHelp(args, stdout) {
 		return 0
 	}
@@ -778,6 +805,11 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
+	}
+	if !noCheck && !envNoCheck() {
+		if code := runCLIPreflight(cfg, args, stderr); code != 0 {
+			return code
+		}
 	}
 
 	switch args[0] {
@@ -793,6 +825,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runRemove(cfg, args[1:], stdout, stderr)
 	case "update":
 		return runUpdate(cfg, args[1:], stdout, stderr)
+	case "update-policy":
+		return runUpdatePolicy(cfg, args[1:], stdout, stderr)
 	case "sync":
 		return runSync(cfg, args[1:], stdout, stderr)
 	case "migrate":
@@ -819,6 +853,165 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "upskill: unknown command: %s\n", args[0])
 		return 2
 	}
+}
+
+func stripGlobalNoCheck(args []string) ([]string, bool) {
+	stripped := make([]string, 0, len(args))
+	noCheck := false
+	for _, arg := range args {
+		if arg == "--no-check" {
+			noCheck = true
+			continue
+		}
+		stripped = append(stripped, arg)
+	}
+	return stripped, noCheck
+}
+
+func envNoCheck() bool {
+	value := strings.TrimSpace(os.Getenv("UPSKILL_NO_CHECK"))
+	if value == "" {
+		return false
+	}
+	return parseBoolDefault(value, false)
+}
+
+type cliPreflightMode int
+
+const (
+	cliPreflightSkip cliPreflightMode = iota
+	cliPreflightNoticeOnly
+	cliPreflightAutoApply
+)
+
+func cliPreflightModeFor(args []string) cliPreflightMode {
+	if len(args) == 0 {
+		return cliPreflightSkip
+	}
+	switch args[0] {
+	case "mcp", "version", "init", "update-policy":
+		return cliPreflightSkip
+	case "update":
+		if hasCLIFlag(args[1:], "--check") || hasCLIFlag(args[1:], "--diff") {
+			return cliPreflightNoticeOnly
+		}
+	case "source":
+		if len(args) > 1 {
+			switch args[1] {
+			case "skills", "find", "search":
+				return cliPreflightNoticeOnly
+			}
+		}
+	}
+	return cliPreflightAutoApply
+}
+
+func runCLIPreflight(cfg config.Config, args []string, stderr io.Writer) int {
+	switch cliPreflightModeFor(args) {
+	case cliPreflightSkip:
+		return 0
+	case cliPreflightNoticeOnly:
+		printCLIUpdateNotices(cfg, stderr)
+		return 0
+	default:
+		result, err := library.AutoUpdateSkills(cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		if len(result.Updated) > 0 {
+			if err := renderPreflightUpdates(cfg, result.Updated, preflightAgent(args)); err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+		}
+		printCLIUpdateCheckNotices(result.Checks, result.Updated, stderr)
+		return 0
+	}
+}
+
+func printCLIUpdateNotices(cfg config.Config, stderr io.Writer) {
+	checks, err := library.CheckSkillUpdates(cfg, nil, false)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: update check failed: %v\n", err)
+		return
+	}
+	printCLIUpdateCheckNotices(checks, nil, stderr)
+}
+
+func printCLIUpdateCheckNotices(checks []library.UpdateCheck, updated []library.InstalledSkill, stderr io.Writer) {
+	updatedSet := map[string]struct{}{}
+	updatedNames := make([]string, 0, len(updated))
+	for _, item := range updated {
+		updatedSet[item.StoreName] = struct{}{}
+		updatedNames = append(updatedNames, item.StoreName)
+	}
+	sort.Strings(updatedNames)
+	if len(updatedNames) > 0 {
+		fmt.Fprintf(stderr, "notice: automatically updated %s\n", strings.Join(updatedNames, ", "))
+	}
+
+	autoPending := make([]string, 0, len(checks))
+	manualPending := make([]string, 0, len(checks))
+	for _, check := range checks {
+		if check.Error != "" {
+			fmt.Fprintf(stderr, "warning: update check failed for %s: %s\n", check.StoreName, check.Error)
+			continue
+		}
+		if !check.Changed {
+			continue
+		}
+		if _, ok := updatedSet[check.StoreName]; ok {
+			continue
+		}
+		if check.UpdatePolicy == config.UpdatePolicyAuto {
+			autoPending = append(autoPending, check.StoreName)
+		} else {
+			manualPending = append(manualPending, check.StoreName)
+		}
+	}
+	sort.Strings(autoPending)
+	sort.Strings(manualPending)
+	if len(autoPending) > 0 {
+		fmt.Fprintf(stderr, "notice: automatic updates pending for %s; run a normal command or upskill sync\n", strings.Join(autoPending, ", "))
+	}
+	if len(manualPending) > 0 {
+		fmt.Fprintf(stderr, "notice: updates available for %s; run upskill sync or upskill update --diff %s\n", strings.Join(manualPending, ", "), manualPending[0])
+	}
+}
+
+func renderPreflightUpdates(cfg config.Config, updated []library.InstalledSkill, agent string) error {
+	for _, item := range updated {
+		if _, err := (render.Renderer{Config: cfg}).Render(render.Options{Skill: item.StoreName, Agent: agent, Copy: true}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func preflightAgent(args []string) string {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--agent" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "--agent=") {
+			return strings.TrimPrefix(arg, "--agent=")
+		}
+	}
+	return ""
+}
+
+func hasCLIFlag(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag || strings.HasPrefix(arg, flag+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -868,16 +1061,21 @@ func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 		return 0
 	}
 	source := args[0]
-	agent, skill, ref, subpath := "", "", "", ""
+	agent, skill, ref, subpath, updatePolicy := "", "", "", "", ""
 	noRender := false
 	if err := parseFlags(args[1:], map[string]func(string) error{
-		"--agent":     func(v string) error { agent = v; return nil },
-		"--skill":     func(v string) error { skill = v; return nil },
-		"--ref":       func(v string) error { ref = v; return nil },
-		"--subpath":   func(v string) error { subpath = v; return nil },
-		"--no-render": func(_ string) error { noRender = true; return nil },
+		"--agent":         func(v string) error { agent = v; return nil },
+		"--skill":         func(v string) error { skill = v; return nil },
+		"--ref":           func(v string) error { ref = v; return nil },
+		"--subpath":       func(v string) error { subpath = v; return nil },
+		"--update-policy": func(v string) error { updatePolicy = v; return nil },
+		"--no-render":     func(_ string) error { noRender = true; return nil },
 	}); err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 2
+	}
+	if updatePolicy != "" && !config.ValidUpdatePolicy(updatePolicy) {
+		fmt.Fprintf(stderr, "upskill: invalid update policy: %s\n", updatePolicy)
 		return 2
 	}
 	if _, ok := library.ResolveNamedSource(cfg, source); !ok {
@@ -896,7 +1094,7 @@ func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 			return 1
 		}
 	}
-	installed, err := library.InstallSource(cfg, source, library.InstallOptions{SkillFilter: skill, Ref: ref, Subpath: subpath})
+	installed, err := library.InstallSource(cfg, source, library.InstallOptions{SkillFilter: skill, Ref: ref, Subpath: subpath, UpdatePolicy: updatePolicy})
 	if err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
@@ -1090,6 +1288,40 @@ func runUpdate(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		return 0
 	}
 	return renderInstalled(cfg, updated, agent, stdout, stderr)
+}
+
+func runUpdatePolicy(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+	auto := false
+	manual := false
+	positionals := []string{}
+	if err := parseFlags(args, map[string]func(string) error{
+		"--auto":   func(_ string) error { auto = true; return nil },
+		"--manual": func(_ string) error { manual = true; return nil },
+	}, &positionals); err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 2
+	}
+	if len(positionals) == 0 {
+		fmt.Fprintln(stderr, "upskill: update-policy requires at least one skill name")
+		return 2
+	}
+	if auto == manual {
+		fmt.Fprintln(stderr, "upskill: update-policy requires exactly one of --auto or --manual")
+		return 2
+	}
+	policy := config.UpdatePolicyManual
+	if auto {
+		policy = config.UpdatePolicyAuto
+	}
+	changes, err := library.SetUpdatePolicy(cfg, positionals, policy)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	for _, change := range changes {
+		fmt.Fprintf(stdout, "%s\t%s -> %s\n", change.StoreName, change.OldPolicy, change.NewPolicy)
+	}
+	return 0
 }
 
 func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -1609,19 +1841,27 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 			return 2
 		}
 		source := args[1]
-		name, ref, subpath := "", "", ""
+		name, ref, subpath, defaultPolicy := "", "", "", ""
 		if err := parseFlags(args[2:], map[string]func(string) error{
-			"--name":    func(v string) error { name = v; return nil },
-			"--ref":     func(v string) error { ref = v; return nil },
-			"--subpath": func(v string) error { subpath = v; return nil },
+			"--name":                  func(v string) error { name = v; return nil },
+			"--ref":                   func(v string) error { ref = v; return nil },
+			"--subpath":               func(v string) error { subpath = v; return nil },
+			"--default-update-policy": func(v string) error { defaultPolicy = v; return nil },
 		}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		if defaultPolicy != "" && !config.ValidUpdatePolicy(defaultPolicy) {
+			fmt.Fprintf(stderr, "upskill: invalid update policy: %s\n", defaultPolicy)
 			return 2
 		}
 		canonical, _, err := library.CanonicalSource(source, name, ref, subpath)
 		if err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
+		}
+		if defaultPolicy != "" {
+			canonical.DefaultUpdatePolicy = config.NormalizeUpdatePolicy(defaultPolicy)
 		}
 		if cfg.Sources == nil {
 			cfg.Sources = map[string]config.Source{}
@@ -3002,6 +3242,7 @@ type installedSkillRow struct {
 	SourceURL         string            `json:"source_url,omitempty"`
 	Ref               string            `json:"ref,omitempty"`
 	SourceSubpath     string            `json:"source_subpath,omitempty"`
+	SkillSubpath      string            `json:"skill_subpath,omitempty"`
 	SourceSkillPath   string            `json:"source_skill_path,omitempty"`
 	Hash              string            `json:"hash,omitempty"`
 	UpdatedAt         string            `json:"updated_at,omitempty"`
@@ -3026,7 +3267,8 @@ func installedSkillRows(cfg config.Config, skills []library.Skill, lock library.
 			row.SourceType = entry.SourceType
 			row.SourceURL = entry.SourceURL
 			row.Ref = entry.Ref
-			row.SourceSubpath = entry.Subpath
+			row.SourceSubpath = entry.SourceSubpath
+			row.SkillSubpath = entry.EffectiveSkillSubpath()
 			row.SourceSkillPath = entry.SkillPath
 			row.Hash = entry.Hash
 			row.UpdatedAt = entry.UpdatedAt
@@ -3052,12 +3294,14 @@ func listSourceText(row installedSkillRow) string {
 }
 
 type sourceRow struct {
-	Name        string `json:"name,omitempty"`
-	DisplayName string `json:"display_name"`
-	Source      string `json:"source"`
-	Ref         string `json:"ref,omitempty"`
-	Subpath     string `json:"subpath,omitempty"`
-	CanonicalID string `json:"canonical_id"`
+	ID                  string `json:"id"`
+	Name                string `json:"name,omitempty"`
+	DisplayName         string `json:"display_name"`
+	Source              string `json:"source"`
+	Ref                 string `json:"ref,omitempty"`
+	Subpath             string `json:"subpath,omitempty"`
+	CanonicalID         string `json:"canonical_id"`
+	DefaultUpdatePolicy string `json:"default_update_policy"`
 }
 
 func sourceRows(sources map[string]config.Source) []sourceRow {
@@ -3065,12 +3309,14 @@ func sourceRows(sources map[string]config.Source) []sourceRow {
 	rows := make([]sourceRow, 0, len(records))
 	for _, source := range records {
 		rows = append(rows, sourceRow{
-			Name:        source.Name,
-			DisplayName: config.SourceDisplayName(source),
-			Source:      source.Source,
-			Ref:         source.Ref,
-			Subpath:     source.Subpath,
-			CanonicalID: config.SourceKey(source),
+			ID:                  source.ID,
+			Name:                source.Name,
+			DisplayName:         config.SourceDisplayName(source),
+			Source:              source.Source,
+			Ref:                 source.Ref,
+			Subpath:             source.Subpath,
+			CanonicalID:         config.SourceKey(source),
+			DefaultUpdatePolicy: config.NormalizeUpdatePolicy(source.DefaultUpdatePolicy),
 		})
 	}
 	return rows
@@ -3082,12 +3328,20 @@ func upsertSourceRecord(sources map[string]config.Source, source config.Source) 
 		if source.Name == "" && existing.Name != "" {
 			source.Name = existing.Name
 		}
+		if source.ID == "" {
+			source.ID = existing.ID
+		}
+		if source.DefaultUpdatePolicy == "" {
+			source.DefaultUpdatePolicy = existing.DefaultUpdatePolicy
+		}
+		source = config.NormalizeSource(source)
 		key := config.SourceKey(source)
 		if existingKey != key {
 			delete(sources, existingKey)
 		}
 		return source, key, true
 	}
+	source = config.NormalizeSource(source)
 	return source, config.SourceKey(source), false
 }
 
@@ -3185,7 +3439,7 @@ func lockEntryMatchesSource(entry library.LockEntry, source config.Source) bool 
 	if sourceSubpath == "" {
 		return true
 	}
-	entrySubpath := filepath.ToSlash(strings.Trim(entry.Subpath, "/"))
+	entrySubpath := filepath.ToSlash(strings.Trim(entry.EffectiveSourceSubpath(), "/"))
 	return entrySubpath == sourceSubpath || strings.HasPrefix(entrySubpath, sourceSubpath+"/")
 }
 
@@ -3274,7 +3528,7 @@ func parseFlagsWithValues(args []string, handlers map[string]func(string) error,
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--to-source-path", "--operation":
+	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--to-source-path", "--operation", "--update-policy", "--default-update-policy":
 		return true
 	default:
 		return false
@@ -3310,6 +3564,8 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printDirectHelp(args, w, helpRemove)
 	case "update":
 		return printDirectHelp(args, w, helpUpdate)
+	case "update-policy":
+		return printDirectHelp(args, w, helpUpdatePolicy)
 	case "sync":
 		return printDirectHelp(args, w, helpSync)
 	case "migrate":
@@ -3422,6 +3678,8 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  find     Search installed skills")
 	fmt.Fprintln(w, "  remove   Remove installed skills")
 	fmt.Fprintln(w, "  update   Update installed skills from their locked sources")
+	fmt.Fprintln(w, "  update-policy")
+	fmt.Fprintln(w, "           Change installed skill update policy")
 	fmt.Fprintln(w, "  sync     Update skills and build generated output")
 	fmt.Fprintln(w, "  migrate  Migrate skill bundles into a local source")
 	fmt.Fprintln(w, "  init     Create a new skill bundle")
@@ -3434,6 +3692,10 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  version  Print the current version")
 	fmt.Fprintln(w, "  status   Show local upskill state")
 	fmt.Fprintln(w, "  doctor   Check and create local directories")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "global options:")
+	fmt.Fprintln(w, "  --no-check")
+	fmt.Fprintln(w, "           Skip source/update preflight for this command")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, `Run "upskill <command> --help" for command help.`)
 }

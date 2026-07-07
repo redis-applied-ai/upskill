@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -25,10 +27,12 @@ type AgentOutput struct {
 }
 
 type Source struct {
-	Name    string `json:"name,omitempty"`
-	Source  string `json:"source"`
-	Ref     string `json:"ref,omitempty"`
-	Subpath string `json:"subpath,omitempty"`
+	ID                  string `json:"id,omitempty"`
+	Name                string `json:"name,omitempty"`
+	Source              string `json:"source"`
+	Ref                 string `json:"ref,omitempty"`
+	Subpath             string `json:"subpath,omitempty"`
+	DefaultUpdatePolicy string `json:"default_update_policy,omitempty"`
 }
 
 type Config struct {
@@ -75,6 +79,11 @@ var DefaultSourceIgnore = []string{
 	"imports",
 	"rendered",
 }
+
+const (
+	UpdatePolicyManual = "manual"
+	UpdatePolicyAuto   = "auto"
+)
 
 func Load() (Config, error) {
 	home, err := expandPath(envDefault("UPSKILL_HOME", "~/.skills"))
@@ -314,6 +323,7 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 			if source.Name == "" && name != SourceKey(source) {
 				source.Name = name
 			}
+			source = NormalizeSource(source)
 			sources[SourceKey(source)] = source
 		}
 		return sources, nil
@@ -326,6 +336,7 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 				continue
 			}
 			item := Source{Name: name, Source: source}
+			item = NormalizeSource(item)
 			sources[SourceKey(item)] = item
 		}
 		return sources, nil
@@ -339,9 +350,51 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 		if source.Source == "" {
 			continue
 		}
+		source = NormalizeSource(source)
 		sources[SourceKey(source)] = source
 	}
 	return sources, nil
+}
+
+func NormalizeSource(source Source) Source {
+	if source.ID == "" {
+		source.ID = SourceID(source)
+	}
+	source.DefaultUpdatePolicy = NormalizeUpdatePolicy(source.DefaultUpdatePolicy)
+	return source
+}
+
+func NormalizeUpdatePolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", UpdatePolicyManual:
+		return UpdatePolicyManual
+	case UpdatePolicyAuto:
+		return UpdatePolicyAuto
+	default:
+		return policy
+	}
+}
+
+func ValidUpdatePolicy(policy string) bool {
+	switch NormalizeUpdatePolicy(policy) {
+	case UpdatePolicyManual, UpdatePolicyAuto:
+		return true
+	default:
+		return false
+	}
+}
+
+func SourceID(source Source) string {
+	sum := sha256.Sum256([]byte(SourceIdentity(source)))
+	return "src_" + hex.EncodeToString(sum[:])[:16]
+}
+
+func SourceIdentity(source Source) string {
+	return strings.Join([]string{
+		source.Source,
+		source.Ref,
+		filepath.ToSlash(strings.Trim(source.Subpath, "/")),
+	}, "\x00")
 }
 
 func SourceKey(source Source) string {
@@ -374,6 +427,7 @@ func SourceRecords(sources map[string]Source) []Source {
 		if source.Name != "" && key != "" && key != source.Name {
 			source.Name = key
 		}
+		source = NormalizeSource(source)
 		records = append(records, source)
 	}
 	sortSources(records)

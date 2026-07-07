@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,6 +48,26 @@ func setupEnv(t *testing.T) (root string, configPath string) {
 	t.Setenv("UPSKILL_HOME", filepath.Join(root, "home"))
 	t.Setenv("UPSKILL_CONFIG", configPath)
 	return root, configPath
+}
+
+func runCLIGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Upskill Test",
+		"GIT_AUTHOR_EMAIL=upskill@example.invalid",
+		"GIT_COMMITTER_NAME=Upskill Test",
+		"GIT_COMMITTER_EMAIL=upskill@example.invalid",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
 }
 
 func installFakeEditor(t *testing.T, edited *[]string) {
@@ -111,6 +132,62 @@ func TestSyncUpdatesLockThenRenders(t *testing.T) {
 	}
 }
 
+func TestCLIGitSourceFreshnessE2E(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root, _ := setupEnv(t)
+	remote := filepath.Join(root, "remote.git")
+	work := filepath.Join(root, "work")
+	runCLIGit(t, "", "init", "--bare", remote)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runCLIGit(t, work, "init")
+	writeTestFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld from git.\n", 0o644)
+	runCLIGit(t, work, "add", ".")
+	runCLIGit(t, work, "commit", "-m", "old redis")
+	runCLIGit(t, work, "branch", "-M", "main")
+	runCLIGit(t, work, "remote", "add", "origin", remote)
+	runCLIGit(t, work, "push", "-u", "origin", "main")
+	runCLIGit(t, "", "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	var stdout, stderr bytes.Buffer
+	source := "file://" + remote
+	if code := Run([]string{"add", source, "--ref", "main", "--subpath", "skills", "--skill", "redis", "--agent", "codex"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md")); !strings.Contains(got, "Old from git.") {
+		t.Fatalf("initial render = %s", got)
+	}
+
+	writeTestFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew from git.\n", 0o644)
+	runCLIGit(t, work, "add", ".")
+	runCLIGit(t, work, "commit", "-m", "new redis")
+	runCLIGit(t, work, "push", "origin", "main")
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "notice: updates available for redis") {
+		t.Fatalf("missing update notice: %q", stderr.String())
+	}
+	if got := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md")); !strings.Contains(got, "Old from git.") {
+		t.Fatalf("notice-only command mutated render = %s", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"sync", "--agent", "codex"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("sync code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md")); !strings.Contains(got, "New from git.") {
+		t.Fatalf("sync did not render git update = %s", got)
+	}
+}
+
 func TestSyncRejectsOverlayModeFlags(t *testing.T) {
 	setupEnv(t)
 
@@ -159,10 +236,10 @@ func TestHelpCommands(t *testing.T) {
 	}
 
 	top := runHelp()
-	if !strings.Contains(top, "usage: upskill <command> [args]") || !strings.Contains(top, "commands:") {
+	if !strings.Contains(top, "usage: upskill <command> [args]") || !strings.Contains(top, "commands:") || !strings.Contains(top, "--no-check") {
 		t.Fatalf("help output = %q", top)
 	}
-	for _, want := range []string{"add      Install", "find     Search", "migrate  Migrate", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run", "version  Print"} {
+	for _, want := range []string{"add      Install", "find     Search", "update-policy", "migrate  Migrate", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run", "version  Print"} {
 		if !strings.Contains(top, want) {
 			t.Fatalf("help output missing %q: %q", want, top)
 		}
@@ -178,6 +255,17 @@ func TestHelpCommands(t *testing.T) {
 		t.Fatalf("--help output differs from default help:\ndefault=%q\nflag=%q", top, flagTop)
 	}
 
+	addPolicyHelp := runHelp("add", "--help")
+	if !strings.Contains(addPolicyHelp, "--update-policy manual|auto") ||
+		!strings.Contains(addPolicyHelp, "automatically during Upskill preflight") {
+		t.Fatalf("add help = %q", addPolicyHelp)
+	}
+	updatePolicyHelp := runHelp("update-policy", "--help")
+	if !strings.Contains(updatePolicyHelp, helpUpdatePolicy) ||
+		!strings.Contains(updatePolicyHelp, "updates only lock metadata") {
+		t.Fatalf("update-policy help = %q", updatePolicyHelp)
+	}
+
 	sourceHelp := runHelp("source", "--help")
 	if !strings.Contains(sourceHelp, "usage: upskill source <command> [args]") || !strings.Contains(sourceHelp, "skills  List") || !strings.Contains(sourceHelp, "find    Search") {
 		t.Fatalf("source help = %q", sourceHelp)
@@ -188,6 +276,7 @@ func TestHelpCommands(t *testing.T) {
 	sourceAddHelp := runHelp("source", "add", "--help")
 	if !strings.Contains(sourceAddHelp, helpSourceAdd) ||
 		!strings.Contains(sourceAddHelp, "--ref REF") ||
+		!strings.Contains(sourceAddHelp, "--default-update-policy manual|auto") ||
 		!strings.Contains(sourceAddHelp, "renames the source") {
 		t.Fatalf("source add help = %q", sourceAddHelp)
 	}
@@ -1894,9 +1983,15 @@ func TestSourceCommands(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
 		t.Fatalf("source list json decode: %v\n%s", err, stdout.String())
 	}
-	if len(rows) != 1 || rows[0].Name != "Obsidian" || rows[0].DisplayName != "Obsidian" || rows[0].CanonicalID != "Obsidian" {
+	if len(rows) != 1 ||
+		rows[0].ID == "" ||
+		rows[0].Name != "Obsidian" ||
+		rows[0].DisplayName != "Obsidian" ||
+		rows[0].CanonicalID != "Obsidian" ||
+		rows[0].DefaultUpdatePolicy != config.UpdatePolicyManual {
 		t.Fatalf("source rows = %#v", rows)
 	}
+	obsidianSourceID := rows[0].ID
 
 	stdout.Reset()
 	stderr.Reset()
@@ -1976,7 +2071,7 @@ func TestSourceCommands(t *testing.T) {
 	if len(installedRows) != 1 ||
 		installedRows[0].SourceDisplayName != "Obsidian" ||
 		!installedRows[0].SourceConfigured ||
-		installedRows[0].SourceSubpath != "redis" {
+		installedRows[0].SkillSubpath != "redis" {
 		t.Fatalf("list json source row = %#v", installedRows)
 	}
 
@@ -2032,9 +2127,10 @@ func TestSourceCommands(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
 		t.Fatalf("source list unnamed json decode: %v\n%s", err, stdout.String())
 	}
-	if len(rows) != 1 || rows[0].Name != "" || rows[0].DisplayName != source || rows[0].Source != source {
+	if len(rows) != 1 || rows[0].ID == "" || rows[0].Name != "" || rows[0].DisplayName != source || rows[0].Source != source {
 		t.Fatalf("unnamed source rows = %#v", rows)
 	}
+	unnamedSourceID := rows[0].ID
 
 	stdout.Reset()
 	stderr.Reset()
@@ -2053,8 +2149,11 @@ func TestSourceCommands(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
 		t.Fatalf("source list renamed json decode: %v\n%s", err, stdout.String())
 	}
-	if len(rows) != 1 || rows[0].Name != "Personal" || rows[0].Source != source {
+	if len(rows) != 1 || rows[0].Name != "Personal" || rows[0].Source != source || rows[0].ID != unnamedSourceID {
 		t.Fatalf("renamed source rows = %#v", rows)
+	}
+	if rows[0].ID != obsidianSourceID {
+		t.Fatalf("source id changed after removing and re-adding same identity: %s vs %s", rows[0].ID, obsidianSourceID)
 	}
 
 	stdout.Reset()
@@ -2123,6 +2222,307 @@ func TestSourceCommands(t *testing.T) {
 	removedCommand := "va" + "ult"
 	if code := Run([]string{removedCommand}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("removed command code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestUpsertSourceRecordPreservesIdentityMetadata(t *testing.T) {
+	source := config.NormalizeSource(config.Source{
+		Name:                "team",
+		Source:              "/tmp/team-skills",
+		DefaultUpdatePolicy: config.UpdatePolicyAuto,
+	})
+	sources := map[string]config.Source{
+		config.SourceKey(source): source,
+	}
+	renamed, key, updated := upsertSourceRecord(sources, config.Source{
+		Name:   "renamed",
+		Source: "/tmp/team-skills",
+	})
+	if !updated || key != "renamed" {
+		t.Fatalf("upsert result = %#v %s %v", renamed, key, updated)
+	}
+	if renamed.ID != source.ID || renamed.DefaultUpdatePolicy != config.UpdatePolicyAuto {
+		t.Fatalf("source metadata was not preserved: before=%#v after=%#v", source, renamed)
+	}
+	if _, ok := sources["team"]; ok {
+		t.Fatalf("old source key still present: %#v", sources)
+	}
+}
+
+func TestCLIUpdateNoticeGoesToStderr(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "notice-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("list code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "notice: updates available for redis") {
+		t.Fatalf("stderr missing update notice: %q", stderr.String())
+	}
+	var rows []installedSkillRow
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if len(rows) != 1 || rows[0].StoreName != "redis" {
+		t.Fatalf("rows = %#v", rows)
+	}
+}
+
+func TestCLIPreflightAutoUpdatesNormalCommands(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "auto-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--skill", "redis", "--update-policy", "auto", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("list code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "notice: automatically updated redis") {
+		t.Fatalf("stderr missing auto-update notice: %q", stderr.String())
+	}
+	if got := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")); !strings.Contains(got, "New.") {
+		t.Fatalf("store was not auto-updated:\n%s", got)
+	}
+	if got := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md")); !strings.Contains(got, "New.") {
+		t.Fatalf("agent output was not rendered:\n%s", got)
+	}
+	lock, err := library.ReadLock(config.Config{LockPath: filepath.Join(root, "home", "upskill-lock.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyAuto || !strings.Contains(lock.Skills["redis"].Hash, "sha256:") {
+		t.Fatalf("lock entry = %#v", lock.Skills["redis"])
+	}
+	var rows []installedSkillRow
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+}
+
+func TestCLIReadOnlyPreflightDoesNotAutoUpdate(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "readonly-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--skill", "redis", "--update-policy", "auto", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n", 0o644)
+
+	for _, args := range [][]string{
+		{"update", "--check"},
+		{"update", "--diff"},
+		{"source", "skills", source},
+		{"source", "find", source, "redis"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v code = %d stderr=%s", args, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "notice: automatic updates pending for redis") {
+			t.Fatalf("%v missing pending notice: %q", args, stderr.String())
+		}
+		if got := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")); !strings.Contains(got, "Old.") {
+			t.Fatalf("%v changed store during read-only preflight:\n%s", args, got)
+		}
+		if _, err := os.Stat(filepath.Join(root, "codex-skills", "redis")); !os.IsNotExist(err) {
+			t.Fatalf("%v rendered agent output during read-only preflight: %v", args, err)
+		}
+	}
+}
+
+func TestCLINoCheckSkipsPreflight(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "no-check-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--skill", "redis", "--update-policy", "auto", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n", 0o644)
+
+	for _, args := range [][]string{
+		{"--no-check", "list", "--json"},
+		{"list", "--json", "--no-check"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v code = %d stderr=%s", args, code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "notice:") {
+			t.Fatalf("%v printed notice with --no-check: %q", args, stderr.String())
+		}
+		if got := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")); !strings.Contains(got, "Old.") {
+			t.Fatalf("%v changed store with --no-check:\n%s", args, got)
+		}
+	}
+
+	t.Setenv("UPSKILL_NO_CHECK", "1")
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("env no-check list code = %d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "notice:") {
+		t.Fatalf("env no-check printed notice: %q", stderr.String())
+	}
+	if got := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")); !strings.Contains(got, "Old.") {
+		t.Fatalf("env no-check changed store:\n%s", got)
+	}
+}
+
+func TestCLIAddUpdatePolicy(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "policy-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nRedis.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--skill", "redis", "--update-policy", "auto", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	lock, err := library.ReadLock(config.Config{LockPath: filepath.Join(root, "home", "upskill-lock.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyAuto {
+		t.Fatalf("lock policy = %#v", lock.Skills["redis"])
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", source, "--skill", "redis", "--update-policy", "sometimes", "--no-render"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("invalid add policy code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid update policy") {
+		t.Fatalf("invalid policy stderr = %q", stderr.String())
+	}
+}
+
+func TestCLISourceDefaultUpdatePolicy(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "source-default-policy")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nRedis.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", source, "--name", "team", "--default-update-policy", "auto"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list code = %d stderr=%s", code, stderr.String())
+	}
+	var sources []sourceRow
+	if err := json.Unmarshal(stdout.Bytes(), &sources); err != nil {
+		t.Fatalf("source rows decode: %v\n%s", err, stdout.String())
+	}
+	if len(sources) != 1 || sources[0].DefaultUpdatePolicy != config.UpdatePolicyAuto {
+		t.Fatalf("source rows = %#v", sources)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", "team", "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add from source code = %d stderr=%s", code, stderr.String())
+	}
+	lock, err := library.ReadLock(config.Config{LockPath: filepath.Join(root, "home", "upskill-lock.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyAuto {
+		t.Fatalf("lock policy = %#v", lock.Skills["redis"])
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", source, "--default-update-policy", "sometimes"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("invalid source policy code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid update policy") {
+		t.Fatalf("invalid source policy stderr = %q", stderr.String())
+	}
+}
+
+func TestCLIUpdatePolicyCommand(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "update-policy-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nRedis.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update-policy", "redis", "--auto"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("update-policy code = %d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "update check failed") {
+		t.Fatalf("update-policy should not run preflight: %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "redis\tmanual -> auto") {
+		t.Fatalf("update-policy stdout = %q", stdout.String())
+	}
+	lock, err := library.ReadLock(config.Config{LockPath: filepath.Join(root, "home", "upskill-lock.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyAuto {
+		t.Fatalf("lock policy = %#v", lock.Skills["redis"])
+	}
+	if _, err := os.Stat(filepath.Join(root, "home", "store", "redis", "SKILL.md")); err != nil {
+		t.Fatalf("update-policy should not remove or update store: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update-policy", "redis"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("missing policy code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update-policy", "missing", "--manual"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("missing skill code = %d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestCLIDoesNotNoticeUninstalledSourceSkills(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "source-catalog")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nRedis.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+
+	writeTestFile(t, filepath.Join(source, "docs", "SKILL.md"), "---\nname: Docs\n---\n\nDocs.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "skills", source}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source skills code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "docs") {
+		t.Fatalf("source skills did not show new source skill: %q", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "notice:") {
+		t.Fatalf("unexpected notice for uninstalled skill: %q", stderr.String())
 	}
 }
 

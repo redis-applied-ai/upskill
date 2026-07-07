@@ -92,6 +92,17 @@ upskill add ~/Documents/Notes/Memory/Skills --skill hello-skill --agent codex
 Raw sources are recorded automatically and displayed by path in
 `upskill source list` / `upskill source ls`.
 
+Local source inspection reads the directory directly every time:
+
+```bash
+upskill source skills personal
+upskill source find personal redis
+```
+
+If you edit a skill in that directory, the next source command shows the current
+source content. Installed copies in `~/.skills/store` do not change until a
+manual update or automatic update policy applies.
+
 ## Use An Existing Memory-Server Skills Directory
 
 If an existing memory server stores skill bundles as ordinary directories, point
@@ -162,6 +173,19 @@ You can also save a source shortcut:
 upskill source add ./examples --name local-examples
 upskill add local-examples --agent codex
 ```
+
+Git sources behave the same way from the user's point of view:
+
+```bash
+upskill source add owner/repo --name team-skills --subpath skills
+upskill source skills team-skills
+upskill source find team-skills redis
+upskill add team-skills --skill redis --agent codex
+```
+
+`source skills` and `source find` inspect the current upstream ref. They do not
+answer from the installed store and they do not install newly added upstream
+skills.
 
 ## Customize An Installed Skill With An Agent
 
@@ -265,6 +289,15 @@ If everything is current, `upskill` prints the unchanged rows and then:
 no updates available
 ```
 
+MCP clients can run the same read-only check:
+
+```json
+{"name": "check_skill_updates", "arguments": {"skill_id": "hello-skill", "include_diff": true}}
+```
+
+The result includes changed, unchanged, and failed checks. A failed source read
+is reported on the individual check instead of being treated as current.
+
 ## Preview Diffs And Apply Updates
 
 Use `--diff` to preview incoming file changes. It is also read-only:
@@ -302,6 +335,56 @@ without local customizations:
 upskill render hello-skill --print --base-only
 ```
 
+`sync` is about installed skills. It refreshes locked installed copies and
+renders output, but it does not install a new skill that appeared in a source.
+Use `upskill source skills <source>` to discover new upstream skills and
+`upskill add <source> --skill <name>` to install one.
+
+## Use Automatic Update Policy
+
+Manual update policy is the default. With manual policy, normal commands print a
+notice when an installed skill has changed upstream:
+
+```text
+notice: updates available for hello-skill; run upskill sync or upskill update --diff hello-skill
+```
+
+Set `auto` when an installed skill should refresh before normal Upskill
+commands:
+
+```bash
+upskill add ./examples --skill hello-skill --update-policy auto --agent codex
+upskill update-policy hello-skill --manual
+upskill update-policy hello-skill --auto
+```
+
+Set a source default for future installs:
+
+```bash
+upskill source add ./examples --name local-examples --default-update-policy auto
+upskill add local-examples --skill hello-skill
+```
+
+Automatic updates refresh the installed base skill, update the lock entry, and
+render/copy configured agent outputs. If the command has `--agent`, preflight
+rendering is limited to that agent.
+
+Read-only commands report pending automatic updates without applying them:
+
+```bash
+upskill update --check
+upskill update hello-skill --diff
+upskill source skills local-examples
+upskill source find local-examples hello
+```
+
+Skip all preflight checks and notices for one command with:
+
+```bash
+upskill list --no-check
+UPSKILL_NO_CHECK=1 upskill list
+```
+
 ## Search For Skills
 
 Installed-skill search is local to Upskill's store. Source search inspects one
@@ -329,12 +412,28 @@ upskill source find ./examples hello
 upskill show ./examples --skill hello-skill
 ```
 
+MCP source inspection uses `find_source_skills`:
+
+```json
+{"name": "find_source_skills", "arguments": {"source": "./examples", "query": "hello", "limit": 10}}
+```
+
 If you want to make a common source easy to reuse, add it as a named source:
 
 ```bash
 upskill source add ./examples --name local-examples
 upskill source search local-examples hello
 upskill add local-examples --skill hello-skill
+```
+
+MCP clients can inspect configured sources and set update policy metadata:
+
+```json
+{"name": "list_sources", "arguments": {}}
+```
+
+```json
+{"name": "set_skill_update_policy", "arguments": {"skill_id": "hello-skill", "policy": "auto"}}
 ```
 
 ## Instruct An LLM To Use Skills

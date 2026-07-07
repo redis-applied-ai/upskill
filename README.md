@@ -42,13 +42,14 @@ make coverage
 ## Commands
 
 ```bash
-upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
+upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--update-policy manual|auto] [--no-render]
 upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
 upskill list|ls [--json] [--agent AGENT]
 upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
+upskill update-policy <skill-name>... (--manual | --auto)
 upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
 upskill init [name] [--dir DIR]
 upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
@@ -61,11 +62,20 @@ Source shortcuts:
 
 ```bash
 upskill source list|ls [--json]
-upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
+upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH] [--default-update-policy manual|auto]
 upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
 upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref REF] [--subpath PATH]
 upskill source remove|rm <source-or-name> [--yes] [--keep-installed]
 ```
+
+Global option:
+
+```bash
+upskill <command> --no-check
+```
+
+`--no-check` skips source/update preflight for one command. Set
+`UPSKILL_NO_CHECK=1` for the same behavior in the environment.
 
 Local customizations:
 
@@ -123,10 +133,16 @@ git@github.com:owner/repo.git
 
 `upskill add` discovers directories containing `SKILL.md`, copies full skill
 directories into the base store, writes `upskill-lock.json`, and renders by
-default. `upskill update --check` previews locked source changes without
-writing. `upskill update --diff` previews incoming file changes. `upskill
-update` applies updates, and `upskill sync` updates all locked skills and
-renders final agent outputs.
+default. `upskill source skills` and `upskill source find` inspect the current
+source every time. Local sources are read directly from disk; Git sources are
+resolved from the requested upstream ref instead of from the installed store.
+
+Installed skills are separate from source catalogs. `upskill update --check`
+previews locked source changes without writing. `upskill update --diff`
+previews incoming file changes. `upskill update` applies updates, and
+`upskill sync` updates all locked skills and renders final agent outputs.
+Upskill does not install newly discovered upstream skills automatically; run
+`upskill add <source> --skill <name>` once for each new skill you want managed.
 
 When a `SKILL.md` has no frontmatter block, Upskill infers default `name` and
 `description` values from the directory name and first prose paragraph for
@@ -166,6 +182,7 @@ UPSKILL_RENDERED_DIR
 UPSKILL_CONFIG
 UPSKILL_LOCK
 UPSKILL_SOURCE_IGNORE
+UPSKILL_NO_CHECK
 ```
 
 ## Doctor And Status
@@ -238,6 +255,50 @@ upskill add owner/repo --subpath skills --skill redis
 `upskill source find` and `upskill source search` search one live source by
 skill ID, display name, description, `SKILL.md` body, and path without
 installing anything.
+
+## Source Freshness And Updates
+
+Upskill treats source catalogs and installed copies as different things:
+
+- Source inspection commands always read the current source catalog and can show
+  newly added upstream skills.
+- Installed skill checks compare the locked copy in `store/` with the current
+  source version of that same installed skill.
+- New upstream skills do not produce generic notifications and are not installed
+  until you run `upskill add`.
+
+Most commands run a preflight check. If an installed skill has changed upstream
+and its policy is `manual`, Upskill prints a notice to stderr. JSON stdout stays
+machine-readable.
+
+```text
+notice: updates available for redis; run upskill sync or upskill update --diff redis
+```
+
+Use manual updates when you want to review changes:
+
+```bash
+upskill update --check
+upskill update redis --diff
+upskill sync
+```
+
+Use automatic updates when you want a skill refreshed whenever Upskill runs a
+normal command:
+
+```bash
+upskill add Obsidian --skill redis --update-policy auto
+upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian --default-update-policy auto
+upskill update-policy redis --auto
+upskill update-policy redis --manual
+```
+
+Automatic updates refresh installed base skill files, update the lock entry,
+and render/copy configured agent outputs before the command's main behavior.
+Read-only commands such as `upskill update --check`, `upskill update --diff`,
+`upskill source skills`, and `upskill source find` report pending automatic
+updates without applying them. Use `--no-check` or `UPSKILL_NO_CHECK=1` to skip
+preflight entirely for one invocation.
 
 ## Agent Outputs
 
@@ -388,6 +449,10 @@ Tools:
 
 ```text
 find_skills
+list_sources
+find_source_skills
+check_skill_updates
+set_skill_update_policy
 read_skill
 list_skill_files
 read_skill_file
@@ -412,11 +477,13 @@ rebase_skill_draft
 promote_skill_draft
 ```
 
-MCP writes are limited to overlays and mutable drafts. Agents can read base or
-generated skills, but they cannot overwrite `store/` through the MCP server.
-Draft promotion can write only to a local checkout or named local source and
-rejects managed upskill directories such as `store/`, `rendered/`, `overlays/`,
-`drafts/`, and `imports/`.
+MCP writes are limited to lock update-policy metadata, overlays, and mutable
+drafts. Agents can inspect configured sources, search live source skills, check
+installed updates, and read base or generated skills, but they cannot install
+new source skills or overwrite `store/` through the MCP server. Draft promotion
+can write only to a local checkout or named local source and rejects managed
+upskill directories such as `store/`, `rendered/`, `overlays/`, `drafts/`, and
+`imports/`.
 
 Copy `prompts/AGENTS.md` into an agent configuration when you want an agent to
 use `upskill` MCP tools for skill management instead of built-in skill servers.

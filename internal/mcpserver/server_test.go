@@ -99,6 +99,11 @@ func TestHandleProtocolMethods(t *testing.T) {
 	if !strings.Contains(string(data), "upsert_skill_overlay_file") {
 		t.Fatalf("tools response = %s", data)
 	}
+	for _, want := range []string{"list_sources", "find_source_skills", "check_skill_updates", "set_skill_update_policy"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("tools response missing %s: %s", want, data)
+		}
+	}
 	if !strings.Contains(string(data), "create_skill_draft") || !strings.Contains(string(data), "render_skill_draft") {
 		t.Fatalf("tools response missing draft tools: %s", data)
 	}
@@ -126,6 +131,210 @@ func TestHandleProtocolMethods(t *testing.T) {
 	result, ok := success.Result.(map[string]any)
 	if !ok || result["isError"] != false {
 		t.Fatalf("successful tool result = %#v", success.Result)
+	}
+}
+
+func TestMCPToolResultIncludesUpdateNotices(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "notice-source")
+	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	if _, err := library.InstallSource(cfg, source, library.InstallOptions{SkillFilter: "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n")
+
+	id := json.RawMessage(`1`)
+	params, _ := json.Marshal(callParams{Name: "read_skill", Arguments: map[string]any{
+		"skill_id":      "redis",
+		"rendered":      false,
+		"include_files": false,
+	}})
+	resp := handle(cfg, request{ID: id, Method: "tools/call", Params: params})
+	if resp.Error != nil {
+		t.Fatalf("tool response = %#v", resp)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok || result["isError"] != false {
+		t.Fatalf("tool result = %#v", resp.Result)
+	}
+	notices, ok := result["notices"].([]notice)
+	if !ok || len(notices) != 1 || notices[0].Type != "update_available" || notices[0].SkillID != "redis" {
+		t.Fatalf("result notices = %#v", result["notices"])
+	}
+	content, ok := result["content"].([]map[string]string)
+	if !ok || len(content) != 1 {
+		t.Fatalf("tool content = %#v", result["content"])
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content[0]["text"]), &payload); err != nil {
+		t.Fatalf("payload decode: %v\n%s", err, content[0]["text"])
+	}
+	if _, ok := payload["notices"]; ok {
+		t.Fatalf("payload should be unchanged by wrapper notices: %#v", payload)
+	}
+
+	params, _ = json.Marshal(callParams{Name: "find_skills", Arguments: map[string]any{"query": "redis"}})
+	resp = handle(cfg, request{ID: id, Method: "tools/call", Params: params})
+	if resp.Error != nil {
+		t.Fatalf("array tool response = %#v", resp)
+	}
+	result = resp.Result.(map[string]any)
+	notices, ok = result["notices"].([]notice)
+	if !ok || len(notices) != 1 || notices[0].Type != "update_available" {
+		t.Fatalf("array result notices = %#v", result["notices"])
+	}
+}
+
+func TestMCPListSources(t *testing.T) {
+	cfg := testConfig(t)
+	source := config.NormalizeSource(config.Source{
+		Name:                "team",
+		Source:              filepath.Join(cfg.Home, "team-skills"),
+		Ref:                 "main",
+		Subpath:             "skills",
+		DefaultUpdatePolicy: config.UpdatePolicyAuto,
+	})
+	cfg.Sources[config.SourceKey(source)] = source
+
+	listed, err := callTool(cfg, "list_sources", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, ok := listed.([]sourceRow)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("listed = %#v", listed)
+	}
+	if rows[0].ID == "" ||
+		rows[0].Name != "team" ||
+		rows[0].DisplayName != "team" ||
+		rows[0].Ref != "main" ||
+		rows[0].Subpath != "skills" ||
+		rows[0].DefaultUpdatePolicy != config.UpdatePolicyAuto {
+		t.Fatalf("source row = %#v", rows[0])
+	}
+}
+
+func TestMCPFindSourceSkillsDoesNotInstall(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "live-source")
+	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew source copy.\n")
+	writeFile(t, filepath.Join(source, "docs", "SKILL.md"), "---\nname: Docs\n---\n\nDocs.\n")
+
+	found, err := callTool(cfg, "find_source_skills", map[string]any{"source": source, "query": "", "limit": float64(10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := found.(map[string]any)
+	if !ok {
+		t.Fatalf("found = %#v", found)
+	}
+	skills, ok := payload["skills"].([]library.SourceSkill)
+	if !ok || len(skills) != 2 {
+		t.Fatalf("skills = %#v", payload["skills"])
+	}
+	if got := readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md")); strings.Contains(got, "New source copy.") {
+		t.Fatalf("source inspection mutated installed store:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StoreDir, "docs")); !os.IsNotExist(err) {
+		t.Fatalf("source inspection installed new skill: %v", err)
+	}
+
+	found, err = callTool(cfg, "find_source_skills", map[string]any{"source": source, "query": "docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = found.(map[string]any)
+	skills = payload["skills"].([]library.SourceSkill)
+	if len(skills) != 1 || skills[0].StoreName != "docs" {
+		t.Fatalf("filtered skills = %#v", skills)
+	}
+}
+
+func TestMCPDoesNotExposeSourceInstallTool(t *testing.T) {
+	for _, tool := range toolList() {
+		name, _ := tool["name"].(string)
+		if strings.Contains(name, "install") || name == "add_skill" || name == "add_source_skill" {
+			t.Fatalf("unexpected MCP install-capable tool exposed: %s", name)
+		}
+	}
+	if _, err := callTool(testConfig(t), "install_skill", map[string]any{}); err == nil {
+		t.Fatal("install_skill unexpectedly succeeded")
+	}
+}
+
+func TestMCPCheckSkillUpdates(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "check-source")
+	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	if _, err := library.InstallSource(cfg, source, library.InstallOptions{SkillFilter: "redis", UpdatePolicy: config.UpdatePolicyAuto}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n")
+
+	checked, err := callTool(cfg, "check_skill_updates", map[string]any{"skill_id": "redis", "include_diff": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := checked.(map[string]any)
+	if !ok {
+		t.Fatalf("checked = %#v", checked)
+	}
+	if payload["checked_count"] != 1 || payload["changed_count"] != 1 || payload["failed_count"] != 0 || payload["base_mutated"] != false {
+		t.Fatalf("payload = %#v", payload)
+	}
+	checks, ok := payload["checks"].([]library.UpdateCheck)
+	if !ok || len(checks) != 1 || !checks[0].Changed || checks[0].UpdatePolicy != config.UpdatePolicyAuto || len(checks[0].Diff) == 0 {
+		t.Fatalf("checks = %#v", payload["checks"])
+	}
+	if got := readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md")); strings.Contains(got, "New.") {
+		t.Fatalf("check mutated installed store:\n%s", got)
+	}
+
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+	checked, err = callTool(cfg, "check_skill_updates", map[string]any{"skill_ids": []any{"redis"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = checked.(map[string]any)
+	if payload["failed_count"] != 1 {
+		t.Fatalf("failed payload = %#v", payload)
+	}
+	checks = payload["checks"].([]library.UpdateCheck)
+	if checks[0].Error == "" {
+		t.Fatalf("failed check missing error: %#v", checks[0])
+	}
+}
+
+func TestMCPSetSkillUpdatePolicyWritesOnlyLock(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "policy-source")
+	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	if _, err := library.InstallSource(cfg, source, library.InstallOptions{SkillFilter: "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := callTool(cfg, "set_skill_update_policy", map[string]any{"skill_id": "redis", "policy": "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := updated.(map[string]any)
+	if !ok || payload["changed_count"] != 1 || payload["lock_mutated"] != true || payload["base_mutated"] != false {
+		t.Fatalf("updated = %#v", updated)
+	}
+	lock, err := library.ReadLock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyAuto {
+		t.Fatalf("lock entry = %#v", lock.Skills["redis"])
+	}
+	if got := readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md")); !strings.Contains(got, "Old.") {
+		t.Fatalf("base skill changed:\n%s", got)
 	}
 }
 

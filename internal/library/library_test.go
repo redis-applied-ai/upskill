@@ -3,7 +3,9 @@ package library
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,6 +52,7 @@ func TestParseSourceVariants(t *testing.T) {
 		{"https://github.com/owner/repo/tree/main/skills/redis", "git", "https://github.com/owner/repo.git", "main", "skills/redis", ""},
 		{"git@github.com:owner/repo.git", "git", "git@github.com:owner/repo.git", "", "", ""},
 		{"ssh://git@example.com/owner/repo.git", "git", "ssh://git@example.com/owner/repo.git", "", "", ""},
+		{"file:///tmp/repo.git", "git", "file:///tmp/repo.git", "", "", ""},
 	}
 	for _, tc := range cases {
 		parsed, err := ParseSource(tc.input)
@@ -103,8 +106,13 @@ func TestInstallUpdateFindReadRemoveAndManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lock.Skills["redis-cache"].Subpath != "skills/redis" {
-		t.Fatalf("lock = %#v", lock.Skills["redis-cache"])
+	entry := lock.Skills["redis-cache"]
+	if lock.SchemaVersion != LockSchemaVersion ||
+		entry.Subpath != "skills/redis" ||
+		entry.SourceSubpath != "" ||
+		entry.SkillSubpath != "skills/redis" ||
+		entry.UpdatePolicy != config.UpdatePolicyManual {
+		t.Fatalf("lock = %#v", entry)
 	}
 
 	listed, err := ListInstalled(cfg)
@@ -300,6 +308,427 @@ description: Triage GitHub issues and PRs
 	}
 }
 
+func TestSchemaOneLockCompatibility(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "legacy-source")
+	writeFile(t, filepath.Join(source, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n")
+	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	oldHash, err := HashDir(filepath.Join(cfg.StoreDir, "redis"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{
+  "schema_version": 1,
+  "skills": {
+    "redis": {
+      "name": "Redis",
+      "source": "` + source + `",
+      "source_type": "local",
+      "source_url": "` + source + `",
+      "subpath": "skills/redis",
+      "skill_path": "skills/redis/SKILL.md",
+      "hash": "` + oldHash + `",
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+  }
+}`
+	writeFile(t, cfg.LockPath, legacy)
+
+	lock, err := ReadLock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := lock.Skills["redis"]
+	if lock.SchemaVersion != 1 ||
+		entry.UpdatePolicy != config.UpdatePolicyManual ||
+		entry.SourceSubpath != "" ||
+		entry.SkillSubpath != "skills/redis" {
+		t.Fatalf("legacy lock read = %#v %#v", lock, entry)
+	}
+
+	preview, err := PreviewUpdates(cfg, []string{"redis"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview) != 1 || !preview[0].Changed {
+		t.Fatalf("legacy preview = %#v", preview)
+	}
+
+	updated, err := UpdateSkills(cfg, []string{"redis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 1 || updated[0].StoreName != "redis" {
+		t.Fatalf("legacy update = %#v", updated)
+	}
+	upgraded, err := ReadLock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgradedEntry := upgraded.Skills["redis"]
+	if upgraded.SchemaVersion != LockSchemaVersion ||
+		upgradedEntry.UpdatePolicy != config.UpdatePolicyManual ||
+		upgradedEntry.SourceSubpath != "skills/redis" ||
+		upgradedEntry.SkillSubpath != "" ||
+		upgradedEntry.Hash == oldHash {
+		t.Fatalf("upgraded lock = %#v %#v", upgraded, upgradedEntry)
+	}
+}
+
+func TestCheckSkillUpdatesReadOnly(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "check-source")
+	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	installed, err := InstallSource(cfg, source, InstallOptions{SkillFilter: "redis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installed) != 1 {
+		t.Fatalf("installed = %#v", installed)
+	}
+	installedHash := installed[0].Hash
+	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n")
+
+	checks, err := CheckSkillUpdates(cfg, []string{"redis"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 ||
+		checks[0].Error != "" ||
+		!checks[0].Changed ||
+		checks[0].CurrentHash != installedHash ||
+		checks[0].NewHash == "" ||
+		len(checks[0].Diff) == 0 {
+		t.Fatalf("checks = %#v", checks)
+	}
+	storeHash, err := HashDir(filepath.Join(cfg.StoreDir, "redis"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storeHash != installedHash {
+		t.Fatalf("check mutated store: %s != %s", storeHash, installedHash)
+	}
+}
+
+func TestCheckSkillUpdatesDetectsGitContentChange(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	cfg := testConfig(t)
+	remote := filepath.Join(cfg.Home, "updates.git")
+	work := filepath.Join(cfg.Home, "updates-work")
+	runGit(t, "", "init", "--bare", remote)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, work, "init")
+	writeFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	runGit(t, work, "add", ".")
+	runGit(t, work, "commit", "-m", "old redis")
+	firstCommit := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
+	runGit(t, work, "branch", "-M", "main")
+	runGit(t, work, "remote", "add", "origin", remote)
+	runGit(t, work, "push", "-u", "origin", "main")
+	runGit(t, "", "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	source := "file://" + remote
+	installed, err := InstallSource(cfg, source, InstallOptions{Ref: "main", Subpath: "skills", SkillFilter: "redis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installed) != 1 || installed[0].StoreName != "redis" {
+		t.Fatalf("installed = %#v", installed)
+	}
+
+	writeFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n")
+	runGit(t, work, "add", ".")
+	runGit(t, work, "commit", "-m", "new redis")
+	secondCommit := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
+	runGit(t, work, "push", "origin", "main")
+
+	checks, err := CheckSkillUpdates(cfg, []string{"redis"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 ||
+		checks[0].Error != "" ||
+		!checks[0].Changed ||
+		checks[0].CurrentRevision != firstCommit ||
+		checks[0].ResolvedRevision != secondCommit ||
+		checks[0].CurrentHash == "" ||
+		checks[0].NewHash == "" ||
+		checks[0].CurrentHash == checks[0].NewHash {
+		t.Fatalf("git checks = %#v", checks)
+	}
+}
+
+func TestCheckSkillUpdatesReportsFailures(t *testing.T) {
+	t.Run("local source read", func(t *testing.T) {
+		cfg := testConfig(t)
+		sourceFile := filepath.Join(cfg.Home, "source-file")
+		writeFile(t, sourceFile, "not a directory")
+		if err := WriteLock(cfg, Lock{Skills: map[string]LockEntry{
+			"file-skill": {Name: "File Skill", Source: sourceFile, SourceType: "local", SourceURL: sourceFile, Hash: "sha256:old"},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		checks, err := CheckSkillUpdates(cfg, nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(checks) != 1 || checks[0].Error == "" || checks[0].Changed || checks[0].NewHash != "" {
+			t.Fatalf("local failure checks = %#v", checks)
+		}
+	})
+
+	t.Run("hash", func(t *testing.T) {
+		cfg := testConfig(t)
+		source := filepath.Join(cfg.Home, "source")
+		writeFile(t, filepath.Join(source, "skill", "SKILL.md"), "---\nname: Skill\n---\n\nSkill.\n")
+		if err := WriteLock(cfg, Lock{Skills: map[string]LockEntry{
+			"skill": {Name: "Skill", Source: source, SourceType: "local", SourceURL: source, Hash: "sha256:old"},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		oldHashTree := hashTree
+		hashTree = func(string) (string, error) { return "", errors.New("hash failed") }
+		checks, err := CheckSkillUpdates(cfg, nil, false)
+		hashTree = oldHashTree
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(checks) != 1 || !strings.Contains(checks[0].Error, "hash failed") || checks[0].Changed {
+			t.Fatalf("hash failure checks = %#v", checks)
+		}
+	})
+
+	t.Run("git clone", func(t *testing.T) {
+		cfg := testConfig(t)
+		fakeBin := filepath.Join(cfg.Home, "bin")
+		writeFile(t, filepath.Join(fakeBin, "git"), "#!/bin/sh\necho clone failed\nexit 2\n")
+		if err := os.Chmod(filepath.Join(fakeBin, "git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if err := WriteLock(cfg, Lock{Skills: map[string]LockEntry{
+			"git-skill": {Name: "Git Skill", Source: "git@example.com:owner/fail.git", SourceType: "git", SourceURL: "git@example.com:owner/fail.git", Hash: "sha256:old"},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		checks, err := CheckSkillUpdates(cfg, nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(checks) != 1 || !strings.Contains(checks[0].Error, "git clone failed") || checks[0].Changed {
+			t.Fatalf("git clone failure checks = %#v", checks)
+		}
+	})
+
+	t.Run("git checkout", func(t *testing.T) {
+		cfg := testConfig(t)
+		fakeBin := filepath.Join(cfg.Home, "bin")
+		writeFile(t, filepath.Join(fakeBin, "git"), `#!/bin/sh
+if [ "$1" = "-C" ]; then
+  if [ "$3" = "checkout" ]; then
+    echo checkout failed
+    exit 2
+  fi
+  echo abcdef0123456789abcdef0123456789abcdef01
+  exit 0
+fi
+last=""
+for arg in "$@"; do last="$arg"; done
+mkdir -p "$last/skill"
+cat > "$last/skill/SKILL.md" <<'EOF'
+---
+name: Git Skill
+---
+
+Git.
+EOF
+`)
+		if err := os.Chmod(filepath.Join(fakeBin, "git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if err := WriteLock(cfg, Lock{Skills: map[string]LockEntry{
+			"git-skill": {
+				Name:       "Git Skill",
+				Source:     "git@example.com:owner/repo.git",
+				SourceType: "git",
+				SourceURL:  "git@example.com:owner/repo.git",
+				Ref:        "abcdef0123456789abcdef0123456789abcdef01",
+				Hash:       "sha256:old",
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		checks, err := CheckSkillUpdates(cfg, nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(checks) != 1 || !strings.Contains(checks[0].Error, "git checkout failed") || checks[0].Changed {
+			t.Fatalf("git checkout failure checks = %#v", checks)
+		}
+	})
+}
+
+func TestResolveMaterializedSourceMetadata(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "source")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parsed := ParsedSource{
+		Type:             "local",
+		URL:              source,
+		LocalPath:        source,
+		Ref:              "main",
+		Subpath:          "skills",
+		SourceID:         "src_test",
+		ResolvedRevision: "rev-test",
+	}
+	resolved, err := ResolveMaterializedSource(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Cleanup()
+	if resolved.Root != source ||
+		resolved.SourceType != "local" ||
+		resolved.SourceID != "src_test" ||
+		resolved.ResolvedRevision != "rev-test" ||
+		resolved.SourceIdentity != config.SourceIdentity(config.Source{Source: source, Ref: "main", Subpath: "skills"}) {
+		t.Fatalf("resolved source = %#v", resolved)
+	}
+}
+
+func TestGitPinnedCommitUsesDetachedCheckout(t *testing.T) {
+	cfg := testConfig(t)
+	fakeBin := filepath.Join(cfg.Home, "bin")
+	logPath := filepath.Join(cfg.Home, "git.log")
+	ref := "abcdef0123456789abcdef0123456789abcdef01"
+	writeFile(t, filepath.Join(fakeBin, "git"), fmt.Sprintf(`#!/bin/sh
+log=%q
+echo "$@" >> "$log"
+if [ "$1" = "-C" ]; then
+  if [ "$3" = "rev-parse" ]; then
+    echo %s
+  fi
+  exit 0
+fi
+last=""
+for arg in "$@"; do last="$arg"; done
+mkdir -p "$last/skill"
+cat > "$last/skill/SKILL.md" <<'EOF'
+---
+name: Pinned Git Skill
+---
+
+Pinned.
+EOF
+`, logPath, ref))
+	if err := os.Chmod(filepath.Join(fakeBin, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	installed, err := InstallSource(cfg, "git@example.com:owner/pinned.git", InstallOptions{Ref: ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installed) != 1 || installed[0].StoreName != "pinned-git-skill" {
+		t.Fatalf("installed = %#v", installed)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "--branch "+ref) || !strings.Contains(log, "checkout --detach "+ref) {
+		t.Fatalf("git commands did not use detached checkout for pinned ref:\n%s", log)
+	}
+}
+
+func TestInspectLocalSourceReadsCurrentDirectory(t *testing.T) {
+	cfg := testConfig(t)
+	source := filepath.Join(cfg.Home, "live-local-source")
+	writeFile(t, filepath.Join(source, "one", "SKILL.md"), "---\nname: One\n---\n\nOne.\n")
+
+	first, err := InspectSource(cfg, source, InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].StoreName != "one" {
+		t.Fatalf("first local inspect = %#v", first)
+	}
+
+	writeFile(t, filepath.Join(source, "two", "SKILL.md"), "---\nname: Two\n---\n\nTwo.\n")
+	second, err := InspectSource(cfg, source, InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 2 || second[0].StoreName != "one" || second[1].StoreName != "two" {
+		t.Fatalf("second local inspect = %#v", second)
+	}
+}
+
+func TestWriteLockDeterministicMetadata(t *testing.T) {
+	cfg := testConfig(t)
+	first := Lock{Skills: map[string]LockEntry{
+		"zeta": {
+			Name:          "Zeta",
+			Source:        "owner/zeta",
+			SourceID:      "src_zeta",
+			SourceType:    "git",
+			SourceURL:     "https://github.com/owner/zeta.git",
+			Ref:           "main",
+			Subpath:       "skills/zeta",
+			SourceSubpath: "skills",
+			SkillSubpath:  "zeta",
+			SkillPath:     "skills/zeta/SKILL.md",
+			Hash:          "sha256:zeta",
+			UpdatedAt:     "2026-01-02T00:00:00Z",
+		},
+		"alpha": {
+			Name:       "Alpha",
+			Source:     "owner/alpha",
+			SourceType: "git",
+			SourceURL:  "https://github.com/owner/alpha.git",
+			Subpath:    "alpha",
+			SkillPath:  "alpha/SKILL.md",
+			Hash:       "sha256:alpha",
+			UpdatedAt:  "2026-01-01T00:00:00Z",
+		},
+	}}
+	if err := WriteLock(cfg, first); err != nil {
+		t.Fatal(err)
+	}
+	firstBytes, err := os.ReadFile(cfg.LockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := Lock{Skills: map[string]LockEntry{
+		"alpha": first.Skills["alpha"],
+		"zeta":  first.Skills["zeta"],
+	}}
+	if err := WriteLock(cfg, second); err != nil {
+		t.Fatal(err)
+	}
+	secondBytes, err := os.ReadFile(cfg.LockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstBytes) != string(secondBytes) {
+		t.Fatalf("lock writes differ:\nfirst=%s\nsecond=%s", firstBytes, secondBytes)
+	}
+	if !strings.Contains(string(firstBytes), `"schema_version": 2`) ||
+		!strings.Contains(string(firstBytes), `"update_policy": "manual"`) ||
+		!strings.Contains(string(firstBytes), `"source_subpath": "skills"`) {
+		t.Fatalf("lock metadata missing from deterministic write: %s", firstBytes)
+	}
+}
+
 func TestSearchSource(t *testing.T) {
 	cfg := testConfig(t)
 	sourceRoot := filepath.Join(cfg.Home, "source-root")
@@ -376,7 +805,23 @@ func TestLibraryErrorPathsAndGitMaterialize(t *testing.T) {
 	}
 
 	fakeBin := filepath.Join(cfg.Home, "bin")
-	writeFile(t, filepath.Join(fakeBin, "git"), "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nmkdir -p \"$last/skill\"\ncat > \"$last/skill/SKILL.md\" <<'EOF'\n---\nname: Git Skill\ndescription: cloned\n---\n\nFrom git.\nEOF\n")
+	writeFile(t, filepath.Join(fakeBin, "git"), `#!/bin/sh
+if [ "$1" = "-C" ]; then
+  echo 0123456789abcdef0123456789abcdef01234567
+  exit 0
+fi
+last=""
+for arg in "$@"; do last="$arg"; done
+mkdir -p "$last/skill"
+cat > "$last/skill/SKILL.md" <<'EOF'
+---
+name: Git Skill
+description: cloned
+---
+
+From git.
+EOF
+`)
 	if err := os.Chmod(filepath.Join(fakeBin, "git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -387,6 +832,13 @@ func TestLibraryErrorPathsAndGitMaterialize(t *testing.T) {
 	}
 	if len(installed) != 1 || installed[0].StoreName != "git-skill" {
 		t.Fatalf("git installed = %#v", installed)
+	}
+	gitLock, err := ReadLock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gitLock.Skills["git-skill"].ResolvedRevision != "0123456789abcdef0123456789abcdef01234567" {
+		t.Fatalf("git lock revision = %#v", gitLock.Skills["git-skill"])
 	}
 	if _, err := InstallSource(cfg, "git@example.com:owner/ref.git", InstallOptions{Ref: "main"}); err != nil {
 		t.Fatalf("git ref install failed: %v", err)
@@ -432,6 +884,18 @@ func TestLibraryAdditionalBranches(t *testing.T) {
 	if len(installed) != 1 || installed[0].StoreName != "two" {
 		t.Fatalf("named install = %#v", installed)
 	}
+	lock, err := ReadLock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := lock.Skills["two"]
+	if entry.SourceID == "" ||
+		entry.SourceSubpath != "two" ||
+		entry.SkillSubpath != "" ||
+		entry.Subpath != "two" ||
+		entry.UpdatePolicy != config.UpdatePolicyManual {
+		t.Fatalf("named lock metadata = %#v", entry)
+	}
 	if _, err := InstallSource(cfg, source, InstallOptions{SkillFilter: "missing"}); err == nil {
 		t.Fatal("missing filtered install unexpectedly succeeded")
 	}
@@ -475,12 +939,12 @@ func TestLibraryAdditionalBranches(t *testing.T) {
 	if _, err := UpdateSkills(cfg, []string{"absent"}); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := ReadLock(cfg)
+	lock, err = ReadLock(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := lock.Skills["two"]
-	entry.Subpath = "missing"
+	entry = lock.Skills["two"]
+	entry.SourceSubpath = "missing"
 	lock.Skills["two"] = entry
 	if err := WriteLock(cfg, lock); err != nil {
 		t.Fatal(err)
@@ -707,6 +1171,129 @@ func TestLibraryFinalBranchCoverage(t *testing.T) {
 	if _, err := parseHTTPSource(ParsedSource{}, "https://github.com/o/r/tree/main/../bad"); err == nil {
 		t.Fatal("parseHTTPSource unsafe path unexpectedly succeeded")
 	}
+}
+
+func TestGitSourceInspectionSeesNewUpstreamSkill(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	cfg := testConfig(t)
+	remote := filepath.Join(cfg.Home, "remote.git")
+	work := filepath.Join(cfg.Home, "work")
+	runGit(t, "", "init", "--bare", remote)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, work, "init")
+	writeFile(t, filepath.Join(work, "skills", "one", "SKILL.md"), "---\nname: One\n---\n\nOne.\n")
+	runGit(t, work, "add", ".")
+	runGit(t, work, "commit", "-m", "add one")
+	firstCommit := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
+	runGit(t, work, "tag", "v1")
+	runGit(t, work, "branch", "-M", "main")
+	runGit(t, work, "remote", "add", "origin", remote)
+	runGit(t, work, "push", "-u", "origin", "main")
+	runGit(t, work, "push", "origin", "v1")
+	runGit(t, "", "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	source := "file://" + remote
+	first, err := InspectSource(cfg, source, InstallOptions{Ref: "main", Subpath: "skills"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].StoreName != "one" {
+		t.Fatalf("first git inspect = %#v", first)
+	}
+	defaultBranch, err := InspectSource(cfg, source, InstallOptions{Subpath: "skills"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaultBranch) != 1 || defaultBranch[0].StoreName != "one" {
+		t.Fatalf("default branch inspect = %#v", defaultBranch)
+	}
+	tagged, err := InspectSource(cfg, source, InstallOptions{Ref: "v1", Subpath: "skills"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tagged) != 1 || tagged[0].StoreName != "one" {
+		t.Fatalf("tagged inspect = %#v", tagged)
+	}
+	firstResolved := resolveGitRevisionForTest(t, source, "main")
+	if firstResolved != firstCommit {
+		t.Fatalf("first branch revision = %s, want %s", firstResolved, firstCommit)
+	}
+
+	writeFile(t, filepath.Join(work, "skills", "two", "SKILL.md"), "---\nname: Two\n---\n\nTwo.\n")
+	runGit(t, work, "add", ".")
+	runGit(t, work, "commit", "-m", "add two")
+	secondCommit := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
+	runGit(t, work, "tag", "-f", "v1")
+	runGit(t, work, "push", "origin", "main")
+	runGit(t, work, "push", "--force", "origin", "v1")
+
+	second, err := InspectSource(cfg, source, InstallOptions{Ref: "main", Subpath: "skills"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 2 || second[0].StoreName != "one" || second[1].StoreName != "two" {
+		t.Fatalf("second git inspect = %#v", second)
+	}
+	secondResolved := resolveGitRevisionForTest(t, source, "main")
+	if secondResolved != secondCommit || secondResolved == firstResolved {
+		t.Fatalf("second branch revision = %s, first = %s, want %s", secondResolved, firstResolved, secondCommit)
+	}
+	pinned, err := InspectSource(cfg, source, InstallOptions{Ref: firstCommit, Subpath: "skills"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pinned) != 1 || pinned[0].StoreName != "one" {
+		t.Fatalf("pinned commit inspect = %#v", pinned)
+	}
+	movedTag, err := InspectSource(cfg, source, InstallOptions{Ref: "v1", Subpath: "skills"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(movedTag) != 2 || movedTag[0].StoreName != "one" || movedTag[1].StoreName != "two" {
+		t.Fatalf("moved tag inspect = %#v", movedTag)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Upskill Test",
+		"GIT_AUTHOR_EMAIL=upskill@example.invalid",
+		"GIT_COMMITTER_NAME=Upskill Test",
+		"GIT_COMMITTER_EMAIL=upskill@example.invalid",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
+}
+
+func resolveGitRevisionForTest(t *testing.T, source string, ref string) string {
+	t.Helper()
+	parsed, err := ParseSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err = ApplySourceOverrides(parsed, ref, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ResolveMaterializedSource(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Cleanup()
+	return resolved.ResolvedRevision
 }
 
 func TestPreviewUpdateErrorsAndDiffHelpers(t *testing.T) {

@@ -22,12 +22,13 @@ import (
 	"upskill/internal/pathutil"
 )
 
-const LockSchemaVersion = 1
+const LockSchemaVersion = 2
 
 var skillEntrypoints = []string{"SKILL.md.j2", "SKILL.md"}
 
 var (
 	githubShorthand  = regexp.MustCompile(`^([^/\s:]+)/([^/\s:@#]+)(?:/(.+))?$`)
+	fullCommitSHA    = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	absPath          = filepath.Abs
 	makeTempDir      = os.MkdirTemp
 	removeTree       = os.RemoveAll
@@ -43,13 +44,16 @@ func noopMaterializeCleanup() {
 }
 
 type ParsedSource struct {
-	Input       string
-	Type        string
-	URL         string
-	LocalPath   string
-	Ref         string
-	Subpath     string
-	SkillFilter string
+	Input            string
+	Type             string
+	URL              string
+	LocalPath        string
+	Ref              string
+	Subpath          string
+	SkillFilter      string
+	SourceID         string
+	UpdatePolicy     string
+	ResolvedRevision string
 }
 
 type Skill struct {
@@ -69,22 +73,46 @@ type Lock struct {
 }
 
 type LockEntry struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Source      string `json:"source"`
-	SourceType  string `json:"source_type"`
-	SourceURL   string `json:"source_url"`
-	Ref         string `json:"ref,omitempty"`
-	Subpath     string `json:"subpath,omitempty"`
-	SkillPath   string `json:"skill_path,omitempty"`
-	Hash        string `json:"hash"`
-	UpdatedAt   string `json:"updated_at"`
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"`
+	Source           string `json:"source"`
+	SourceID         string `json:"source_id,omitempty"`
+	SourceType       string `json:"source_type"`
+	SourceURL        string `json:"source_url"`
+	Ref              string `json:"ref,omitempty"`
+	Subpath          string `json:"subpath,omitempty"`
+	SourceSubpath    string `json:"source_subpath,omitempty"`
+	SkillSubpath     string `json:"skill_subpath,omitempty"`
+	SkillPath        string `json:"skill_path,omitempty"`
+	ResolvedRevision string `json:"resolved_revision,omitempty"`
+	UpdatePolicy     string `json:"update_policy,omitempty"`
+	Hash             string `json:"hash"`
+	UpdatedAt        string `json:"updated_at"`
+}
+
+func (entry LockEntry) EffectiveSourceSubpath() string {
+	if entry.SourceSubpath != "" {
+		return entry.SourceSubpath
+	}
+	return entry.Subpath
+}
+
+func (entry LockEntry) EffectiveSkillSubpath() string {
+	if entry.SkillSubpath != "" {
+		return entry.SkillSubpath
+	}
+	return entry.Subpath
+}
+
+func (entry LockEntry) EffectiveUpdatePolicy() string {
+	return config.NormalizeUpdatePolicy(entry.UpdatePolicy)
 }
 
 type InstallOptions struct {
-	SkillFilter string
-	Ref         string
-	Subpath     string
+	SkillFilter  string
+	Ref          string
+	Subpath      string
+	UpdatePolicy string
 }
 
 type InstalledSkill struct {
@@ -103,12 +131,51 @@ type UpdatePreview struct {
 	Diff        []string `json:"diff,omitempty"`
 }
 
+type UpdateCheck struct {
+	StoreName        string   `json:"store_name"`
+	Name             string   `json:"name"`
+	Source           string   `json:"source,omitempty"`
+	SourceID         string   `json:"source_id,omitempty"`
+	SourceType       string   `json:"source_type,omitempty"`
+	SourceURL        string   `json:"source_url,omitempty"`
+	Ref              string   `json:"ref,omitempty"`
+	UpdatePolicy     string   `json:"update_policy"`
+	CurrentRevision  string   `json:"current_revision,omitempty"`
+	ResolvedRevision string   `json:"resolved_revision,omitempty"`
+	CurrentHash      string   `json:"current_hash,omitempty"`
+	NewHash          string   `json:"new_hash,omitempty"`
+	Changed          bool     `json:"changed"`
+	Diff             []string `json:"diff,omitempty"`
+	Error            string   `json:"error,omitempty"`
+}
+
+type UpdatePolicyChange struct {
+	StoreName string `json:"store_name"`
+	Name      string `json:"name"`
+	OldPolicy string `json:"old_policy"`
+	NewPolicy string `json:"new_policy"`
+}
+
+type AutoUpdateResult struct {
+	Updated []InstalledSkill
+	Checks  []UpdateCheck
+}
+
 type SourceSkill struct {
 	StoreName     string `json:"store_name"`
 	Name          string `json:"name"`
 	Description   string `json:"description,omitempty"`
 	SourceSubpath string `json:"source_subpath"`
 	SkillPath     string `json:"skill_path"`
+}
+
+type MaterializedSource struct {
+	Root             string
+	Cleanup          func()
+	SourceType       string
+	SourceID         string
+	SourceIdentity   string
+	ResolvedRevision string
 }
 
 func ParseSource(input string) (ParsedSource, error) {
@@ -134,7 +201,7 @@ func ParseSource(input string) (ParsedSource, error) {
 		noFragment = strings.TrimPrefix(noFragment, "github:")
 	}
 
-	if strings.HasPrefix(noFragment, "git@") || strings.HasPrefix(noFragment, "ssh://") || strings.HasSuffix(noFragment, ".git") {
+	if strings.HasPrefix(noFragment, "git@") || strings.HasPrefix(noFragment, "ssh://") || strings.HasPrefix(noFragment, "file://") || strings.HasSuffix(noFragment, ".git") {
 		parsed.Type = "git"
 		parsed.URL = noFragment
 		return parsed, nil
@@ -223,7 +290,73 @@ func ResolveSource(cfg config.Config, source string, opts InstallOptions) (Parse
 	if err != nil {
 		return ParsedSource{}, namedSource, err
 	}
+	if matched, ok := configuredSourceForParsed(cfg, parsed); ok {
+		parsed.SourceID = matched.ID
+		parsed.UpdatePolicy = matched.DefaultUpdatePolicy
+	}
+	if opts.UpdatePolicy != "" {
+		if !config.ValidUpdatePolicy(opts.UpdatePolicy) {
+			return ParsedSource{}, namedSource, fmt.Errorf("invalid update policy: %s", opts.UpdatePolicy)
+		}
+		parsed.UpdatePolicy = opts.UpdatePolicy
+	}
+	parsed.UpdatePolicy = config.NormalizeUpdatePolicy(parsed.UpdatePolicy)
 	return parsed, namedSource, nil
+}
+
+func configuredSourceForParsed(cfg config.Config, parsed ParsedSource) (config.Source, bool) {
+	for _, source := range config.SourceRecords(cfg.Sources) {
+		sourceParsed, err := ParseSource(source.Source)
+		if err != nil {
+			continue
+		}
+		sourceParsed, err = ApplySourceOverrides(sourceParsed, source.Ref, source.Subpath, "")
+		if err != nil {
+			continue
+		}
+		if sourceParsed.URL == parsed.URL &&
+			sourceParsed.Type == parsed.Type &&
+			sourceParsed.Ref == parsed.Ref &&
+			filepath.ToSlash(strings.Trim(sourceParsed.Subpath, "/")) == filepath.ToSlash(strings.Trim(parsed.Subpath, "/")) {
+			return source, true
+		}
+	}
+	return config.Source{}, false
+}
+
+func ResolveMaterializedSource(parsed ParsedSource) (MaterializedSource, error) {
+	root, cleanup, err := materialize(parsed)
+	if err != nil {
+		return MaterializedSource{}, err
+	}
+	if cleanup == nil {
+		cleanup = noopMaterializeCleanup
+	}
+	resolvedRevision := parsed.ResolvedRevision
+	if parsed.Type == "git" {
+		revision, err := gitResolvedRevision(root)
+		if err != nil {
+			cleanup()
+			return MaterializedSource{}, err
+		}
+		resolvedRevision = revision
+	}
+	return MaterializedSource{
+		Root:             root,
+		Cleanup:          cleanup,
+		SourceType:       parsed.Type,
+		SourceID:         parsed.SourceID,
+		SourceIdentity:   parsedSourceIdentity(parsed),
+		ResolvedRevision: resolvedRevision,
+	}, nil
+}
+
+func parsedSourceIdentity(parsed ParsedSource) string {
+	return config.SourceIdentity(config.Source{
+		Source:  parsed.URL,
+		Ref:     parsed.Ref,
+		Subpath: parsed.Subpath,
+	})
 }
 
 func DiscoverSkills(root string, subpath string) ([]Skill, error) {
@@ -293,13 +426,14 @@ func InstallSource(cfg config.Config, source string, opts InstallOptions) ([]Ins
 	if err != nil {
 		return nil, err
 	}
-	root, cleanup, err := materialize(parsed)
+	resolved, err := ResolveMaterializedSource(parsed)
 	if err != nil {
 		return nil, err
 	}
-	defer cleanup()
+	defer resolved.Cleanup()
+	parsed.ResolvedRevision = resolved.ResolvedRevision
 
-	skills, err := DiscoverSkillsWithIgnore(root, parsed.Subpath, cfg.SourceIgnore)
+	skills, err := DiscoverSkillsWithIgnore(resolved.Root, parsed.Subpath, cfg.SourceIgnore)
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +448,7 @@ func InstallSource(cfg config.Config, source string, opts InstallOptions) ([]Ins
 	}
 	var installed []InstalledSkill
 	for _, skill := range skills {
-		result, entry, err := installSkill(cfg, root, parsed, skill)
+		result, entry, err := installSkill(cfg, resolved.Root, parsed, skill)
 		if err != nil {
 			return nil, err
 		}
@@ -355,34 +489,42 @@ func UpdateSkills(cfg config.Config, names []string) ([]InstalledSkill, error) {
 	for _, key := range keys {
 		entry := lock.Skills[key]
 		parsed := ParsedSource{
-			Input:       entry.Source,
-			Type:        entry.SourceType,
-			URL:         entry.SourceURL,
-			LocalPath:   entry.SourceURL,
-			Ref:         entry.Ref,
-			Subpath:     entry.Subpath,
-			SkillFilter: key,
+			Input:            entry.Source,
+			Type:             entry.SourceType,
+			URL:              entry.SourceURL,
+			LocalPath:        entry.SourceURL,
+			Ref:              entry.Ref,
+			Subpath:          entry.EffectiveSourceSubpath(),
+			SkillFilter:      key,
+			SourceID:         entry.SourceID,
+			UpdatePolicy:     entry.EffectiveUpdatePolicy(),
+			ResolvedRevision: entry.ResolvedRevision,
 		}
-		root, cleanup, err := materialize(parsed)
+		resolved, err := ResolveMaterializedSource(parsed)
 		if err != nil {
 			return nil, err
 		}
-		skills, err := DiscoverSkillsWithIgnore(root, entry.Subpath, cfg.SourceIgnore)
+		parsed.ResolvedRevision = resolved.ResolvedRevision
+		skills, err := DiscoverSkillsWithIgnore(resolved.Root, parsed.Subpath, cfg.SourceIgnore)
 		if err != nil {
-			cleanup()
+			resolved.Cleanup()
 			return nil, err
 		}
 		skills = filterSkills(skills, key)
 		if len(skills) == 0 {
-			cleanup()
+			resolved.Cleanup()
 			return nil, fmt.Errorf("locked skill not found in source: %s", key)
 		}
-		result, newEntry, err := installSkill(cfg, rootFromEntry(parsed, root), parsed, skills[0])
-		cleanup()
+		result, newEntry, err := installSkill(cfg, rootFromEntry(parsed, resolved.Root), parsed, skills[0])
+		resolved.Cleanup()
 		if err != nil {
 			return nil, err
 		}
 		newEntry.Source = entry.Source
+		if newEntry.SourceID == "" {
+			newEntry.SourceID = entry.SourceID
+		}
+		newEntry.UpdatePolicy = entry.EffectiveUpdatePolicy()
 		lock.Skills[key] = newEntry
 		updated = append(updated, result)
 	}
@@ -392,7 +534,94 @@ func UpdateSkills(cfg config.Config, names []string) ([]InstalledSkill, error) {
 	return updated, nil
 }
 
+func SetUpdatePolicy(cfg config.Config, names []string, policy string) ([]UpdatePolicyChange, error) {
+	if !config.ValidUpdatePolicy(policy) {
+		return nil, fmt.Errorf("invalid update policy: %s", policy)
+	}
+	policy = config.NormalizeUpdatePolicy(policy)
+	lock, err := ReadLock(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("at least one skill name is required")
+	}
+	changes := make([]UpdatePolicyChange, 0, len(names))
+	for _, name := range names {
+		key := NormalizeName(name)
+		entry, ok := lock.Skills[key]
+		if !ok {
+			return nil, fmt.Errorf("skill not installed: %s", name)
+		}
+		oldPolicy := entry.EffectiveUpdatePolicy()
+		entry.UpdatePolicy = policy
+		lock.Skills[key] = entry
+		changes = append(changes, UpdatePolicyChange{
+			StoreName: key,
+			Name:      entry.Name,
+			OldPolicy: oldPolicy,
+			NewPolicy: policy,
+		})
+	}
+	if err := WriteLock(cfg, lock); err != nil {
+		return nil, err
+	}
+	return changes, nil
+}
+
+func AutoUpdateSkills(cfg config.Config) (AutoUpdateResult, error) {
+	checks, err := CheckSkillUpdates(cfg, nil, false)
+	if err != nil {
+		return AutoUpdateResult{}, err
+	}
+	names := make([]string, 0, len(checks))
+	for _, check := range checks {
+		if check.UpdatePolicy != config.UpdatePolicyAuto {
+			continue
+		}
+		if check.Error != "" {
+			return AutoUpdateResult{Checks: checks}, fmt.Errorf("automatic update check failed for %s: %s", check.StoreName, check.Error)
+		}
+		if check.Changed {
+			names = append(names, check.StoreName)
+		}
+	}
+	if len(names) == 0 {
+		return AutoUpdateResult{Checks: checks}, nil
+	}
+	updated, err := UpdateSkills(cfg, names)
+	if err != nil {
+		return AutoUpdateResult{Checks: checks}, err
+	}
+	return AutoUpdateResult{Updated: updated, Checks: checks}, nil
+}
+
 func PreviewUpdates(cfg config.Config, names []string, includeDiff bool) ([]UpdatePreview, error) {
+	checks, err := CheckSkillUpdates(cfg, names, includeDiff)
+	if err != nil {
+		return nil, err
+	}
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	previews := make([]UpdatePreview, 0, len(checks))
+	for _, check := range checks {
+		if check.Error != "" {
+			return nil, fmt.Errorf("%s: %s", check.StoreName, check.Error)
+		}
+		previews = append(previews, UpdatePreview{
+			StoreName:   check.StoreName,
+			Name:        check.Name,
+			CurrentHash: check.CurrentHash,
+			NewHash:     check.NewHash,
+			Changed:     check.Changed,
+			Diff:        check.Diff,
+		})
+	}
+	return previews, nil
+}
+
+func CheckSkillUpdates(cfg config.Config, names []string, includeDiff bool) ([]UpdateCheck, error) {
 	lock, err := ReadLock(cfg)
 	if err != nil {
 		return nil, err
@@ -416,56 +645,79 @@ func PreviewUpdates(cfg config.Config, names []string, includeDiff bool) ([]Upda
 	}
 	sort.Strings(keys)
 
-	var previews []UpdatePreview
+	var checks []UpdateCheck
 	for _, key := range keys {
 		entry := lock.Skills[key]
+		check := UpdateCheck{
+			StoreName:       key,
+			Name:            entry.Name,
+			Source:          entry.Source,
+			SourceID:        entry.SourceID,
+			SourceType:      entry.SourceType,
+			SourceURL:       entry.SourceURL,
+			Ref:             entry.Ref,
+			UpdatePolicy:    entry.EffectiveUpdatePolicy(),
+			CurrentRevision: entry.ResolvedRevision,
+			CurrentHash:     entry.Hash,
+		}
 		parsed := ParsedSource{
-			Input:       entry.Source,
-			Type:        entry.SourceType,
-			URL:         entry.SourceURL,
-			LocalPath:   entry.SourceURL,
-			Ref:         entry.Ref,
-			Subpath:     entry.Subpath,
-			SkillFilter: key,
+			Input:            entry.Source,
+			Type:             entry.SourceType,
+			URL:              entry.SourceURL,
+			LocalPath:        entry.SourceURL,
+			Ref:              entry.Ref,
+			Subpath:          entry.EffectiveSourceSubpath(),
+			SkillFilter:      key,
+			SourceID:         entry.SourceID,
+			UpdatePolicy:     entry.EffectiveUpdatePolicy(),
+			ResolvedRevision: entry.ResolvedRevision,
 		}
-		root, cleanup, err := materialize(parsed)
+		resolved, err := ResolveMaterializedSource(parsed)
 		if err != nil {
-			return nil, err
+			check.Error = err.Error()
+			checks = append(checks, check)
+			continue
 		}
-		skills, err := DiscoverSkillsWithIgnore(root, entry.Subpath, cfg.SourceIgnore)
+		parsed.ResolvedRevision = resolved.ResolvedRevision
+		check.ResolvedRevision = resolved.ResolvedRevision
+		skills, err := DiscoverSkillsWithIgnore(resolved.Root, parsed.Subpath, cfg.SourceIgnore)
 		if err != nil {
-			cleanup()
-			return nil, err
+			resolved.Cleanup()
+			check.Error = err.Error()
+			checks = append(checks, check)
+			continue
 		}
 		skills = filterSkills(skills, key)
 		if len(skills) == 0 {
-			cleanup()
-			return nil, fmt.Errorf("locked skill not found in source: %s", key)
+			resolved.Cleanup()
+			check.Error = "locked skill not found in source"
+			checks = append(checks, check)
+			continue
 		}
+		check.Name = skills[0].Name
 		newHash, err := hashTree(skills[0].Path)
 		if err != nil {
-			cleanup()
-			return nil, err
+			resolved.Cleanup()
+			check.Error = err.Error()
+			checks = append(checks, check)
+			continue
 		}
-		preview := UpdatePreview{
-			StoreName:   key,
-			Name:        skills[0].Name,
-			CurrentHash: entry.Hash,
-			NewHash:     newHash,
-			Changed:     entry.Hash != newHash,
-		}
-		if includeDiff && preview.Changed {
+		check.NewHash = newHash
+		check.Changed = entry.Hash != newHash
+		if includeDiff && check.Changed {
 			diff, err := diffUpdateDirs(filepath.Join(cfg.StoreDir, key), skills[0].Path)
 			if err != nil {
-				cleanup()
-				return nil, err
+				resolved.Cleanup()
+				check.Error = err.Error()
+				checks = append(checks, check)
+				continue
 			}
-			preview.Diff = diff
+			check.Diff = diff
 		}
-		cleanup()
-		previews = append(previews, preview)
+		resolved.Cleanup()
+		checks = append(checks, check)
 	}
-	return previews, nil
+	return checks, nil
 }
 
 func ListInstalled(cfg config.Config) ([]Skill, error) {
@@ -520,18 +772,18 @@ func SearchSource(cfg config.Config, source string, query string, opts InstallOp
 	if err != nil {
 		return nil, 0, fmt.Errorf("source resolution failed: %w", err)
 	}
-	root, cleanup, err := materialize(parsed)
+	resolved, err := ResolveMaterializedSource(parsed)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer cleanup()
-	skills, err := DiscoverSkillsWithIgnore(root, parsed.Subpath, cfg.SourceIgnore)
+	defer resolved.Cleanup()
+	skills, err := DiscoverSkillsWithIgnore(resolved.Root, parsed.Subpath, cfg.SourceIgnore)
 	if err != nil {
 		return nil, 0, err
 	}
 	skills = filterSkills(skills, parsed.SkillFilter)
 	skills, total := filterSkillsByQuery(skills, query, limit)
-	return sourceSkillRows(root, skills), total, nil
+	return sourceSkillRows(resolved.Root, skills), total, nil
 }
 
 func ReadSourceSkill(cfg config.Config, source string, opts InstallOptions) (Skill, error) {
@@ -539,12 +791,12 @@ func ReadSourceSkill(cfg config.Config, source string, opts InstallOptions) (Ski
 	if err != nil {
 		return Skill{}, err
 	}
-	root, cleanup, err := materialize(parsed)
+	resolved, err := ResolveMaterializedSource(parsed)
 	if err != nil {
 		return Skill{}, err
 	}
-	defer cleanup()
-	skills, err := DiscoverSkillsWithIgnore(root, parsed.Subpath, cfg.SourceIgnore)
+	defer resolved.Cleanup()
+	skills, err := DiscoverSkillsWithIgnore(resolved.Root, parsed.Subpath, cfg.SourceIgnore)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -560,12 +812,12 @@ func InspectSource(cfg config.Config, source string, opts InstallOptions) ([]Sou
 	if err != nil {
 		return nil, fmt.Errorf("source resolution failed: %w", err)
 	}
-	root, cleanup, err := materialize(parsed)
+	resolved, err := ResolveMaterializedSource(parsed)
 	if err != nil {
 		return nil, err
 	}
-	defer cleanup()
-	skills, err := DiscoverSkillsWithIgnore(root, parsed.Subpath, cfg.SourceIgnore)
+	defer resolved.Cleanup()
+	skills, err := DiscoverSkillsWithIgnore(resolved.Root, parsed.Subpath, cfg.SourceIgnore)
 	if err != nil {
 		return nil, err
 	}
@@ -573,7 +825,7 @@ func InspectSource(cfg config.Config, source string, opts InstallOptions) ([]Sou
 	if len(skills) == 0 {
 		return nil, fmt.Errorf("no skills found")
 	}
-	return sourceSkillRows(root, skills), nil
+	return sourceSkillRows(resolved.Root, skills), nil
 }
 
 func filterSkillsByQuery(skills []Skill, query string, limit int) ([]Skill, int) {
@@ -701,15 +953,31 @@ func ReadLock(cfg config.Config) (Lock, error) {
 	if lock.Skills == nil {
 		lock.Skills = map[string]LockEntry{}
 	}
+	for key, entry := range lock.Skills {
+		if entry.UpdatePolicy == "" {
+			entry.UpdatePolicy = config.UpdatePolicyManual
+		} else {
+			entry.UpdatePolicy = config.NormalizeUpdatePolicy(entry.UpdatePolicy)
+		}
+		if entry.SkillSubpath == "" && entry.SourceSubpath == "" && entry.Subpath != "" {
+			entry.SkillSubpath = entry.Subpath
+		}
+		lock.Skills[key] = entry
+	}
 	return lock, nil
 }
 
 func WriteLock(cfg config.Config, lock Lock) error {
-	if lock.SchemaVersion == 0 {
-		lock.SchemaVersion = LockSchemaVersion
-	}
+	lock.SchemaVersion = LockSchemaVersion
 	if lock.Skills == nil {
 		lock.Skills = map[string]LockEntry{}
+	}
+	for key, entry := range lock.Skills {
+		entry.UpdatePolicy = config.NormalizeUpdatePolicy(entry.UpdatePolicy)
+		if entry.SkillSubpath == "" && entry.SourceSubpath == "" && entry.Subpath != "" {
+			entry.SkillSubpath = entry.Subpath
+		}
+		lock.Skills[key] = entry
 	}
 	data, _ := json.MarshalIndent(lock, "", "  ")
 	data = append(data, '\n')
@@ -894,7 +1162,10 @@ func materialize(parsed ParsedSource) (string, func(), error) {
 		return "", noopMaterializeCleanup, err
 	}
 	args := []string{"clone", "--depth", "1"}
-	if parsed.Ref != "" {
+	pinnedCommit := isFullCommitSHA(parsed.Ref)
+	if pinnedCommit {
+		args = []string{"clone"}
+	} else if parsed.Ref != "" {
 		args = append(args, "--branch", parsed.Ref)
 	}
 	args = append(args, parsed.URL, tmp)
@@ -904,7 +1175,33 @@ func materialize(parsed ParsedSource) (string, func(), error) {
 		_ = removeTree(tmp)
 		return "", noopMaterializeCleanup, fmt.Errorf("git clone failed: %s", strings.TrimSpace(string(output)))
 	}
+	if pinnedCommit {
+		cmd := exec.Command("git", "-C", tmp, "checkout", "--detach", parsed.Ref)
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			_ = removeTree(tmp)
+			return "", noopMaterializeCleanup, fmt.Errorf("git checkout failed: %s", strings.TrimSpace(string(output)))
+		}
+	}
 	return tmp, func() { _ = removeTree(tmp) }, nil
+}
+
+func isFullCommitSHA(ref string) bool {
+	return fullCommitSHA.MatchString(ref)
+}
+
+func gitResolvedRevision(root string) (string, error) {
+	cmd := exec.Command("git", "-C", root, "rev-parse", "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse failed: %s", strings.TrimSpace(string(output)))
+	}
+	revision := strings.TrimSpace(string(output))
+	if revision == "" {
+		return "", fmt.Errorf("git rev-parse returned empty revision")
+	}
+	return revision, nil
 }
 
 func rootFromEntry(parsed ParsedSource, root string) string {
@@ -945,17 +1242,32 @@ func installSkill(cfg config.Config, sourceRoot string, parsed ParsedSource, ski
 	if rel == "." {
 		rel = ""
 	}
+	sourceSubpath := filepath.ToSlash(strings.Trim(parsed.Subpath, "/"))
+	skillSubpath := rel
+	if sourceSubpath != "" {
+		switch {
+		case rel == sourceSubpath:
+			skillSubpath = ""
+		case strings.HasPrefix(rel, sourceSubpath+"/"):
+			skillSubpath = strings.TrimPrefix(rel, sourceSubpath+"/")
+		}
+	}
 	entry := LockEntry{
-		Name:        skill.Name,
-		Description: skill.Description,
-		Source:      parsed.Input,
-		SourceType:  parsed.Type,
-		SourceURL:   parsed.URL,
-		Ref:         parsed.Ref,
-		Subpath:     rel,
-		SkillPath:   relativeSkillPath(sourceRoot, skill, rel),
-		Hash:        hash,
-		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+		Name:             skill.Name,
+		Description:      skill.Description,
+		Source:           parsed.Input,
+		SourceID:         parsed.SourceID,
+		SourceType:       parsed.Type,
+		SourceURL:        parsed.URL,
+		Ref:              parsed.Ref,
+		Subpath:          rel,
+		SourceSubpath:    sourceSubpath,
+		SkillSubpath:     skillSubpath,
+		SkillPath:        relativeSkillPath(sourceRoot, skill, rel),
+		ResolvedRevision: parsed.ResolvedRevision,
+		UpdatePolicy:     config.NormalizeUpdatePolicy(parsed.UpdatePolicy),
+		Hash:             hash,
+		UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	return InstalledSkill{StoreName: storeName, Name: skill.Name, Hash: hash, Path: dst}, entry, nil
 }

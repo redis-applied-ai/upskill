@@ -22,12 +22,17 @@ discovery by `SKILL.md`, and agent-aware installation.
   skills CLI.
 - Install skills from local paths, Git URLs, GitHub shorthand, and configured
   sources.
+- Show the current skill catalog for a configured source when users inspect or
+  search that source, even when an internal Git cache or clone is stale.
 - Support local filesystem sources, including Obsidian directories, without
   requiring users to create an Upskill-managed source layout.
 - Automatically create Upskill's managed config, store, overlay, draft, import,
   rendered, and cache directories when commands need them.
 - Track installed skill source metadata in a deterministic lock file.
 - Update installed skills from their recorded sources.
+- Notify users when installed skills have upstream updates.
+- Support per-skill automatic updates for users who want installed skills kept
+  current whenever they use Upskill.
 - Render base skills plus global and agent-specific overlays into effective
   skill directories.
 - Apply overlays by default whenever syncing, updating, or copying skills to
@@ -53,6 +58,10 @@ discovery by `SKILL.md`, and agent-aware installation.
 ## Non-Goals
 
 - Provide remote registry search in the first standalone version.
+- Install every new skill that appears in a configured source automatically.
+- Print generic notifications for every new upstream skill that is not already
+  installed.
+- Run a background daemon, scheduler, or watcher for source updates.
 - Apply JSON Patch to Markdown, YAML, or plain text.
 - Treat every file as a template.
 - Provide `--with-overlays` or `--without-overlays` sync modes.
@@ -72,19 +81,20 @@ discovery by `SKILL.md`, and agent-aware installation.
 ## Command Surface
 
 ```bash
-upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--no-render]
+upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--update-policy manual|auto] [--no-render]
 upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
 upskill list|ls [--json] [--agent AGENT]
 upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
+upskill update-policy <skill-name>... (--manual | --auto)
 upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
 upskill init [name] [--dir DIR]
 upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
 
 upskill source list|ls [--json]
-upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH]
+upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH] [--default-update-policy manual|auto]
 upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
 upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref REF] [--subpath PATH]
 upskill source remove|rm <source-or-name> [--yes] [--keep-installed]
@@ -118,6 +128,15 @@ upskill mcp
 upskill status
 upskill doctor
 ```
+
+Global options:
+
+```text
+--no-check
+```
+
+`--no-check` disables source/update preflight for one command. It is equivalent
+to setting `UPSKILL_NO_CHECK=1` for that invocation.
 
 ## CLI Help Contract
 
@@ -235,6 +254,7 @@ UPSKILL_RENDERED_DIR
 UPSKILL_CONFIG
 UPSKILL_LOCK
 UPSKILL_SOURCE_IGNORE
+UPSKILL_NO_CHECK
 ```
 
 ## Configuration
@@ -310,13 +330,17 @@ Preferred write format:
 {
   "sources": [
     {
+      "id": "src_01h...",
       "name": "Obsidian",
-      "source": "~/Documents/Notes/Memory/Skills"
+      "source": "~/Documents/Notes/Memory/Skills",
+      "default_update_policy": "manual"
     },
     {
+      "id": "src_01j...",
       "source": "example/skills",
       "ref": "main",
-      "subpath": "skills"
+      "subpath": "skills",
+      "default_update_policy": "auto"
     }
   ]
 }
@@ -334,6 +358,11 @@ Rules:
 
 - `source add <source> --name NAME` records a named source.
 - `source add <source>` records an unnamed source.
+- `source add --default-update-policy auto` makes future installs from that
+  source auto-updating by default. The policy is copied into the installed skill
+  lock entry and can be changed later per skill.
+- Source records have a stable `id`. The display name may change without
+  changing the identity used by lock entries, cache state, or update checks.
 - `add <source> ...` also records the source if the argument is not already a
   configured source name. This supports one-step installs such as
   `upskill add ~/Documents/Notes/Memory/Skills --skill redis`.
@@ -349,8 +378,8 @@ Rules:
 - `source list|ls` prints named sources by name. For unnamed sources, it prints the
   canonical source string where a name would otherwise appear.
 - `source list|ls --json` includes `name`, `display_name`, `source`, `ref`,
-  `subpath`, and `canonical_id` for each source. `name` is omitted or empty for
-  unnamed sources.
+  `subpath`, `id`, `canonical_id`, and `default_update_policy` for each source.
+  `name` is omitted or empty for unnamed sources.
 
 ### Live Source Inspection
 
@@ -387,6 +416,100 @@ Rules:
 - Errors clearly distinguish source resolution failures, clone/fetch failures,
   and "no skills found".
 
+### Source Freshness and Update Checks
+
+Upskill has two different freshness questions:
+
+1. Is the source catalog current?
+2. Is an installed skill behind its source?
+
+These questions must stay separate.
+
+Source catalog freshness is about what a source contains now. `source skills`
+and `source find|search` must inspect the current source every time. They must
+not answer from `store/`, `rendered/`, the lock file, or a stale local clone.
+New upstream skills appear in these command results as normal source data, not
+as generic notifications.
+
+Installed skill freshness is about locked local copies. Upskill compares each
+installed skill's lock entry to the current source version for that same skill.
+When the source version differs, Upskill reports an update notice. It does not
+install new skills from that source unless the user runs `add`.
+
+Source-specific rules:
+
+- Local sources are inspected from the filesystem path recorded in the source
+  record or lock entry. A local source update is detected by hashing the current
+  source skill directory and comparing it to the installed lock hash.
+- Git sources are inspected from the upstream remote, ref, and subpath recorded
+  in the source record or lock entry. A persistent cache is allowed only as an
+  implementation detail. Before returning source catalog data or update status,
+  the cache must fetch the remote and check out the requested resolved revision.
+- If a Git ref is omitted, Upskill uses the remote default branch.
+- If a Git ref names a mutable branch, update checks compare the installed lock
+  entry with the latest resolved commit for that branch.
+- If a Git ref names a tag, Upskill resolves the tag for each check. Moving tags
+  are treated as source changes.
+- If a Git ref is a full commit SHA, Upskill treats it as pinned. Catalog reads
+  still inspect that commit, but update checks should report no newer revision
+  unless the skill files at that commit differ from the lock hash.
+- Clone, fetch, checkout, and source-read failures must be surfaced clearly.
+  Failed checks must not be silently treated as "up to date."
+
+Check timing:
+
+- Every command that loads Upskill config and works with skills or sources runs
+  a preflight check before its main behavior.
+- `help`, `version`, and pure parse errors do not run checks.
+- Commands with explicit read-only contracts, such as `update --check`,
+  `update --diff`, and source inspection commands, run the check but do not
+  apply automatic updates. They report pending automatic updates instead.
+- Normal commands apply automatic updates for skills whose lock entry has
+  `update_policy: "auto"` before running their main behavior.
+- Users may disable preflight checks with `--no-check` or `UPSKILL_NO_CHECK=1`.
+  Commands that skip checks should not print update notices.
+
+Notice behavior:
+
+- Text CLI notices go to stderr so stdout remains stable for command output.
+- JSON CLI commands include a top-level `notices` array when the command's
+  normal JSON shape is an object. Commands that return arrays keep stdout as the
+  requested array and print notices to stderr.
+- MCP tool results include a `notices` field when checks find updates, checks
+  fail, or automatic updates run.
+- Notices are only for installed skills, failed checks, or automatic updates.
+  Upskill must not print "new skill available" notices for uninstalled upstream
+  skills.
+- A typical update notice is:
+
+  ```text
+  notice: updates available for redis, docs-helper; run upskill sync or upskill update --diff redis
+  ```
+
+Automatic update behavior:
+
+- Automatic updates refresh the installed base skill from its recorded source,
+  update the lock entry, and render/copy outputs for configured agents.
+- When the command has an `--agent` flag or MCP `agent` argument, automatic
+  update rendering is limited to that agent. Otherwise it renders and copies for
+  all configured agent outputs.
+- Automatic updates are per installed skill. A source can provide a default
+  policy for future installs, but source records do not force existing skills to
+  change policy.
+- `--no-render` suppresses rendering for the command's primary operation only.
+  It does not suppress preflight automatic update rendering. Use `--no-check`
+  when the user wants to skip all preflight work.
+- Automatic updates must never install brand-new upstream skills.
+- Automatic updates must use the same safe copy and atomic replacement behavior
+  as `update`.
+- If an automatic update fails, the command exits with an error before running
+  behavior that would depend on stale generated output. Read-only commands
+  report the failure without mutating state.
+
+`sync` remains about installed skills. It updates locked installed skills and
+renders final output. It does not refresh a source as a user-visible operation
+and does not install newly discovered upstream skills.
+
 If no output directories are configured, `upskill` may auto-detect well-known
 directories that already exist:
 
@@ -404,16 +527,20 @@ directories may be created during rendering.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "skills": {
     "redis": {
       "name": "Redis",
       "source": "vercel-labs/agent-skills",
+      "source_id": "src_01j...",
       "source_type": "git",
       "source_url": "https://github.com/vercel-labs/agent-skills.git",
       "ref": "main",
-      "subpath": "skills/redis",
+      "source_subpath": "skills",
+      "skill_subpath": "redis",
       "skill_path": "skills/redis/SKILL.md",
+      "resolved_revision": "abc123...",
+      "update_policy": "manual",
       "hash": "sha256:...",
       "updated_at": "2026-06-23T00:00:00Z"
     }
@@ -426,7 +553,16 @@ Rules:
 - Keys are sorted on write.
 - Local sources store absolute `source_url` paths.
 - Git sources store canonical clone URLs.
+- `source_id` links an installed skill to a configured source when one exists.
+  Lock entries installed from raw or removed sources continue to work from their
+  recorded source metadata.
+- `source_subpath` is the configured source scan root. `skill_subpath` is the
+  selected skill directory inside that scan root. Existing schema 1 `subpath`
+  entries are read as `skill_subpath` until migrated.
 - `hash` is computed from all files in the installed skill directory.
+- `resolved_revision` stores the Git commit used for the installed copy when
+  the source type is Git. Local sources omit it.
+- `update_policy` is `manual` by default and may be `auto`.
 - `sync` and `update` use this file to refresh base skills.
 
 ## Command Behavior
@@ -446,6 +582,8 @@ Rules:
 - Multiple discovered skills are installed unless `--skill` filters the result.
 - Existing store skills are replaced atomically.
 - Existing overlays are preserved.
+- `--update-policy` writes the initial installed skill policy. If omitted,
+  Upskill uses the source record's `default_update_policy`, then `manual`.
 - `--no-render` installs only into the base store.
 
 ### `show`
@@ -502,6 +640,20 @@ because overlays are the default. There is no `--without-overlays` flag because
 sync publishes the effective final state. Use `render --print --base-only` to
 inspect the base state.
 
+### `update-policy`
+
+`upskill update-policy <skill-name>... --auto` marks installed skills for
+automatic updates. `--manual` restores the default manual update behavior.
+
+Rules:
+
+- The command updates only lock metadata. It does not fetch sources, update
+  installed skill files, render output, or copy agent outputs.
+- The command fails if any named skill is not installed.
+- Text output reports the final policy for each skill.
+- JSON output, if added later, must include `skill`, `old_policy`, and
+  `new_policy`.
+
 ### `migrate`
 
 `upskill migrate` copies skill bundles into a local source and installs them
@@ -530,12 +682,14 @@ Creates a new local skill skeleton with `SKILL.md` and frontmatter.
 
 `source` commands manage configured upstream sources in `config.json`.
 
-`source add <source> [--name NAME] [--ref REF] [--subpath PATH]` records a
-source without installing skills. `--name` creates a shortcut; omitting `--name`
-stores an unnamed source that is displayed by canonical source string.
+`source add <source> [--name NAME] [--ref REF] [--subpath PATH]
+[--default-update-policy manual|auto]` records a source without installing
+skills. `--name` creates a shortcut; omitting `--name` stores an unnamed source
+that is displayed by canonical source string.
 
-`source list|ls` prints configured sources. It does not inspect upstream
-contents.
+`source list|ls` prints configured sources. It does not print upstream skill
+catalog contents. Preflight may still check installed-skill freshness and print
+notices unless disabled.
 
 `source skills <source-or-name>` performs live source inspection and prints the
 skills available in that source. It accepts named sources and raw source strings.
@@ -970,6 +1124,10 @@ Tools:
 
 ```text
 find_skills(query?, limit?, agent?)
+list_sources()
+find_source_skills(source, query?, limit?, ref?, subpath?)
+check_skill_updates(skill_id?, include_diff=false)
+set_skill_update_policy(skill_id, policy)
 read_skill(skill_id, agent?, rendered=true, include_files=true, file_limit=100)
 list_skill_files(skill_id, agent?, rendered=true, path_prefix?, recursive=true, include_hashes=false, limit=500)
 read_skill_file(skill_id, path, agent?, rendered=true, max_bytes=200000)
@@ -996,6 +1154,17 @@ promote_skill_draft(draft_id, to_path? | to_source?, dry_run=true)
 
 Read semantics:
 
+- Every MCP tool call runs the same preflight check rules as the CLI.
+- MCP tools that are explicitly read-only return pending auto-update notices
+  but do not apply automatic updates.
+- `find_skills` returns installed base skills and drafts. It does not search
+  every configured source.
+- `list_sources` returns configured sources and their default update policy.
+- `find_source_skills` performs live source inspection and returns current
+  source catalog entries. It does not install skills, update the lock file, or
+  render output.
+- `check_skill_updates` returns installed-skill update status from recorded
+  sources. It is read-only.
 - `rendered=true` reads the effective rendered skill and applies overlays first.
 - `rendered=false` reads the synced base skill from `store/`.
 - `read_skill` returns the `SKILL.md` body plus a file manifest.
@@ -1006,6 +1175,8 @@ Read semantics:
 
 Write semantics:
 
+- `set_skill_update_policy` writes only lock metadata and accepts `manual` or
+  `auto`.
 - `upsert_skill_overlay_file` writes only under `overlays/`.
 - It never writes under `store/` or `rendered/`.
 - `agent` selects `overlays/<skill>/agents/<agent>/`; absent `agent` selects
@@ -1034,7 +1205,8 @@ Write semantics:
   directories.
 - `sync_skills` returns a structured summary with `updated`,
   `updated_count`, `rendered`, `rendered_count`, and warnings when nothing was
-  updated or rendered.
+  updated or rendered. It also includes `notices` for preflight checks and
+  automatic updates.
 - Template overlay writes require Jinja template content in a `.j2` file. JSON
   variable-map overlays are rejected; variable-map template overlays are not in
   this version.
@@ -1044,12 +1216,78 @@ Safety:
 - MCP clients can refresh base skills through `sync_skills`, but source updates
   happen from the lock file and configured sources, not from arbitrary MCP file
   writes.
+- MCP clients can inspect configured sources live through source tools, but they
+  cannot install newly discovered source skills unless a future explicit install
+  tool is added.
 - MCP clients can create and edit drafts, including brand-new draft skills, but
   cannot write synced base skills directly.
 - MCP clients can import resource files into drafts from a shared import inbox
   or verified URLs. They cannot use import tools as arbitrary local file reads.
 - MCP clients can promote drafts only into local checkout paths, never directly
   to a remote registry, Git host, or managed upskill directory.
+
+## Source Freshness Implementation Plan
+
+This plan describes the work needed to add source freshness, update notices,
+and automatic installed-skill updates.
+
+### Stage 1: Metadata and Compatibility
+
+- Add stable source IDs and `default_update_policy` to source records.
+- Add lock schema 2 fields: `source_id`, `source_subpath`, `skill_subpath`,
+  `resolved_revision`, and `update_policy`.
+- Preserve read compatibility for schema 1 lock files and existing source
+  config shapes.
+- Keep writes deterministic.
+- Add focused tests for schema migration and stable source identity after source
+  rename.
+
+### Stage 2: Source Materialization and Revision Resolution
+
+- Replace direct `materialize` calls with a source resolver that returns root,
+  cleanup, source type, resolved revision, and source identity.
+- For Git sources, support temp clones or persistent cache, but always fetch
+  before live source inspection or update checks.
+- For local sources, resolve and read the current local directory directly.
+- Add tests with a local bare Git remote where a new skill appears after the
+  first inspection and `source skills` sees it without reinstalling.
+
+### Stage 3: Installed Update Checks and Notices
+
+- Add a read-only update-check API shared by CLI and MCP.
+- Detect changed installed skills by comparing current source hashes with lock
+  hashes.
+- Include source failures as explicit check results.
+- Print text notices to stderr and expose structured MCP notices.
+- Keep uninstalled upstream skills out of generic notices.
+
+### Stage 4: Automatic Update Policy
+
+- Add `--update-policy manual|auto` to `add`.
+- Add `source add --default-update-policy manual|auto`.
+- Add `update-policy` CLI command and MCP `set_skill_update_policy` tool.
+- Run preflight auto-updates before normal mutable commands.
+- Keep explicit read-only commands read-only by reporting pending auto updates
+  instead of applying them.
+- Add `--no-check` and `UPSKILL_NO_CHECK=1`.
+
+### Stage 5: MCP Source and Check Tools
+
+- Add `list_sources`, `find_source_skills`, `check_skill_updates`, and
+  `set_skill_update_policy`.
+- Ensure every tool result can include notices without breaking existing fields.
+- Keep MCP unable to install new source skills unless a future explicit install
+  tool adds that capability.
+
+### Stage 6: Documentation and End-to-End QA
+
+- Update `README.md`, `docs/getting-started.md`, and `docs/workflows.md` after
+  implementation lands.
+- Document the distinction between source catalog freshness, installed skill
+  freshness, `sync`, and auto update policy.
+- Add an end-to-end scenario that installs a skill from a Git source, changes
+  the upstream repo, observes a notice, runs `sync`, and verifies rendered agent
+  output.
 
 ## Historical Implementation Plan
 
@@ -1187,10 +1425,20 @@ configuration. It must instruct agents to:
 - `sync` updates locked skills and renders overlays.
 - `init` creates a valid `SKILL.md`.
 - `source add` records named and unnamed local/Git sources.
+- `source add --default-update-policy auto` records the source default policy.
 - `source list|ls` displays unnamed sources by canonical source string.
 - `source skills` inspects named and raw sources live without installing.
 - `source find|search` searches one named or raw source live without installing.
+- `source skills` for a Git source fetches remote changes before listing skills.
+- `source find|search` sees a newly added upstream Git skill even when an
+  internal clone or cache already existed.
 - `add <raw-source>` records an unnamed source before installing from it.
+- `add --update-policy auto` records an auto-updating lock entry.
+- `update-policy --auto` and `update-policy --manual` update lock metadata only.
+- Commands with preflight checks print installed-skill update notices without
+  printing generic uninstalled-skill notices.
+- `--no-check` and `UPSKILL_NO_CHECK=1` suppress preflight update checks.
+- Top-level help documents `--no-check` as a global option.
 - `workon` opens an existing draft in the editor, creates a version draft for
   installed skills, and creates a new-skill draft for unknown names.
 - `draft create/edit/list/path/files/read/add-file/remove` cover the draft
@@ -1209,10 +1457,19 @@ configuration. It must instruct agents to:
 - GitHub shorthand parses to a Git source.
 - `@ref`, `#ref`, and `#ref@skill` parse correctly.
 - Unsafe subpaths are rejected.
+- Git branch refs resolve to the latest remote commit during live source
+  inspection.
+- Git commit refs are treated as pinned.
+- Git tag refs are resolved during each check.
 - Skill discovery finds root and nested `SKILL.md` files.
 - Skill discovery ignores configured working directories such as `overlays`,
   `drafts`, `imports`, and `rendered`.
 - Skill hashes are deterministic.
+- Local source update checks compare current source skill hashes to lock hashes.
+- Git source update checks compare current fetched source skill hashes to lock
+  hashes and include the resolved revision.
+- Failed fetch, checkout, local source read, and hash operations are reported as
+  failed checks.
 
 ### Overlay and Render
 
@@ -1257,6 +1514,11 @@ configuration. It must instruct agents to:
 - MCP tools cannot overwrite base `SKILL.md` or files in `store/`.
 - `sync_skills` updates from lock/config, renders final output, and returns a
   structured summary.
+- MCP tool calls run preflight checks and return notices.
+- MCP `find_source_skills` performs live source inspection without installing.
+- MCP `check_skill_updates` is read-only and reports changed, unchanged, and
+  failed installed-skill checks.
+- MCP `set_skill_update_policy` writes only lock policy metadata.
 
 ### Prompt
 
