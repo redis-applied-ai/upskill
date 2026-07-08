@@ -350,12 +350,12 @@ notice: updates available for hello-skill; run upskill sync or upskill update --
 ```
 
 Set `auto` when an installed skill should refresh before normal Upskill
-commands:
+commands. To change an installed skill's policy later, reinstall it from the
+same source with the new `--update-policy` value:
 
 ```bash
 upskill add ./examples --skill hello-skill --update-policy auto --agent codex
-upskill update-policy hello-skill --manual
-upskill update-policy hello-skill --auto
+upskill add ./examples --skill hello-skill --update-policy manual --agent codex
 ```
 
 Set a source default for future installs:
@@ -426,14 +426,14 @@ upskill source search local-examples hello
 upskill add local-examples --skill hello-skill
 ```
 
-MCP clients can inspect configured sources and set update policy metadata:
+MCP clients can inspect configured sources and check installed skill updates:
 
 ```json
 {"name": "list_sources", "arguments": {}}
 ```
 
 ```json
-{"name": "set_skill_update_policy", "arguments": {"skill_id": "hello-skill", "policy": "auto"}}
+{"name": "check_skill_updates", "arguments": {"skill_id": "hello-skill"}}
 ```
 
 ## Instruct An LLM To Use Skills

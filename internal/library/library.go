@@ -149,13 +149,6 @@ type UpdateCheck struct {
 	Error            string   `json:"error,omitempty"`
 }
 
-type UpdatePolicyChange struct {
-	StoreName string `json:"store_name"`
-	Name      string `json:"name"`
-	OldPolicy string `json:"old_policy"`
-	NewPolicy string `json:"new_policy"`
-}
-
 type AutoUpdateResult struct {
 	Updated []InstalledSkill
 	Checks  []UpdateCheck
@@ -488,6 +481,7 @@ func UpdateSkills(cfg config.Config, names []string) ([]InstalledSkill, error) {
 	var updated []InstalledSkill
 	for _, key := range keys {
 		entry := lock.Skills[key]
+		oldHash := entry.Hash
 		parsed := ParsedSource{
 			Input:            entry.Source,
 			Type:             entry.SourceType,
@@ -526,47 +520,14 @@ func UpdateSkills(cfg config.Config, names []string) ([]InstalledSkill, error) {
 		}
 		newEntry.UpdatePolicy = entry.EffectiveUpdatePolicy()
 		lock.Skills[key] = newEntry
-		updated = append(updated, result)
+		if newEntry.Hash != oldHash {
+			updated = append(updated, result)
+		}
 	}
 	if err := WriteLock(cfg, lock); err != nil {
 		return nil, err
 	}
 	return updated, nil
-}
-
-func SetUpdatePolicy(cfg config.Config, names []string, policy string) ([]UpdatePolicyChange, error) {
-	if !config.ValidUpdatePolicy(policy) {
-		return nil, fmt.Errorf("invalid update policy: %s", policy)
-	}
-	policy = config.NormalizeUpdatePolicy(policy)
-	lock, err := ReadLock(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if len(names) == 0 {
-		return nil, fmt.Errorf("at least one skill name is required")
-	}
-	changes := make([]UpdatePolicyChange, 0, len(names))
-	for _, name := range names {
-		key := NormalizeName(name)
-		entry, ok := lock.Skills[key]
-		if !ok {
-			return nil, fmt.Errorf("skill not installed: %s", name)
-		}
-		oldPolicy := entry.EffectiveUpdatePolicy()
-		entry.UpdatePolicy = policy
-		lock.Skills[key] = entry
-		changes = append(changes, UpdatePolicyChange{
-			StoreName: key,
-			Name:      entry.Name,
-			OldPolicy: oldPolicy,
-			NewPolicy: policy,
-		})
-	}
-	if err := WriteLock(cfg, lock); err != nil {
-		return nil, err
-	}
-	return changes, nil
 }
 
 func AutoUpdateSkills(cfg config.Config) (AutoUpdateResult, error) {

@@ -99,10 +99,13 @@ func TestHandleProtocolMethods(t *testing.T) {
 	if !strings.Contains(string(data), "upsert_skill_overlay_file") {
 		t.Fatalf("tools response = %s", data)
 	}
-	for _, want := range []string{"list_sources", "find_source_skills", "check_skill_updates", "set_skill_update_policy"} {
+	for _, want := range []string{"list_sources", "find_source_skills", "check_skill_updates"} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("tools response missing %s: %s", want, data)
 		}
+	}
+	if strings.Contains(string(data), "set_skill_update_policy") {
+		t.Fatalf("tools response includes removed update policy tool: %s", data)
 	}
 	if !strings.Contains(string(data), "create_skill_draft") || !strings.Contains(string(data), "render_skill_draft") {
 		t.Fatalf("tools response missing draft tools: %s", data)
@@ -307,34 +310,10 @@ func TestMCPCheckSkillUpdates(t *testing.T) {
 	}
 }
 
-func TestMCPSetSkillUpdatePolicyWritesOnlyLock(t *testing.T) {
+func TestMCPSetSkillUpdatePolicyRemoved(t *testing.T) {
 	cfg := testConfig(t)
-	source := filepath.Join(cfg.Home, "policy-source")
-	writeFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
-	if _, err := library.InstallSource(cfg, source, library.InstallOptions{SkillFilter: "redis"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(source); err != nil {
-		t.Fatal(err)
-	}
-
-	updated, err := callTool(cfg, "set_skill_update_policy", map[string]any{"skill_id": "redis", "policy": "auto"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, ok := updated.(map[string]any)
-	if !ok || payload["changed_count"] != 1 || payload["lock_mutated"] != true || payload["base_mutated"] != false {
-		t.Fatalf("updated = %#v", updated)
-	}
-	lock, err := library.ReadLock(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyAuto {
-		t.Fatalf("lock entry = %#v", lock.Skills["redis"])
-	}
-	if got := readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md")); !strings.Contains(got, "Old.") {
-		t.Fatalf("base skill changed:\n%s", got)
+	if _, err := callTool(cfg, "set_skill_update_policy", map[string]any{"skill_id": "redis", "policy": "auto"}); err == nil || !strings.Contains(err.Error(), "unknown tool") {
+		t.Fatalf("removed update policy tool err = %v", err)
 	}
 }
 

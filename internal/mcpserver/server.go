@@ -210,11 +210,6 @@ func toolList() []map[string]any {
 			"skill_ids":    arrayProp("Optional installed skill identifiers."),
 			"include_diff": boolProp("Include file-level diff entries for changed skills."),
 		}, []string{}),
-		tool("set_skill_update_policy", "Set installed skill update policy while writing only lock metadata.", map[string]any{
-			"skill_id":  stringProp("Optional installed skill identifier."),
-			"skill_ids": arrayProp("Optional installed skill identifiers."),
-			"policy":    stringProp("Update policy: manual or auto."),
-		}, []string{"policy"}),
 		tool("read_skill", "Read a base or generated skill entrypoint and optional file manifest.", map[string]any{
 			"skill_id":      stringProp("Skill identifier."),
 			"agent":         stringProp("Optional agent name for generated output customizations."),
@@ -313,8 +308,6 @@ func callTool(cfg config.Config, name string, args map[string]any) (any, error) 
 		return findSourceSkills(cfg, args)
 	case "check_skill_updates":
 		return checkSkillUpdates(cfg, args)
-	case "set_skill_update_policy":
-		return setSkillUpdatePolicy(cfg, args)
 	case "read_skill":
 		return readSkill(cfg, args)
 	case "list_skill_files":
@@ -452,30 +445,6 @@ func checkSkillUpdates(cfg config.Config, args map[string]any) (map[string]any, 
 		"checked_count": len(checks),
 		"changed_count": changed,
 		"failed_count":  failed,
-		"base_mutated":  false,
-	}, nil
-}
-
-func setSkillUpdatePolicy(cfg config.Config, args map[string]any) (map[string]any, error) {
-	names := stringListArg(args, "skill_ids")
-	if skill := strArg(args, "skill_id"); skill != "" {
-		names = append(names, skill)
-	}
-	policy := strArg(args, "policy")
-	if policy == "" {
-		return nil, fmt.Errorf("policy is required")
-	}
-	changes, err := library.SetUpdatePolicy(cfg, names, policy)
-	if err != nil {
-		return nil, err
-	}
-	if changes == nil {
-		changes = []library.UpdatePolicyChange{}
-	}
-	return map[string]any{
-		"changes":       changes,
-		"changed_count": len(changes),
-		"lock_mutated":  true,
 		"base_mutated":  false,
 	}, nil
 }

@@ -172,7 +172,12 @@ command:
 
 ```bash
 upskill add Obsidian --skill hello-skill --update-policy auto --agent codex
-upskill update-policy hello-skill --manual
+```
+
+To change that policy later, reinstall the skill from the same source:
+
+```bash
+upskill add Obsidian --skill hello-skill --update-policy manual --agent codex
 ```
 
 You can also set a source default for future installs:

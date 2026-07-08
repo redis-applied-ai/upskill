@@ -88,7 +88,6 @@ upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
-upskill update-policy <skill-name>... (--manual | --auto)
 upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
 upskill init [name] [--dir DIR]
 upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
@@ -582,8 +581,10 @@ Rules:
 - Multiple discovered skills are installed unless `--skill` filters the result.
 - Existing store skills are replaced atomically.
 - Existing overlays are preserved.
-- `--update-policy` writes the initial installed skill policy. If omitted,
-  Upskill uses the source record's `default_update_policy`, then `manual`.
+- `--update-policy` writes the installed skill policy. If omitted, Upskill uses
+  the source record's `default_update_policy`, then `manual`.
+- To change an installed skill's update policy, reinstall it with `add --skill`
+  and the desired `--update-policy` value.
 - `--no-render` installs only into the base store.
 
 ### `show`
@@ -640,19 +641,17 @@ because overlays are the default. There is no `--without-overlays` flag because
 sync publishes the effective final state. Use `render --print --base-only` to
 inspect the base state.
 
-### `update-policy`
+### Changing Update Policy
 
-`upskill update-policy <skill-name>... --auto` marks installed skills for
-automatic updates. `--manual` restores the default manual update behavior.
+Installed skill update policy is changed by reinstalling from the skill source:
 
-Rules:
+```bash
+upskill add <source> --skill <skill-name> --update-policy manual|auto
+```
 
-- The command updates only lock metadata. It does not fetch sources, update
-  installed skill files, render output, or copy agent outputs.
-- The command fails if any named skill is not installed.
-- Text output reports the final policy for each skill.
-- JSON output, if added later, must include `skill`, `old_policy`, and
-  `new_policy`.
+Upskill does not provide a lock-only `update-policy` command. Reinstalling
+refreshes the synced base skill, rewrites the lock entry, and preserves local
+overlays.
 
 ### `migrate`
 
@@ -1127,7 +1126,6 @@ find_skills(query?, limit?, agent?)
 list_sources()
 find_source_skills(source, query?, limit?, ref?, subpath?)
 check_skill_updates(skill_id?, include_diff=false)
-set_skill_update_policy(skill_id, policy)
 read_skill(skill_id, agent?, rendered=true, include_files=true, file_limit=100)
 list_skill_files(skill_id, agent?, rendered=true, path_prefix?, recursive=true, include_hashes=false, limit=500)
 read_skill_file(skill_id, path, agent?, rendered=true, max_bytes=200000)
@@ -1175,8 +1173,8 @@ Read semantics:
 
 Write semantics:
 
-- `set_skill_update_policy` writes only lock metadata and accepts `manual` or
-  `auto`.
+- MCP does not expose a lock-only update policy write. Change update policy by
+  reinstalling a skill through the CLI `add --update-policy` path.
 - `upsert_skill_overlay_file` writes only under `overlays/`.
 - It never writes under `store/` or `rendered/`.
 - `agent` selects `overlays/<skill>/agents/<agent>/`; absent `agent` selects
@@ -1265,7 +1263,8 @@ and automatic installed-skill updates.
 
 - Add `--update-policy manual|auto` to `add`.
 - Add `source add --default-update-policy manual|auto`.
-- Add `update-policy` CLI command and MCP `set_skill_update_policy` tool.
+- Change an installed skill's policy by reinstalling it with `add --skill` and
+  the desired `--update-policy` value.
 - Run preflight auto-updates before normal mutable commands.
 - Keep explicit read-only commands read-only by reporting pending auto updates
   instead of applying them.
@@ -1273,8 +1272,7 @@ and automatic installed-skill updates.
 
 ### Stage 5: MCP Source and Check Tools
 
-- Add `list_sources`, `find_source_skills`, `check_skill_updates`, and
-  `set_skill_update_policy`.
+- Add `list_sources`, `find_source_skills`, and `check_skill_updates`.
 - Ensure every tool result can include notices without breaking existing fields.
 - Keep MCP unable to install new source skills unless a future explicit install
   tool adds that capability.
@@ -1434,7 +1432,8 @@ configuration. It must instruct agents to:
   internal clone or cache already existed.
 - `add <raw-source>` records an unnamed source before installing from it.
 - `add --update-policy auto` records an auto-updating lock entry.
-- `update-policy --auto` and `update-policy --manual` update lock metadata only.
+- Reinstalling with `add --skill` and `--update-policy manual|auto` changes an
+  installed skill's update policy.
 - Commands with preflight checks print installed-skill update notices without
   printing generic uninstalled-skill notices.
 - `--no-check` and `UPSKILL_NO_CHECK=1` suppress preflight update checks.
@@ -1518,7 +1517,6 @@ configuration. It must instruct agents to:
 - MCP `find_source_skills` performs live source inspection without installing.
 - MCP `check_skill_updates` is read-only and reports changed, unchanged, and
   failed installed-skill checks.
-- MCP `set_skill_update_policy` writes only lock policy metadata.
 
 ### Prompt
 

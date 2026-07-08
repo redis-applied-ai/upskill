@@ -203,26 +203,6 @@ examples:
   upskill sync
   upskill sync --agent codex`
 
-	helpUpdatePolicy = `usage: upskill update-policy <skill-name>... (--manual | --auto)
-
-summary:
-  Change installed skill update policy metadata.
-
-arguments:
-  <skill-name>      One or more installed skill IDs.
-
-options:
-  --auto            Automatically update during normal Upskill preflight.
-  --manual          Update only when sync or update is run explicitly.
-
-notes:
-  This command updates only lock metadata. It does not fetch sources, update
-  installed skill files, render output, or copy agent outputs.
-
-examples:
-  upskill update-policy redis --auto
-  upskill update-policy redis docs --manual`
-
 	helpMigrate = `usage: upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
 
 summary:
@@ -796,6 +776,10 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	if printRequestedHelp(args, stdout) {
 		return 0
 	}
+	if !knownTopLevelCommand(args[0]) {
+		fmt.Fprintf(stderr, "upskill: unknown command: %s\n", args[0])
+		return 2
+	}
 
 	if args[0] == "version" {
 		return runVersion(args[1:], stdout, stderr)
@@ -825,8 +809,6 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runRemove(cfg, args[1:], stdout, stderr)
 	case "update":
 		return runUpdate(cfg, args[1:], stdout, stderr)
-	case "update-policy":
-		return runUpdatePolicy(cfg, args[1:], stdout, stderr)
 	case "sync":
 		return runSync(cfg, args[1:], stdout, stderr)
 	case "migrate":
@@ -889,7 +871,7 @@ func cliPreflightModeFor(args []string) cliPreflightMode {
 		return cliPreflightSkip
 	}
 	switch args[0] {
-	case "mcp", "version", "init", "update-policy":
+	case "mcp", "version", "init":
 		return cliPreflightSkip
 	case "update":
 		if hasCLIFlag(args[1:], "--check") || hasCLIFlag(args[1:], "--diff") {
@@ -1288,40 +1270,6 @@ func runUpdate(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		return 0
 	}
 	return renderInstalled(cfg, updated, agent, stdout, stderr)
-}
-
-func runUpdatePolicy(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
-	auto := false
-	manual := false
-	positionals := []string{}
-	if err := parseFlags(args, map[string]func(string) error{
-		"--auto":   func(_ string) error { auto = true; return nil },
-		"--manual": func(_ string) error { manual = true; return nil },
-	}, &positionals); err != nil {
-		fmt.Fprintf(stderr, "upskill: %v\n", err)
-		return 2
-	}
-	if len(positionals) == 0 {
-		fmt.Fprintln(stderr, "upskill: update-policy requires at least one skill name")
-		return 2
-	}
-	if auto == manual {
-		fmt.Fprintln(stderr, "upskill: update-policy requires exactly one of --auto or --manual")
-		return 2
-	}
-	policy := config.UpdatePolicyManual
-	if auto {
-		policy = config.UpdatePolicyAuto
-	}
-	changes, err := library.SetUpdatePolicy(cfg, positionals, policy)
-	if err != nil {
-		fmt.Fprintf(stderr, "upskill: %v\n", err)
-		return 1
-	}
-	for _, change := range changes {
-		fmt.Fprintf(stdout, "%s\t%s -> %s\n", change.StoreName, change.OldPolicy, change.NewPolicy)
-	}
-	return 0
 }
 
 func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -3564,8 +3512,6 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printDirectHelp(args, w, helpRemove)
 	case "update":
 		return printDirectHelp(args, w, helpUpdate)
-	case "update-policy":
-		return printDirectHelp(args, w, helpUpdatePolicy)
 	case "sync":
 		return printDirectHelp(args, w, helpSync)
 	case "migrate":
@@ -3616,6 +3562,17 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printDirectHelp(args, w, helpStatus)
 	case "doctor":
 		return printDirectHelp(args, w, helpDoctor)
+	default:
+		return false
+	}
+}
+
+func knownTopLevelCommand(command string) bool {
+	switch command {
+	case "add", "show", "list", "ls", "find", "search", "remove", "rm",
+		"update", "sync", "migrate", "init", "workon", "source", "draft",
+		"overlay", "render", "mcp", "version", "status", "doctor":
+		return true
 	default:
 		return false
 	}
@@ -3678,8 +3635,6 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  find     Search installed skills")
 	fmt.Fprintln(w, "  remove   Remove installed skills")
 	fmt.Fprintln(w, "  update   Update installed skills from their locked sources")
-	fmt.Fprintln(w, "  update-policy")
-	fmt.Fprintln(w, "           Change installed skill update policy")
 	fmt.Fprintln(w, "  sync     Update skills and build generated output")
 	fmt.Fprintln(w, "  migrate  Migrate skill bundles into a local source")
 	fmt.Fprintln(w, "  init     Create a new skill bundle")

@@ -55,9 +55,9 @@ Use the right write target:
 - Use `sync_skills` when synced base skills and rendered agent outputs should be
   refreshed. Treat its `updated_count`, `rendered_count`, and warnings as the
   source of truth for what happened.
-- Use `set_skill_update_policy` only to change installed-skill lock metadata
-  between `manual` and `auto`. It does not fetch sources, update base skill
-  files, render output, or install source skills.
+- To change an installed skill's update policy, reinstall it with
+  `upskill add <source> --skill <name> --update-policy manual|auto`; do not edit
+  the lock file directly.
 - If a tool result reports a failed update check, surface the failure clearly
   instead of describing the skill as current.
 

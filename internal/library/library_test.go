@@ -182,6 +182,13 @@ func TestInstallUpdateFindReadRemoveAndManifest(t *testing.T) {
 	if len(preview) != 1 || preview[0].Changed || len(preview[0].Diff) != 0 {
 		t.Fatalf("unchanged preview = %#v", preview)
 	}
+	updated, err = UpdateSkills(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 0 {
+		t.Fatalf("unchanged update = %#v", updated)
+	}
 
 	removed, err := RemoveSkills(cfg, []string{"redis-cache"}, false)
 	if err != nil {

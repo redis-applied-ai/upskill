@@ -132,6 +132,38 @@ func TestSyncUpdatesLockThenRenders(t *testing.T) {
 	}
 }
 
+func TestSyncPrintsOnlyChangedSkills(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n", 0o644)
+	writeTestFile(t, filepath.Join(source, "writing", "SKILL.md"), "---\nname: Writing\n---\n\nUnchanged.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--agent", "codex", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n", 0o644)
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"sync", "--agent", "codex"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("sync code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "updated redis (sha256:") {
+		t.Fatalf("sync stdout missing changed skill update: %q", output)
+	}
+	if strings.Contains(output, "updated writing") {
+		t.Fatalf("sync stdout reported unchanged skill as updated: %q", output)
+	}
+	if got := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md")); !strings.Contains(got, "New.") {
+		t.Fatalf("changed skill was not rendered:\n%s", got)
+	}
+	if got := readTestFile(t, filepath.Join(root, "codex-skills", "writing", "SKILL.md")); !strings.Contains(got, "Unchanged.") {
+		t.Fatalf("unchanged skill was not rendered:\n%s", got)
+	}
+}
+
 func TestCLIGitSourceFreshnessE2E(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -239,13 +271,13 @@ func TestHelpCommands(t *testing.T) {
 	if !strings.Contains(top, "usage: upskill <command> [args]") || !strings.Contains(top, "commands:") || !strings.Contains(top, "--no-check") {
 		t.Fatalf("help output = %q", top)
 	}
-	for _, want := range []string{"add      Install", "find     Search", "update-policy", "migrate  Migrate", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run", "version  Print"} {
+	for _, want := range []string{"add      Install", "find     Search", "migrate  Migrate", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run", "version  Print"} {
 		if !strings.Contains(top, want) {
 			t.Fatalf("help output missing %q: %q", want, top)
 		}
 	}
 	removedCommand := "va" + "ult"
-	for _, forbidden := range []string{"search   Alias", "source add <source>", "draft import <skill-name>", "overlay diff <skill-name>", "--archive-url", "forward", "underlying", removedCommand} {
+	for _, forbidden := range []string{"search   Alias", "source add <source>", "draft import <skill-name>", "overlay diff <skill-name>", "--archive-url", "forward", "underlying", "update-policy", removedCommand} {
 		if strings.Contains(top, forbidden) {
 			t.Fatalf("top help output contains %q: %q", forbidden, top)
 		}
@@ -260,10 +292,10 @@ func TestHelpCommands(t *testing.T) {
 		!strings.Contains(addPolicyHelp, "automatically during Upskill preflight") {
 		t.Fatalf("add help = %q", addPolicyHelp)
 	}
-	updatePolicyHelp := runHelp("update-policy", "--help")
-	if !strings.Contains(updatePolicyHelp, helpUpdatePolicy) ||
-		!strings.Contains(updatePolicyHelp, "updates only lock metadata") {
-		t.Fatalf("update-policy help = %q", updatePolicyHelp)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update-policy", "--help"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("removed update-policy help code = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 
 	sourceHelp := runHelp("source", "--help")
@@ -2405,6 +2437,19 @@ func TestCLIAddUpdatePolicy(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	if code := Run([]string{"add", source, "--skill", "redis", "--update-policy", "manual", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("reinstall code = %d stderr=%s", code, stderr.String())
+	}
+	lock, err = library.ReadLock(config.Config{LockPath: filepath.Join(root, "home", "upskill-lock.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyManual {
+		t.Fatalf("reinstalled lock policy = %#v", lock.Skills["redis"])
+	}
+
+	stdout.Reset()
+	stderr.Reset()
 	if code := Run([]string{"add", source, "--skill", "redis", "--update-policy", "sometimes", "--no-render"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("invalid add policy code = %d stderr=%s", code, stderr.String())
 	}
@@ -2457,7 +2502,7 @@ func TestCLISourceDefaultUpdatePolicy(t *testing.T) {
 	}
 }
 
-func TestCLIUpdatePolicyCommand(t *testing.T) {
+func TestCLIUpdatePolicyCommandRemoved(t *testing.T) {
 	root, _ := setupEnv(t)
 	source := filepath.Join(root, "update-policy-source")
 	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nRedis.\n", 0o644)
@@ -2471,35 +2516,24 @@ func TestCLIUpdatePolicyCommand(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"update-policy", "redis", "--auto"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("update-policy code = %d stderr=%s", code, stderr.String())
+	if code := Run([]string{"update-policy", "redis", "--auto"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("removed update-policy code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("removed update-policy stderr = %q", stderr.String())
 	}
 	if strings.Contains(stderr.String(), "update check failed") {
-		t.Fatalf("update-policy should not run preflight: %q", stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "redis\tmanual -> auto") {
-		t.Fatalf("update-policy stdout = %q", stdout.String())
+		t.Fatalf("removed update-policy should not run preflight: %q", stderr.String())
 	}
 	lock, err := library.ReadLock(config.Config{LockPath: filepath.Join(root, "home", "upskill-lock.json")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyAuto {
+	if lock.Skills["redis"].UpdatePolicy != config.UpdatePolicyManual {
 		t.Fatalf("lock policy = %#v", lock.Skills["redis"])
 	}
 	if _, err := os.Stat(filepath.Join(root, "home", "store", "redis", "SKILL.md")); err != nil {
-		t.Fatalf("update-policy should not remove or update store: %v", err)
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"update-policy", "redis"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("missing policy code = %d stderr=%s", code, stderr.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run([]string{"update-policy", "missing", "--manual"}, &stdout, &stderr); code != 1 {
-		t.Fatalf("missing skill code = %d stderr=%s", code, stderr.String())
+		t.Fatalf("removed update-policy should not remove or update store: %v", err)
 	}
 }
 

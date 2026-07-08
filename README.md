@@ -49,7 +49,6 @@ upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
 upskill update [skill-name...] [--agent AGENT] [--no-render] [--check] [--diff]
 upskill sync [--agent AGENT]
-upskill update-policy <skill-name>... (--manual | --auto)
 upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
 upskill init [name] [--dir DIR]
 upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
@@ -289,8 +288,12 @@ normal command:
 ```bash
 upskill add Obsidian --skill redis --update-policy auto
 upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian --default-update-policy auto
-upskill update-policy redis --auto
-upskill update-policy redis --manual
+```
+
+To change an installed skill's policy later, reinstall it from the same source:
+
+```bash
+upskill add Obsidian --skill redis --update-policy manual
 ```
 
 Automatic updates refresh installed base skill files, update the lock entry,
@@ -452,7 +455,6 @@ find_skills
 list_sources
 find_source_skills
 check_skill_updates
-set_skill_update_policy
 read_skill
 list_skill_files
 read_skill_file
@@ -477,13 +479,14 @@ rebase_skill_draft
 promote_skill_draft
 ```
 
-MCP writes are limited to lock update-policy metadata, overlays, and mutable
-drafts. Agents can inspect configured sources, search live source skills, check
-installed updates, and read base or generated skills, but they cannot install
-new source skills or overwrite `store/` through the MCP server. Draft promotion
-can write only to a local checkout or named local source and rejects managed
-upskill directories such as `store/`, `rendered/`, `overlays/`, `drafts/`, and
-`imports/`.
+MCP writes are limited to overlays and mutable drafts. Agents can inspect
+configured sources, search live source skills, check installed updates, and
+read base or generated skills, but they cannot install new source skills,
+change update policy, or overwrite `store/` through the MCP server. To change
+an installed skill's update policy, reinstall it with `upskill add` plus
+`--skill <name> --update-policy manual|auto`. Draft promotion can write only to
+a local checkout or named local source and rejects managed upskill directories
+such as `store/`, `rendered/`, `overlays/`, `drafts/`, and `imports/`.
 
 Copy `prompts/AGENTS.md` into an agent configuration when you want an agent to
 use `upskill` MCP tools for skill management instead of built-in skill servers.
