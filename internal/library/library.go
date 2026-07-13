@@ -258,9 +258,57 @@ func CanonicalSource(input string, name string, ref string, subpath string) (con
 	return source, config.SourceKey(source), nil
 }
 
-func ResolveNamedSource(cfg config.Config, name string) (config.Source, bool) {
-	source, ok := cfg.Sources[name]
-	return source, ok
+func ResolveNamedSource(cfg config.Config, identifier string) (config.Source, bool) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return config.Source{}, false
+	}
+	if source, ok := cfg.Sources[identifier]; ok && source.Source != "" {
+		if source.Name == "" && identifier != config.SourceKey(source) {
+			source.Name = identifier
+		}
+		return config.NormalizeSource(source), true
+	}
+
+	records := config.SourceRecords(cfg.Sources)
+	exact := make([]config.Source, 0, 1)
+	for _, source := range records {
+		if identifier == source.ID ||
+			identifier == source.Name ||
+			identifier == config.SourceDisplayName(source) ||
+			identifier == config.SourceKey(source) ||
+			identifier == source.Source {
+			exact = append(exact, source)
+		}
+	}
+	if len(exact) == 1 {
+		return exact[0], true
+	}
+	if len(exact) > 1 {
+		return config.Source{}, false
+	}
+
+	parsedIdentifier, parseErr := ParseSource(identifier)
+	equivalent := make([]config.Source, 0, 1)
+	caseInsensitive := make([]config.Source, 0, 1)
+	for _, source := range records {
+		if parseErr == nil {
+			parsedSource, err := ParseSource(source.Source)
+			if err == nil && parsedSource.Type == parsedIdentifier.Type && parsedSource.URL == parsedIdentifier.URL {
+				equivalent = append(equivalent, source)
+			}
+		}
+		if strings.EqualFold(identifier, source.Name) || strings.EqualFold(identifier, config.SourceDisplayName(source)) {
+			caseInsensitive = append(caseInsensitive, source)
+		}
+	}
+	if len(equivalent) == 1 {
+		return equivalent[0], true
+	}
+	if len(caseInsensitive) == 1 {
+		return caseInsensitive[0], true
+	}
+	return config.Source{}, false
 }
 
 func ResolveSource(cfg config.Config, source string, opts InstallOptions) (ParsedSource, bool, error) {

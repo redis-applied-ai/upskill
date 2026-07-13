@@ -448,36 +448,17 @@ Run:
 upskill mcp
 ```
 
-Tools:
+The server publishes generated instructions from its live tool registry during
+MCP initialization. Use `tools/list` for the complete registry and call
+`describe_tool` with a tool name for its authoritative `inputSchema` and
+accepted parameter names. Tool errors include the same schema and accepted
+parameter list, so client-visible guidance cannot drift from the registered
+surface.
 
-```text
-find_skills
-list_sources
-find_source_skills
-check_skill_updates
-read_skill
-list_skill_files
-read_skill_file
-render_skill
-sync_skills
-upsert_skill_overlay_file
-delete_skill_overlay_file
-list_skill_overlays
-create_skill_draft
-list_skill_drafts
-read_skill_draft
-list_skill_draft_files
-read_skill_draft_file
-upsert_skill_draft_file
-delete_skill_draft_file
-delete_skill_draft
-import_skill_draft_archive
-import_skill_draft_file
-render_skill_draft
-diff_skill_draft
-rebase_skill_draft
-promote_skill_draft
-```
+Mutating tools that expose `dry_run` follow the same preview convention: call
+with `dry_run: true`, inspect the planned targets and actions, then repeat with
+`dry_run: false` to apply. Existing apply-by-default tools retain that default
+for compatibility, while draft promotion remains preview-by-default.
 
 MCP writes are limited to overlays and mutable drafts. Agents can inspect
 configured sources, search live source skills, check installed updates, and

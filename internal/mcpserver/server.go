@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -47,12 +48,18 @@ type callParams struct {
 }
 
 type syncSkillsResult struct {
-	Agent         string                   `json:"agent,omitempty"`
-	Updated       []library.InstalledSkill `json:"updated"`
-	UpdatedCount  int                      `json:"updated_count"`
-	Rendered      []render.Result          `json:"rendered"`
-	RenderedCount int                      `json:"rendered_count"`
-	Warnings      []string                 `json:"warnings,omitempty"`
+	Agent                string                   `json:"agent,omitempty"`
+	DryRun               bool                     `json:"dry_run"`
+	Applied              bool                     `json:"applied"`
+	Updated              []library.InstalledSkill `json:"updated"`
+	UpdatedCount         int                      `json:"updated_count"`
+	Rendered             []render.Result          `json:"rendered"`
+	RenderedCount        int                      `json:"rendered_count"`
+	PlannedUpdates       []library.UpdateCheck    `json:"planned_updates,omitempty"`
+	PlannedUpdateCount   int                      `json:"planned_update_count,omitempty"`
+	PlannedRenders       []render.Result          `json:"planned_renders,omitempty"`
+	PlannedRenderedCount int                      `json:"planned_rendered_count,omitempty"`
+	Warnings             []string                 `json:"warnings,omitempty"`
 }
 
 type notice struct {
@@ -109,7 +116,8 @@ func handle(cfg config.Config, req request) response {
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
-			"serverInfo": map[string]any{"name": "upskill", "version": "0.1.0"},
+			"serverInfo":   map[string]any{"name": "upskill", "version": "0.1.0"},
+			"instructions": serverInstructions(),
 		}
 	case "tools/list":
 		resp.Result = map[string]any{"tools": toolList()}
@@ -122,7 +130,7 @@ func handle(cfg config.Config, req request) response {
 		result, err := callTool(cfg, params.Name, params.Arguments)
 		notices := updateNotices(cfg)
 		if err != nil {
-			resp.Result = toolResult(err.Error(), true, notices)
+			resp.Result = toolResult(toolCallErrorPayload(params.Name, params.Arguments, err), true, notices)
 			return resp
 		}
 		resp.Result = toolResult(result, false, notices)
@@ -192,13 +200,16 @@ func updateNotices(cfg config.Config) []notice {
 
 func toolList() []map[string]any {
 	tools := []map[string]any{
+		tool("describe_tool", "Return one tool's authoritative description and full input schema from the live registry.", map[string]any{
+			"name": stringProp("Exact tool name to describe."),
+		}, []string{"name"}),
 		tool("find_skills", "Find or list installed skills.", map[string]any{
 			"query": stringProp("Optional search text."),
 			"limit": intProp("Maximum number of skills to return."),
 		}, []string{}),
 		tool("list_sources", "List configured skill sources and source defaults.", map[string]any{}, []string{}),
 		tool("find_source_skills", "Inspect or search the current skills available from a configured or raw source without installing them.", map[string]any{
-			"source":  stringProp("Configured source name, local path, GitHub shorthand, or Git URL."),
+			"source":  stringProp("Configured source name, ID, configured path, raw local path, GitHub shorthand, or Git URL."),
 			"query":   stringProp("Optional search text. Omit to list source skills."),
 			"limit":   intProp("Maximum number of source skills to return."),
 			"ref":     stringProp("Optional Git branch, tag, or commit override."),
@@ -243,10 +254,11 @@ func toolList() []map[string]any {
 			"base_only":      boolProp("Build base skills without customizations."),
 			"apply_overlays": boolProp("Apply customizations when rendering draft skills."),
 		}, []string{"skill_id"}),
-		tool("sync_skills", "Update locked base skills and build final outputs. Returns counts, generated paths, and warnings.", map[string]any{
-			"agent": stringProp("Optional agent name for generated output selection."),
+		tool("sync_skills", "Update locked base skills and build final outputs. Use dry_run first to preview updates and render/copy targets. Returns counts, generated paths, and warnings.", map[string]any{
+			"agent":   stringProp("Optional agent name for generated output selection."),
+			"dry_run": boolPropDefault("Preview source updates and render/copy targets without changing files. Defaults to false for backward compatibility.", false),
 		}, []string{}),
-		tool("upsert_skill_overlay_file", "Create or update one local customization file. This never writes base skills. Template customizations must be complete Jinja files under a .j2 path, not JSON variable maps.", map[string]any{
+		tool("upsert_skill_overlay_file", "Create or update one local customization file. Use dry_run first to preview the target and overwrite status. This never writes base skills. Template customizations must be complete Jinja files under a .j2 path, not JSON variable maps.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),
 			"skill_name":     stringProp("Fallback skill name when skill_id is omitted."),
 			"agent":          stringProp("Optional agent-specific customization name."),
@@ -254,12 +266,14 @@ func toolList() []map[string]any {
 			"path":           stringProp("Relative overlay path."),
 			"content":        stringProp("Plain-text file content."),
 			"base64_content": stringProp("Base64-encoded file content."),
-		}, []string{"skill_id", "path"}),
-		tool("delete_skill_overlay_file", "Delete one overlay file. This never deletes base skills.", map[string]any{
+			"dry_run":        boolPropDefault("Preview the target and overwrite status without changing files. Defaults to false for backward compatibility.", false),
+		}, []string{"path"}),
+		tool("delete_skill_overlay_file", "Delete one overlay file. Use dry_run first to confirm the target. This never deletes base skills.", map[string]any{
 			"skill_id":  stringProp("Skill identifier."),
 			"agent":     stringProp("Optional agent-specific overlay name."),
 			"operation": stringProp("Overlay operation: append, root_append, files, replace, template, or patch."),
 			"path":      stringProp("Relative overlay path."),
+			"dry_run":   boolPropDefault("Preview the deletion target without changing files. Defaults to false for backward compatibility.", false),
 		}, []string{"skill_id", "path"}),
 		tool("list_skill_overlays", "List global and agent-specific overlays.", map[string]any{
 			"skill_id": stringProp("Optional skill identifier."),
@@ -270,16 +284,49 @@ func toolList() []map[string]any {
 }
 
 func tool(name string, description string, properties map[string]any, required []string) map[string]any {
+	schema := map[string]any{
+		"type":                 "object",
+		"properties":           properties,
+		"required":             required,
+		"additionalProperties": false,
+	}
+	addToolSchemaConstraints(name, schema)
 	return map[string]any{
 		"name":        name,
 		"description": description,
-		"inputSchema": map[string]any{
-			"type":                 "object",
-			"properties":           properties,
-			"required":             required,
-			"additionalProperties": true,
-		},
+		"inputSchema": schema,
 	}
+}
+
+func addToolSchemaConstraints(name string, schema map[string]any) {
+	switch name {
+	case "upsert_skill_overlay_file":
+		schema["allOf"] = []any{
+			requiredAlternatives("anyOf", "skill_id", "skill_name"),
+			requiredAlternatives("oneOf", "content", "base64_content"),
+		}
+	case "upsert_skill_draft_file":
+		schema["allOf"] = []any{requiredAlternatives("oneOf", "content", "base64_content")}
+	case "delete_skill_draft", "render_skill_draft":
+		schema["allOf"] = []any{requiredAlternatives("anyOf", "draft_id", "skill_id", "skill_name")}
+	case "import_skill_draft_archive":
+		schema["allOf"] = []any{requiredAlternatives("oneOf", "archive_path", "archive_url")}
+	case "import_skill_draft_file":
+		schema["allOf"] = []any{requiredAlternatives("oneOf", "source_path", "source_url")}
+	case "promote_skill_draft":
+		schema["allOf"] = []any{
+			requiredAlternatives("anyOf", "draft_id", "skill_id", "skill_name"),
+			requiredAlternatives("oneOf", "to_path", "to_source"),
+		}
+	}
+}
+
+func requiredAlternatives(keyword string, names ...string) map[string]any {
+	alternatives := make([]any, 0, len(names))
+	for _, name := range names {
+		alternatives = append(alternatives, map[string]any{"required": []string{name}})
+	}
+	return map[string]any{keyword: alternatives}
 }
 
 func stringProp(description string) map[string]any {
@@ -288,6 +335,10 @@ func stringProp(description string) map[string]any {
 
 func boolProp(description string) map[string]any {
 	return map[string]any{"type": "boolean", "description": description}
+}
+
+func boolPropDefault(description string, defaultValue bool) map[string]any {
+	return map[string]any{"type": "boolean", "description": description, "default": defaultValue}
 }
 
 func intProp(description string) map[string]any {
@@ -299,7 +350,15 @@ func arrayProp(description string) map[string]any {
 }
 
 func callTool(cfg config.Config, name string, args map[string]any) (any, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	if err := validateToolArguments(name, args); err != nil {
+		return nil, err
+	}
 	switch name {
+	case "describe_tool":
+		return describeTool(strArg(args, "name"))
 	case "find_skills":
 		return findSkills(cfg, strArg(args, "query"), intArg(args, "limit", 10))
 	case "list_sources":
@@ -482,6 +541,9 @@ func readSkillFile(cfg config.Config, args map[string]any) (any, error) {
 
 func syncSkillsTool(cfg config.Config, args map[string]any) (syncSkillsResult, error) {
 	agent := strArg(args, "agent")
+	if boolArg(args, "dry_run", false) {
+		return previewSyncSkills(cfg, agent)
+	}
 	updated, err := library.UpdateSkills(cfg, nil)
 	if err != nil {
 		return syncSkillsResult{}, err
@@ -492,6 +554,8 @@ func syncSkillsTool(cfg config.Config, args map[string]any) (syncSkillsResult, e
 	}
 	result := syncSkillsResult{
 		Agent:         agent,
+		DryRun:        false,
+		Applied:       true,
 		Updated:       nonNilInstalled(updated),
 		UpdatedCount:  len(updated),
 		Rendered:      nonNilRendered(rendered),
@@ -502,6 +566,76 @@ func syncSkillsTool(cfg config.Config, args map[string]any) (syncSkillsResult, e
 	}
 	result.Warnings = append(result.Warnings, audit.AgentOutputWarningMessages(cfg, agent)...)
 	return result, nil
+}
+
+func previewSyncSkills(cfg config.Config, agent string) (syncSkillsResult, error) {
+	checks, err := library.CheckSkillUpdates(cfg, nil, true)
+	if err != nil {
+		return syncSkillsResult{}, err
+	}
+	installed, err := library.ListInstalled(cfg)
+	if err != nil {
+		return syncSkillsResult{}, err
+	}
+	plannedUpdateCount := 0
+	for _, check := range checks {
+		if check.Changed && check.Error == "" {
+			plannedUpdateCount++
+		}
+	}
+	plannedRenders := plannedSyncRenders(cfg, agent, installed)
+	result := syncSkillsResult{
+		Agent:                agent,
+		DryRun:               true,
+		Applied:              false,
+		Updated:              []library.InstalledSkill{},
+		Rendered:             []render.Result{},
+		PlannedUpdates:       checks,
+		PlannedUpdateCount:   plannedUpdateCount,
+		PlannedRenders:       plannedRenders,
+		PlannedRenderedCount: len(plannedRenders),
+		Warnings:             audit.AgentOutputWarningMessages(cfg, agent),
+	}
+	if len(checks) == 0 && len(plannedRenders) == 0 {
+		result.Warnings = append([]string{"no locked or installed skills were found"}, result.Warnings...)
+	}
+	return result, nil
+}
+
+func plannedSyncRenders(cfg config.Config, agent string, skills []library.Skill) []render.Result {
+	outputs := make([]config.AgentOutput, 0, len(cfg.AgentOutputs))
+	for _, output := range cfg.AgentOutputs {
+		if agent == "" || output.Name == agent {
+			outputs = append(outputs, output)
+		}
+	}
+	sort.Slice(outputs, func(i, j int) bool { return outputs[i].Name < outputs[j].Name })
+	results := make([]render.Result, 0)
+	for _, skill := range skills {
+		if len(outputs) == 0 {
+			agentKey := agent
+			if agentKey == "" {
+				agentKey = "generic"
+			}
+			results = append(results, render.Result{
+				Skill:        skill.StoreName,
+				Agent:        agent,
+				RenderedPath: filepath.Join(cfg.RenderedDir, agentKey, skill.StoreName),
+				Mode:         "preview",
+			})
+			continue
+		}
+		for _, output := range outputs {
+			results = append(results, render.Result{
+				Skill:        skill.StoreName,
+				Agent:        output.Name,
+				RenderedPath: filepath.Join(cfg.RenderedDir, output.Name, skill.StoreName),
+				CopiedTo:     []string{filepath.Join(output.Path, skill.StoreName)},
+				Mode:         "preview",
+			})
+		}
+	}
+	return results
 }
 
 func nonNilInstalled(items []library.InstalledSkill) []library.InstalledSkill {
@@ -558,18 +692,36 @@ func writeOverlay(cfg config.Config, args map[string]any) (any, error) {
 	if skill == "" {
 		skill = library.NormalizeName(strArg(args, "skill_name"))
 	}
-	path, err := overlay.UpsertFile(cfg, overlay.WriteOptions{
+	dryRun := boolArg(args, "dry_run", false)
+	opts := overlay.WriteOptions{
 		Skill:         skill,
 		Agent:         strArg(args, "agent"),
 		Operation:     strArgDefault(args, "operation", "append"),
 		Path:          strArg(args, "path"),
 		Content:       strArg(args, "content"),
 		Base64Content: strArg(args, "base64_content"),
-	})
+		DryRun:        true,
+	}
+	path, err := overlay.UpsertFile(cfg, opts)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"skill_id": skill, "path": path, "updated": true, "base_mutated": false}, nil
+	_, statErr := os.Stat(path)
+	if !dryRun {
+		opts.DryRun = false
+		path, err = overlay.UpsertFile(cfg, opts)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{
+		"skill_id":     skill,
+		"path":         path,
+		"dry_run":      dryRun,
+		"updated":      !dryRun,
+		"overwrite":    statErr == nil,
+		"base_mutated": false,
+	}, nil
 }
 
 func deleteOverlay(cfg config.Config, args map[string]any) (any, error) {
@@ -577,16 +729,18 @@ func deleteOverlay(cfg config.Config, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("overlays apply to base skills; use draft file tools for draft skills")
 	}
 	skill := library.NormalizeName(strArg(args, "skill_id"))
+	dryRun := boolArg(args, "dry_run", false)
 	path, err := overlay.DeleteFile(cfg, overlay.WriteOptions{
 		Skill:     skill,
 		Agent:     strArg(args, "agent"),
 		Operation: strArgDefault(args, "operation", "append"),
 		Path:      strArg(args, "path"),
+		DryRun:    dryRun,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"skill_id": skill, "path": path, "deleted": true, "base_mutated": false}, nil
+	return map[string]any{"skill_id": skill, "path": path, "dry_run": dryRun, "deleted": !dryRun, "base_mutated": false}, nil
 }
 
 func toolResult(value any, isError bool, notices ...[]notice) map[string]any {
@@ -601,6 +755,11 @@ func toolResult(value any, isError bool, notices ...[]notice) map[string]any {
 	result := map[string]any{
 		"content": []map[string]string{{"type": "text", "text": text}},
 		"isError": isError,
+	}
+	if isError {
+		if structured, ok := value.(map[string]any); ok {
+			result["structuredContent"] = structured
+		}
 	}
 	if len(notices) > 0 && len(notices[0]) > 0 {
 		result["notices"] = notices[0]

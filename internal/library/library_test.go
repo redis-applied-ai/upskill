@@ -221,13 +221,16 @@ func TestLocalSourceDiscoveryAndResolution(t *testing.T) {
 		t.Fatalf("skills = %#v", skills)
 	}
 
-	cfg.Sources["local"] = config.Source{Name: "local", Source: sourceRoot, Subpath: "source"}
-	dest, err := ResolveLocalSourceDestination(cfg, "local")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dest != source {
-		t.Fatalf("dest = %s", dest)
+	localSource := config.NormalizeSource(config.Source{Name: "local", Source: sourceRoot, Subpath: "source"})
+	cfg.Sources["local"] = localSource
+	for _, identifier := range []string{"local", localSource.ID, sourceRoot} {
+		dest, err := ResolveLocalSourceDestination(cfg, identifier)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", identifier, err)
+		}
+		if dest != source {
+			t.Fatalf("resolve %q dest = %s", identifier, dest)
+		}
 	}
 	cfg.Sources["local-root"] = config.Source{Name: "local-root", Source: source}
 	rootDest, err := ResolveLocalSourceDestination(cfg, "local-root")

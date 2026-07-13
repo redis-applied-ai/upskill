@@ -1122,32 +1122,33 @@ Protocol requirements:
 Tools:
 
 ```text
-find_skills(query?, limit?, agent?)
+describe_tool(name)
+find_skills(query?, limit?)
 list_sources()
-find_source_skills(source, query?, limit?, ref?, subpath?)
-check_skill_updates(skill_id?, include_diff=false)
-read_skill(skill_id, agent?, rendered=true, include_files=true, file_limit=100)
-list_skill_files(skill_id, agent?, rendered=true, path_prefix?, recursive=true, include_hashes=false, limit=500)
-read_skill_file(skill_id, path, agent?, rendered=true, max_bytes=200000)
-render_skill(skill_id, agent?, copy=false, base_only=false)
-sync_skills(agent?)
-upsert_skill_overlay_file(skill_id, path, content?, base64_content?, agent?, operation="append")
-delete_skill_overlay_file(skill_id, path, agent?, operation="append")
+find_source_skills(source, query?, limit?, ref?, subpath?, skill?)
+check_skill_updates(skill_id?, skill_ids?, include_diff=false)
+read_skill(skill_id, agent?, rendered=true, base_only=false, include_files=true, file_limit=100)
+list_skill_files(skill_id, agent?, rendered=true, base_only=false, path_prefix?, recursive=true, include_hashes=false, limit=500)
+read_skill_file(skill_id, path, agent?, rendered=true, base_only=false, max_bytes=200000)
+render_skill(skill_id, agent?, copy=false, base_only=false, apply_overlays=false)
+sync_skills(agent?, dry_run=false)
+upsert_skill_overlay_file(skill_id? | skill_name?, path, content? | base64_content?, agent?, operation="append", dry_run=false)
+delete_skill_overlay_file(skill_id, path, agent?, operation="append", dry_run=false)
 list_skill_overlays(skill_id?, agent?)
 create_skill_draft(skill_name, from_skill?, from_rendered=false, template?, allow_existing=false, replace_existing=false)
 list_skill_drafts(query?, limit?)
 read_skill_draft(draft_id, include_files=true, file_limit=100)
 list_skill_draft_files(draft_id, path_prefix?, recursive=true, include_hashes=false, limit=500)
 read_skill_draft_file(draft_id, path, max_bytes=200000)
-upsert_skill_draft_file(draft_id, path, content?, base64_content?)
-delete_skill_draft_file(draft_id, path)
-delete_skill_draft(draft_id? | skill_name?)
-import_skill_draft_archive(draft_id, archive_path?, archive_url?, sha256?, strip_components?, inspect=false)
-import_skill_draft_file(draft_id, source_path?, source_url?, path, sha256?)
-render_skill_draft(draft_id, agent?, copy=false, apply_overlays=false)
+upsert_skill_draft_file(draft_id, path, content?, base64_content?, dry_run=false)
+delete_skill_draft_file(draft_id, path, dry_run=false)
+delete_skill_draft(draft_id? | skill_id? | skill_name?, dry_run=false)
+import_skill_draft_archive(draft_id, archive_path?, archive_url?, sha256?, strip_components?, dry_run=false, inspect=false)
+import_skill_draft_file(draft_id, source_path?, source_url?, path, sha256?, dry_run=false, inspect=false)
+render_skill_draft(draft_id? | skill_id? | skill_name?, agent?, copy=false, apply_overlays=false)
 diff_skill_draft(draft_id)
 rebase_skill_draft(draft_id)
-promote_skill_draft(draft_id, to_path? | to_source?, dry_run=true)
+promote_skill_draft(draft_id? | skill_id? | skill_name?, to_path? | to_source?, dry_run=true)
 ```
 
 Read semantics:
@@ -1160,7 +1161,8 @@ Read semantics:
 - `list_sources` returns configured sources and their default update policy.
 - `find_source_skills` performs live source inspection and returns current
   source catalog entries. It does not install skills, update the lock file, or
-  render output.
+  render output. Configured sources resolve by display name, source ID, or
+  configured path.
 - `check_skill_updates` returns installed-skill update status from recorded
   sources. It is read-only.
 - `rendered=true` reads the effective rendered skill and applies overlays first.
@@ -1197,7 +1199,8 @@ Write semantics:
 - Draft import tools may read local paths only from configured `import_dirs`.
 - Draft promotion tools default to `dry_run=true` for MCP clients. A client must
   explicitly pass `dry_run=false` to write into a local checkout or configured
-  local source.
+  local source. The `to_source` value accepts the configured source name, ID,
+  or path.
 - MCP draft promotion rejects destinations inside managed `store/`,
   `rendered/`, `overlays/`, `drafts/`, `imports/`, or configured import
   directories.
@@ -1205,6 +1208,11 @@ Write semantics:
   `updated_count`, `rendered`, `rendered_count`, and warnings when nothing was
   updated or rendered. It also includes `notices` for preflight checks and
   automatic updates.
+- `sync_skills(dry_run=true)` returns planned source updates and render/copy
+  targets without changing the store, rendered cache, or agent output paths.
+- Initialization instructions are generated from the live registry.
+  `describe_tool` returns the same authoritative `inputSchema`, and tool-call
+  errors include accepted parameter names, the schema, and unknown-key hints.
 - Template overlay writes require Jinja template content in a `.j2` file. JSON
   variable-map overlays are rejected; variable-map template overlays are not in
   this version.

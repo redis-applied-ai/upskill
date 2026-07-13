@@ -52,6 +52,7 @@ type ImportedFile struct {
 
 type ImportResult struct {
 	DraftID  string         `json:"draft_id"`
+	DryRun   bool           `json:"dry_run"`
 	Imported bool           `json:"imported"`
 	Source   string         `json:"source"`
 	Files    []ImportedFile `json:"files"`
@@ -120,7 +121,7 @@ func importArchivePath(item Draft, path string, opts ImportOptions) (ImportResul
 	if err != nil {
 		return ImportResult{}, err
 	}
-	result := ImportResult{DraftID: item.ID, Imported: !opts.Inspect, Source: path, Files: files, Warnings: warnings}
+	result := ImportResult{DraftID: item.ID, DryRun: opts.Inspect, Imported: !opts.Inspect, Source: path, Files: files, Warnings: warnings}
 	if opts.Inspect {
 		return result, nil
 	}
@@ -164,7 +165,7 @@ func importSingleFile(item Draft, path string, opts ImportOptions) (ImportResult
 	}
 	_, statErr := os.Stat(target)
 	file := ImportedFile{Path: filepath.ToSlash(filepath.Clean(opts.DestPath)), Size: int64(len(data)), Overwrite: statErr == nil}
-	result := ImportResult{DraftID: item.ID, Imported: !opts.Inspect, Source: path, Files: []ImportedFile{file}}
+	result := ImportResult{DraftID: item.ID, DryRun: opts.Inspect, Imported: !opts.Inspect, Source: path, Files: []ImportedFile{file}}
 	if opts.Inspect {
 		return result, nil
 	}

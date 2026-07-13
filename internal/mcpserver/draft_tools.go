@@ -54,40 +54,46 @@ func draftToolList() []map[string]any {
 			"path":      stringProp("Relative file path."),
 			"max_bytes": intProp("Maximum bytes to return."),
 		}, []string{"draft_id", "path"}),
-		tool("upsert_skill_draft_file", "Create or update one draft file. This never writes base skills.", map[string]any{
+		tool("upsert_skill_draft_file", "Create or update one draft file. Use dry_run first to preview the target and overwrite status. This never writes base skills.", map[string]any{
 			"draft_id":       stringProp("Draft identifier, for example draft:redis."),
 			"path":           stringProp("Relative file path."),
 			"content":        stringProp("Plain-text file content."),
 			"base64_content": stringProp("Base64-encoded file content."),
+			"dry_run":        boolPropDefault("Preview the target and overwrite status without changing files. Defaults to false for backward compatibility.", false),
 		}, []string{"draft_id", "path"}),
-		tool("delete_skill_draft_file", "Delete one draft file. This never deletes base skills or draft metadata.", map[string]any{
+		tool("delete_skill_draft_file", "Delete one draft file. Use dry_run first to confirm the target. This never deletes base skills or draft metadata.", map[string]any{
 			"draft_id": stringProp("Draft identifier, for example draft:redis."),
 			"path":     stringProp("Relative file path."),
+			"dry_run":  boolPropDefault("Preview the deletion target without changing files. Defaults to false for backward compatibility.", false),
 		}, []string{"draft_id", "path"}),
-		tool("delete_skill_draft", "Delete one mutable draft bundle. This never deletes base skills.", map[string]any{
+		tool("delete_skill_draft", "Delete one mutable draft bundle. Use dry_run first to confirm the bundle path. This never deletes base skills.", map[string]any{
 			"draft_id":   stringProp("Draft identifier, for example draft:redis."),
 			"skill_id":   stringProp("Alias for draft_id."),
 			"skill_name": stringProp("Alias for draft name."),
+			"dry_run":    boolPropDefault("Preview the draft bundle deletion without changing files. Defaults to false for backward compatibility.", false),
 		}, []string{}),
-		tool("import_skill_draft_archive", "Import a zip or tar.gz skill bundle into a draft from an allowed local path or URL.", map[string]any{
+		tool("import_skill_draft_archive", "Import a zip or tar.gz skill bundle into a draft from an allowed local path or URL. Use dry_run first to preview files and overwrites.", map[string]any{
 			"draft_id":         stringProp("Draft identifier, for example draft:redis."),
 			"archive_path":     stringProp("Local archive path. MCP calls must use configured import directories."),
 			"archive_url":      stringProp("Archive URL."),
 			"sha256":           stringProp("Expected sha256 checksum, with optional sha256: prefix."),
 			"strip_components": intProp("Number of leading path components to strip."),
-			"inspect":          boolProp("Preview the import without writing files."),
+			"dry_run":          boolPropDefault("Preview the import without writing files. Defaults to false for backward compatibility.", false),
+			"inspect":          boolProp("Backward-compatible alias for dry_run."),
 		}, []string{"draft_id"}),
-		tool("import_skill_draft_file", "Import one resource file into a draft from an allowed local path or URL.", map[string]any{
+		tool("import_skill_draft_file", "Import one resource file into a draft from an allowed local path or URL. Use dry_run first to preview the target and overwrite status.", map[string]any{
 			"draft_id":    stringProp("Draft identifier, for example draft:redis."),
 			"source_path": stringProp("Local source file path. MCP calls must use configured import directories."),
 			"source_url":  stringProp("Source URL."),
 			"path":        stringProp("Draft-relative destination path."),
 			"sha256":      stringProp("Expected sha256 checksum, with optional sha256: prefix."),
-			"inspect":     boolProp("Preview the import without writing files."),
+			"dry_run":     boolPropDefault("Preview the import without writing files. Defaults to false for backward compatibility.", false),
+			"inspect":     boolProp("Backward-compatible alias for dry_run."),
 		}, []string{"draft_id", "path"}),
 		tool("render_skill_draft", "Render one draft skill without mutating base skills.", map[string]any{
 			"draft_id":       stringProp("Draft identifier, for example draft:redis."),
 			"skill_id":       stringProp("Alias for draft_id."),
+			"skill_name":     stringProp("Alias for draft name."),
 			"agent":          stringProp("Optional agent name for overlay and configured output selection."),
 			"copy":           boolProp("Copy rendered output to configured agent output directories."),
 			"apply_overlays": boolProp("Apply global and agent overlays while rendering this draft."),
@@ -98,13 +104,13 @@ func draftToolList() []map[string]any {
 		tool("rebase_skill_draft", "Check whether a version draft can be rebased onto the current base skill.", map[string]any{
 			"draft_id": stringProp("Draft identifier, for example draft:redis."),
 		}, []string{"draft_id"}),
-		tool("promote_skill_draft", "Copy a draft into a local upstream checkout or named local source. Dry-run is true by default. Managed upskill store, rendered, overlay, draft, and import directories are rejected.", map[string]any{
+		tool("promote_skill_draft", "Copy a draft into exactly one local upstream checkout or configured local source. Dry-run is true by default. Managed upskill store, rendered, overlay, draft, and import directories are rejected.", map[string]any{
 			"draft_id":   stringProp("Draft identifier, for example draft:redis."),
 			"skill_id":   stringProp("Alias for draft_id."),
 			"skill_name": stringProp("Alias for draft name."),
 			"to_path":    stringProp("Local upstream checkout or skill directory destination."),
-			"to_source":  stringProp("Configured local source name to promote into."),
-			"dry_run":    boolProp("Preview planned writes without changing files. Defaults to true."),
+			"to_source":  stringProp("Configured local source name, ID, or configured path to promote into."),
+			"dry_run":    boolPropDefault("Preview planned writes without changing files. Defaults to true.", true),
 		}, []string{}),
 	}
 }
@@ -286,13 +292,25 @@ func upsertSkillDraftFile(cfg config.Config, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return nil, err
+	_, statErr := os.Stat(target)
+	dryRun := boolArg(args, "dry_run", false)
+	if !dryRun {
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			return nil, err
+		}
 	}
-	if err := os.WriteFile(target, data, 0o644); err != nil {
-		return nil, err
-	}
-	return map[string]any{"draft_id": item.ID, "path": filepath.ToSlash(filepath.Clean(path)), "updated": true, "base_mutated": false}, nil
+	return map[string]any{
+		"draft_id":     item.ID,
+		"path":         filepath.ToSlash(filepath.Clean(path)),
+		"target":       target,
+		"dry_run":      dryRun,
+		"updated":      !dryRun,
+		"overwrite":    statErr == nil,
+		"base_mutated": false,
+	}, nil
 }
 
 func deleteSkillDraftFile(cfg config.Config, args map[string]any) (any, error) {
@@ -308,10 +326,16 @@ func deleteSkillDraftFile(cfg config.Config, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Remove(target); err != nil {
+	if _, err := os.Stat(target); err != nil {
 		return nil, err
 	}
-	return map[string]any{"draft_id": item.ID, "path": filepath.ToSlash(filepath.Clean(path)), "deleted": true, "base_mutated": false}, nil
+	dryRun := boolArg(args, "dry_run", false)
+	if !dryRun {
+		if err := os.Remove(target); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"draft_id": item.ID, "path": filepath.ToSlash(filepath.Clean(path)), "target": target, "dry_run": dryRun, "deleted": !dryRun, "base_mutated": false}, nil
 }
 
 func deleteSkillDraft(cfg config.Config, args map[string]any) (any, error) {
@@ -319,10 +343,13 @@ func deleteSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := mcpDraftRemove(cfg, item.StoreName); err != nil {
-		return nil, err
+	dryRun := boolArg(args, "dry_run", false)
+	if !dryRun {
+		if err := mcpDraftRemove(cfg, item.StoreName); err != nil {
+			return nil, err
+		}
 	}
-	return map[string]any{"draft_id": item.ID, "deleted": true, "base_mutated": false}, nil
+	return map[string]any{"draft_id": item.ID, "path": item.Path, "dry_run": dryRun, "deleted": !dryRun, "base_mutated": false}, nil
 }
 
 func importSkillDraftArchive(cfg config.Config, args map[string]any) (any, error) {
@@ -335,7 +362,7 @@ func importSkillDraftArchive(cfg config.Config, args map[string]any) (any, error
 		ArchiveURL:        strArg(args, "archive_url"),
 		SHA256:            strArg(args, "sha256"),
 		StripComponents:   intArg(args, "strip_components", 0),
-		Inspect:           boolArg(args, "inspect", false),
+		Inspect:           boolArg(args, "dry_run", boolArg(args, "inspect", false)),
 		EnforceImportDirs: true,
 	})
 }
@@ -350,7 +377,7 @@ func importSkillDraftFile(cfg config.Config, args map[string]any) (any, error) {
 		FileURL:           strArg(args, "source_url"),
 		DestPath:          strArg(args, "path"),
 		SHA256:            strArg(args, "sha256"),
-		Inspect:           boolArg(args, "inspect", false),
+		Inspect:           boolArg(args, "dry_run", boolArg(args, "inspect", false)),
 		EnforceImportDirs: true,
 	})
 }
@@ -390,9 +417,15 @@ func promoteSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 	}
 	toSource := strArg(args, "to_source")
 	toPath := strArg(args, "to_path")
+	resolvedSource := config.Source{}
 	if toSource != "" {
 		if toPath != "" {
 			return nil, fmt.Errorf("use only one of to_path or to_source")
+		}
+		var ok bool
+		resolvedSource, ok = library.ResolveNamedSource(cfg, toSource)
+		if !ok {
+			return nil, fmt.Errorf("source not found: %s", toSource)
 		}
 		toPath, err = library.ResolveLocalSourceDestination(cfg, toSource)
 		if err != nil {
@@ -405,9 +438,13 @@ func promoteSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 	if err := rejectManagedPromotionDestination(cfg, toPath); err != nil {
 		return nil, err
 	}
+	resolvedSourceName := ""
+	if resolvedSource.Source != "" {
+		resolvedSourceName = config.SourceDisplayName(resolvedSource)
+	}
 	return draft.Promote(cfg, item.StoreName, draft.PromoteOptions{
 		ToPath:   toPath,
-		ToSource: toSource,
+		ToSource: resolvedSourceName,
 		DryRun:   boolArg(args, "dry_run", true),
 	})
 }

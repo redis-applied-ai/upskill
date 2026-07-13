@@ -137,6 +137,76 @@ func TestHandleProtocolMethods(t *testing.T) {
 	}
 }
 
+func TestMCPRegistryDescriptionAndGeneratedInstructions(t *testing.T) {
+	described, err := callTool(testConfig(t), "describe_tool", map[string]any{"name": "promote_skill_draft"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := mustJSON(described)
+	for _, want := range []string{`"inputSchema"`, `"accepted_parameter_names"`, `"to_source"`, `"additionalProperties":false`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("describe_tool missing %q: %s", want, text)
+		}
+	}
+
+	instructions := serverInstructions()
+	for _, definition := range toolList() {
+		name := definition["name"].(string)
+		if !strings.Contains(instructions, "`"+name+"`") {
+			t.Fatalf("generated instructions missing registered tool %s", name)
+		}
+	}
+	if strings.Contains(instructions, "`upsert_skill_file`") {
+		t.Fatalf("generated instructions contain unregistered tool: %s", instructions)
+	}
+	for _, want := range []string{"Preview convention", "`sync_skills`", "`dry_run`"} {
+		if !strings.Contains(instructions, want) {
+			t.Fatalf("generated instructions missing %q: %s", want, instructions)
+		}
+	}
+
+	initialized := handle(testConfig(t), request{ID: json.RawMessage(`1`), Method: "initialize"})
+	result := initialized.Result.(map[string]any)
+	if result["instructions"] != instructions {
+		t.Fatal("initialize instructions are not registry-generated")
+	}
+}
+
+func TestMCPToolErrorsIncludeSchemaAndUnknownKeySuggestion(t *testing.T) {
+	cfg := testConfig(t)
+	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := json.Marshal(callParams{Name: "promote_skill_draft", Arguments: map[string]any{
+		"draft_id":    "draft:redis",
+		"destination": "Obsidian",
+	}})
+	resp := handle(cfg, request{ID: json.RawMessage(`1`), Method: "tools/call", Params: params})
+	result := resp.Result.(map[string]any)
+	structured := result["structuredContent"].(map[string]any)
+	if structured["error"] != "invalid_tool_arguments" ||
+		structured["message"] != `unknown parameter "destination"; did you mean "to_source"?` {
+		t.Fatalf("unknown parameter payload = %#v", structured)
+	}
+	if structured["did_you_mean"].(map[string]string)["destination"] != "to_source" ||
+		!strings.Contains(mustJSON(structured["inputSchema"]), "to_source") {
+		t.Fatalf("unknown parameter payload = %#v", structured)
+	}
+
+	params, _ = json.Marshal(callParams{Name: "promote_skill_draft", Arguments: map[string]any{
+		"draft_id": "draft:redis",
+	}})
+	resp = handle(cfg, request{ID: json.RawMessage(`2`), Method: "tools/call", Params: params})
+	result = resp.Result.(map[string]any)
+	structured = result["structuredContent"].(map[string]any)
+	if structured["error"] != "invalid_tool_arguments" ||
+		structured["message"] != `exactly one of "to_path" or "to_source" is required` ||
+		!strings.Contains(mustJSON(structured["accepted_parameter_names"]), "to_source") ||
+		!strings.Contains(mustJSON(structured["inputSchema"]), "to_path") {
+		t.Fatalf("missing destination payload = %#v", structured)
+	}
+}
+
 func TestMCPToolResultIncludesUpdateNotices(t *testing.T) {
 	cfg := testConfig(t)
 	source := filepath.Join(cfg.Home, "notice-source")
@@ -214,6 +284,41 @@ func TestMCPListSources(t *testing.T) {
 		rows[0].Subpath != "skills" ||
 		rows[0].DefaultUpdatePolicy != config.UpdatePolicyAuto {
 		t.Fatalf("source row = %#v", rows[0])
+	}
+}
+
+func TestMCPSourceIdentifiersResolveByNameIDAndPath(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "obsidian-skills")
+	writeFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nSource.\n")
+	source := config.NormalizeSource(config.Source{Name: "Obsidian", Source: sourceRoot})
+	cfg.Sources[config.SourceKey(source)] = source
+
+	for _, identifier := range []string{"Obsidian", source.ID, sourceRoot} {
+		found, err := callTool(cfg, "find_source_skills", map[string]any{"source": identifier})
+		if err != nil {
+			t.Fatalf("find source by %q: %v", identifier, err)
+		}
+		payload := found.(map[string]any)
+		if payload["total"] != 1 {
+			t.Fatalf("find source by %q = %#v", identifier, payload)
+		}
+	}
+
+	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := callTool(cfg, "promote_skill_draft", map[string]any{
+		"draft_id":  "draft:redis",
+		"to_source": source.ID,
+		"dry_run":   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := promoted.(draft.PromoteResult)
+	if payload.Source != "Obsidian" || payload.Destination != filepath.Join(sourceRoot, "redis") || !payload.DryRun {
+		t.Fatalf("promotion source resolution = %#v", payload)
 	}
 }
 
@@ -415,6 +520,117 @@ func TestMCPSyncWarnsAboutUnmanagedAgentOutputSkill(t *testing.T) {
 	}
 }
 
+func TestMCPSyncDryRunPreviewsWithoutWriting(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "sync-preview-source")
+	writeFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	if _, err := library.InstallSource(cfg, sourceRoot, library.InstallOptions{SkillFilter: "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n")
+
+	previewed, err := callTool(cfg, "sync_skills", map[string]any{"agent": "codex", "dry_run": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := previewed.(syncSkillsResult)
+	if !preview.DryRun || preview.Applied || preview.PlannedUpdateCount != 1 || preview.PlannedRenderedCount != 1 {
+		t.Fatalf("sync preview = %#v", preview)
+	}
+	if strings.Contains(readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md")), "New.") {
+		t.Fatal("sync preview updated the installed skill")
+	}
+	if _, err := os.Stat(filepath.Join(cfg.AgentOutputs[0].Path, "redis", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("sync preview copied agent output: %v", err)
+	}
+
+	applied, err := callTool(cfg, "sync_skills", map[string]any{"agent": "codex", "dry_run": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyResult := applied.(syncSkillsResult)
+	if applyResult.DryRun || !applyResult.Applied || applyResult.UpdatedCount != 1 || applyResult.RenderedCount != 1 {
+		t.Fatalf("sync apply = %#v", applyResult)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md")), "New.") {
+		t.Fatal("sync apply did not update the installed skill")
+	}
+}
+
+func TestMCPMutableFileDryRunsDoNotWriteOrDelete(t *testing.T) {
+	cfg := testConfig(t)
+
+	overlayPreview, err := callTool(cfg, "upsert_skill_overlay_file", map[string]any{
+		"skill_id": "redis",
+		"path":     "SKILL.md",
+		"content":  "Overlay.\n",
+		"dry_run":  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlayPayload := overlayPreview.(map[string]any)
+	if overlayPayload["updated"] != false || overlayPayload["dry_run"] != true {
+		t.Fatalf("overlay preview = %#v", overlayPayload)
+	}
+	if _, err := os.Stat(overlayPayload["path"].(string)); !os.IsNotExist(err) {
+		t.Fatalf("overlay preview wrote target: %v", err)
+	}
+	if _, err := callTool(cfg, "upsert_skill_overlay_file", map[string]any{
+		"skill_id": "redis",
+		"path":     "SKILL.md",
+		"content":  "Overlay.\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	overlayDelete, err := callTool(cfg, "delete_skill_overlay_file", map[string]any{
+		"skill_id": "redis",
+		"path":     "SKILL.md",
+		"dry_run":  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletePayload := overlayDelete.(map[string]any)
+	if deletePayload["deleted"] != false {
+		t.Fatalf("overlay delete preview = %#v", deletePayload)
+	}
+	if _, err := os.Stat(deletePayload["path"].(string)); err != nil {
+		t.Fatalf("overlay delete preview removed target: %v", err)
+	}
+
+	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	draftPreview, err := callTool(cfg, "upsert_skill_draft_file", map[string]any{
+		"draft_id": "draft:redis",
+		"path":     "references/preview.md",
+		"content":  "Preview.\n",
+		"dry_run":  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draftPayload := draftPreview.(map[string]any)
+	if draftPayload["updated"] != false || draftPayload["dry_run"] != true {
+		t.Fatalf("draft file preview = %#v", draftPayload)
+	}
+	if _, err := os.Stat(draftPayload["target"].(string)); !os.IsNotExist(err) {
+		t.Fatalf("draft file preview wrote target: %v", err)
+	}
+	draftDelete, err := callTool(cfg, "delete_skill_draft", map[string]any{
+		"draft_id": "draft:redis",
+		"dry_run":  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draftDeletePayload := draftDelete.(map[string]any)
+	if draftDeletePayload["deleted"] != false || !draft.Exists(cfg, "redis") {
+		t.Fatalf("draft delete preview = %#v", draftDeletePayload)
+	}
+}
+
 func TestMCPDraftWorkflow(t *testing.T) {
 	cfg := testConfig(t)
 	created, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"})
@@ -518,12 +734,12 @@ func TestMCPDraftWorkflow(t *testing.T) {
 	inspected, err := callTool(cfg, "import_skill_draft_archive", map[string]any{
 		"draft_id":     "draft:redis",
 		"archive_path": archive,
-		"inspect":      true,
+		"dry_run":      true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(mustJSON(inspected), `"imported":false`) {
+	if !strings.Contains(mustJSON(inspected), `"dry_run":true`) || !strings.Contains(mustJSON(inspected), `"imported":false`) {
 		t.Fatalf("inspected = %#v", inspected)
 	}
 	if _, err := callTool(cfg, "import_skill_draft_archive", map[string]any{"draft_id": "draft:redis", "archive_path": archive}); err != nil {

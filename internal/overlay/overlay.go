@@ -128,6 +128,7 @@ type WriteOptions struct {
 	Path          string
 	Content       string
 	Base64Content string
+	DryRun        bool
 }
 
 func UpsertFile(cfg config.Config, opts WriteOptions) (string, error) {
@@ -144,6 +145,9 @@ func UpsertFile(cfg config.Config, opts WriteOptions) (string, error) {
 	}
 	if opts.Operation == "template" && looksLikeJSON(content) {
 		return "", fmt.Errorf("template overlays must contain Jinja template content in a .j2 file; JSON variable maps are not supported")
+	}
+	if opts.DryRun {
+		return target, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return "", err
@@ -176,6 +180,12 @@ func DeleteFile(cfg config.Config, opts WriteOptions) (string, error) {
 	target, err := overlayOperationPath(cfg, opts)
 	if err != nil {
 		return "", err
+	}
+	if opts.DryRun {
+		if _, err := os.Stat(target); err != nil {
+			return "", err
+		}
+		return target, nil
 	}
 	if err := os.Remove(target); err != nil {
 		return "", err
