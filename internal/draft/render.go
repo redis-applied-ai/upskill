@@ -64,6 +64,15 @@ type PromoteResult struct {
 	NextSteps   []string       `json:"next_steps,omitempty"`
 }
 
+type PromoteApplyError struct {
+	Result PromoteResult
+	Err    error
+}
+
+func (e PromoteApplyError) Error() string      { return e.Err.Error() }
+func (e PromoteApplyError) Unwrap() error      { return e.Err }
+func (e PromoteApplyError) PartialResult() any { return e.Result }
+
 type draftMarker struct {
 	SchemaVersion int    `json:"schema_version"`
 	Skill         string `json:"skill"`
@@ -201,12 +210,12 @@ func Promote(cfg config.Config, name string, opts PromoteOptions) (PromoteResult
 		return result, nil
 	}
 	if err := osRemoveAll(dest); err != nil {
-		return PromoteResult{}, err
+		return result, PromoteApplyError{Result: result, Err: err}
 	}
 	if err := fsCopyDir(item.Path, dest, func(rel string, _ os.DirEntry) bool {
 		return rel == MetadataFile
 	}); err != nil {
-		return PromoteResult{}, err
+		return result, PromoteApplyError{Result: result, Err: err}
 	}
 	return result, nil
 }

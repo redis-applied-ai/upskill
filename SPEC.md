@@ -5,6 +5,11 @@ with `README.md` and `docs/getting-started.md` when learning how to use the
 project. The staged implementation notes near the end are historical planning
 context unless a task explicitly says otherwise.
 
+Focused feature specs:
+
+- [MCP tool discovery, validation, and safe mutation](docs/mcp-tool-discovery-validation-spec.md)
+- [Source policy workflows](docs/source-policy-workflows-spec.md)
+
 ## Purpose
 
 `upskill` is a standalone Go CLI and stdio MCP server for agent skill
@@ -1122,6 +1127,7 @@ Protocol requirements:
 Tools:
 
 ```text
+describe_tool(name)
 find_skills(query?, limit?, agent?)
 list_sources()
 find_source_skills(source, query?, limit?, ref?, subpath?)
@@ -1130,24 +1136,25 @@ read_skill(skill_id, agent?, rendered=true, include_files=true, file_limit=100)
 list_skill_files(skill_id, agent?, rendered=true, path_prefix?, recursive=true, include_hashes=false, limit=500)
 read_skill_file(skill_id, path, agent?, rendered=true, max_bytes=200000)
 render_skill(skill_id, agent?, copy=false, base_only=false)
-sync_skills(agent?)
-upsert_skill_overlay_file(skill_id, path, content?, base64_content?, agent?, operation="append")
-delete_skill_overlay_file(skill_id, path, agent?, operation="append")
+sync_skills(agent?, dry_run=false)
+upsert_skill_overlay_file(skill_id, path, content?, base64_content?, agent?, operation="append", dry_run=false)
+delete_skill_overlay_file(skill_id, path, agent?, operation="append", dry_run=false)
 list_skill_overlays(skill_id?, agent?)
 create_skill_draft(skill_name, from_skill?, from_rendered=false, template?, allow_existing=false, replace_existing=false)
 list_skill_drafts(query?, limit?)
 read_skill_draft(draft_id, include_files=true, file_limit=100)
 list_skill_draft_files(draft_id, path_prefix?, recursive=true, include_hashes=false, limit=500)
 read_skill_draft_file(draft_id, path, max_bytes=200000)
-upsert_skill_draft_file(draft_id, path, content?, base64_content?)
-delete_skill_draft_file(draft_id, path)
-delete_skill_draft(draft_id? | skill_name?)
-import_skill_draft_archive(draft_id, archive_path?, archive_url?, sha256?, strip_components?, inspect=false)
-import_skill_draft_file(draft_id, source_path?, source_url?, path, sha256?)
+upsert_skill_draft_file(draft_id, path, content?, base64_content?, dry_run=false)
+delete_skill_draft_file(draft_id, path, dry_run=false)
+delete_skill_draft(draft_id? | skill_name?, dry_run=false)
+import_skill_draft_archive(draft_id, archive_path?, archive_url?, sha256?, strip_components?, dry_run=false, inspect=false)
+import_skill_draft_file(draft_id, source_path?, source_url?, path, sha256?, dry_run=false, inspect=false)
 render_skill_draft(draft_id, agent?, copy=false, apply_overlays=false)
 diff_skill_draft(draft_id)
 rebase_skill_draft(draft_id)
 promote_skill_draft(draft_id, to_path? | to_source?, dry_run=true)
+upsert_source_skill_file(source, skill_id? | skill_name?, path="SKILL.md", content? | base64_content?, dry_run=true, confirm_source_write=false, reason?)
 ```
 
 Read semantics:
@@ -1205,6 +1212,11 @@ Write semantics:
   `updated_count`, `rendered`, `rendered_count`, and warnings when nothing was
   updated or rendered. It also includes `notices` for preflight checks and
   automatic updates.
+- `sync_skills(dry_run=true)` returns planned source updates and render/copy
+  targets without changing the store, rendered cache, or agent output paths.
+- Initialization instructions are generated from the live registry.
+  `describe_tool` returns the same authoritative `inputSchema`, and tool-call
+  errors include accepted parameter names, the schema, and unknown-key hints.
 - Template overlay writes require Jinja template content in a `.j2` file. JSON
   variable-map overlays are rejected; variable-map template overlays are not in
   this version.

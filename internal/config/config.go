@@ -27,12 +27,17 @@ type AgentOutput struct {
 }
 
 type Source struct {
-	ID                  string `json:"id,omitempty"`
-	Name                string `json:"name,omitempty"`
-	Source              string `json:"source"`
-	Ref                 string `json:"ref,omitempty"`
-	Subpath             string `json:"subpath,omitempty"`
-	DefaultUpdatePolicy string `json:"default_update_policy,omitempty"`
+	ID                  string   `json:"id,omitempty"`
+	Name                string   `json:"name,omitempty"`
+	Source              string   `json:"source"`
+	Ref                 string   `json:"ref,omitempty"`
+	Subpath             string   `json:"subpath,omitempty"`
+	DefaultUpdatePolicy string   `json:"default_update_policy,omitempty"`
+	Scope               string   `json:"scope,omitempty"`
+	WritePolicy         string   `json:"write_policy,omitempty"`
+	Authors             []string `json:"authors,omitempty"`
+	Owners              []string `json:"owners,omitempty"`
+	LLMGuidance         string   `json:"llm_guidance,omitempty"`
 }
 
 type Config struct {
@@ -324,6 +329,9 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 				source.Name = name
 			}
 			source = NormalizeSource(source)
+			if err := ValidateSourcePolicyFields(source); err != nil {
+				return nil, err
+			}
 			sources[SourceKey(source)] = source
 		}
 		return sources, nil
@@ -337,6 +345,9 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 			}
 			item := Source{Name: name, Source: source}
 			item = NormalizeSource(item)
+			if err := ValidateSourcePolicyFields(item); err != nil {
+				return nil, err
+			}
 			sources[SourceKey(item)] = item
 		}
 		return sources, nil
@@ -351,6 +362,9 @@ func parseSources(data json.RawMessage) (map[string]Source, error) {
 			continue
 		}
 		source = NormalizeSource(source)
+		if err := ValidateSourcePolicyFields(source); err != nil {
+			return nil, err
+		}
 		sources[SourceKey(source)] = source
 	}
 	return sources, nil
@@ -361,6 +375,8 @@ func NormalizeSource(source Source) Source {
 		source.ID = SourceID(source)
 	}
 	source.DefaultUpdatePolicy = NormalizeUpdatePolicy(source.DefaultUpdatePolicy)
+	source.Scope = NormalizeSourceScope(source.Scope)
+	source.WritePolicy = NormalizeWritePolicy(source.WritePolicy)
 	return source
 }
 

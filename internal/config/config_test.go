@@ -345,6 +345,150 @@ func TestSourcesParsingAndSaving(t *testing.T) {
 	makeDirAll = oldMakeDirAll
 }
 
+func TestSourcesParsingPolicyFields(t *testing.T) {
+	object, err := parseSources(json.RawMessage(`{
+		"team": {
+			"source": "owner/repo",
+			"scope": "team",
+			"write_policy": "overlay_preferred",
+			"authors": ["Redis Applied AI"],
+			"owners": ["redis"],
+			"llm_guidance": "Ask before changing source files."
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := object["team"]
+	if source.Scope != SourceScopeTeam ||
+		source.WritePolicy != WritePolicyOverlayPreferred ||
+		len(source.Authors) != 1 ||
+		source.Authors[0] != "Redis Applied AI" ||
+		len(source.Owners) != 1 ||
+		source.Owners[0] != "redis" ||
+		source.LLMGuidance == "" {
+		t.Fatalf("policy source = %#v", source)
+	}
+
+	list, err := parseSources(json.RawMessage(`[{
+		"name": "personal",
+		"source": "./skills",
+		"scope": "personal",
+		"write_policy": "direct_allowed"
+	}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list["personal"].Scope != SourceScopePersonal || list["personal"].WritePolicy != WritePolicyDirectAllowed {
+		t.Fatalf("list policy source = %#v", list["personal"])
+	}
+}
+
+func TestSourcePolicyValidation(t *testing.T) {
+	if _, err := parseSources(json.RawMessage(`[{"name":"bad","source":"owner/repo","scope":"global"}]`)); err == nil {
+		t.Fatal("invalid scope unexpectedly parsed")
+	}
+	if _, err := parseSources(json.RawMessage(`[{"name":"bad","source":"owner/repo","write_policy":"merge_to_main"}]`)); err == nil {
+		t.Fatal("invalid write policy unexpectedly parsed")
+	}
+	if !ValidSourceScope(SourceScopeTeam) || !ValidWritePolicy(WritePolicyDraftPromote) {
+		t.Fatal("valid source policy values rejected")
+	}
+}
+
+func TestSourcePolicyDefaultsAndMerge(t *testing.T) {
+	localDefault := ResolveSourcePolicy(Source{}, "local", ManifestResolution{})
+	if localDefault.Scope != SourceScopePersonal ||
+		localDefault.WritePolicy != WritePolicyDirectAllowed ||
+		localDefault.PolicySource != PolicySourceDefault {
+		t.Fatalf("local default = %#v", localDefault)
+	}
+	remoteDefault := ResolveSourcePolicy(Source{}, "git", ManifestResolution{})
+	if remoteDefault.Scope != SourceScopeExternal ||
+		remoteDefault.WritePolicy != WritePolicyReadOnly {
+		t.Fatalf("remote default = %#v", remoteDefault)
+	}
+
+	manifest := SourceManifest{
+		Scope:       SourceScopeTeam,
+		Authors:     []string{"Team"},
+		Owners:      []string{"owner"},
+		LLMGuidance: "Use drafts.",
+	}
+	fromManifest := ResolveSourcePolicy(Source{}, "local", ManifestResolution{Manifest: &manifest, Path: "/repo/upskill.toml"})
+	if fromManifest.Scope != SourceScopeTeam ||
+		fromManifest.WritePolicy != WritePolicyDraftPromote ||
+		fromManifest.PolicySource != PolicySourceManifest ||
+		fromManifest.ManifestPath != "/repo/upskill.toml" ||
+		fromManifest.LLMGuidance != "Use drafts." {
+		t.Fatalf("manifest policy = %#v", fromManifest)
+	}
+
+	configured := ResolveSourcePolicy(Source{
+		Scope:       SourceScopePersonal,
+		WritePolicy: WritePolicyOverlayPreferred,
+		Authors:     []string{"Local"},
+	}, "local", ManifestResolution{Manifest: &manifest})
+	if configured.Scope != SourceScopePersonal ||
+		configured.WritePolicy != WritePolicyOverlayPreferred ||
+		configured.PolicySource != PolicySourceConfig ||
+		configured.Authors[0] != "Local" {
+		t.Fatalf("configured policy = %#v", configured)
+	}
+}
+
+func TestSourceManifestDiscoveryAndWarnings(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, SourceManifestName), []byte(`scope = "team"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "skills", SourceManifestName), []byte(`scope = "personal"
+write_policy = "overlay_preferred"
+authors = ["Subpath"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolved := DiscoverSourceManifest(root, "skills")
+	if resolved.Manifest == nil ||
+		resolved.Manifest.Scope != SourceScopePersonal ||
+		resolved.Manifest.WritePolicy != WritePolicyOverlayPreferred ||
+		resolved.Manifest.Authors[0] != "Subpath" ||
+		resolved.Path != filepath.Join(root, "skills", SourceManifestName) {
+		t.Fatalf("resolved manifest = %#v", resolved)
+	}
+
+	badRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(badRoot, SourceManifestName), []byte(`scope = "team"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(badRoot, "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badRoot, "skills", SourceManifestName), []byte(`scope = "global"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	warned := DiscoverSourceManifest(badRoot, "skills")
+	if warned.Manifest == nil || warned.Manifest.Scope != SourceScopeTeam || !strings.Contains(warned.Warning, "invalid source scope") {
+		t.Fatalf("warning manifest = %#v", warned)
+	}
+}
+
+func TestCheckedInExampleManifestParses(t *testing.T) {
+	manifest, err := ParseSourceManifest(filepath.Join("..", "..", "docs", "example-upskill.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Scope != SourceScopeTeam ||
+		manifest.WritePolicy != WritePolicyDraftPromote ||
+		len(manifest.Authors) != 1 ||
+		manifest.LLMGuidance == "" {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+}
+
 func TestSaveSourcesDeterministicMetadata(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{ConfigPath: filepath.Join(root, "config.json")}

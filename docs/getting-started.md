@@ -1,5 +1,7 @@
 # Getting Started
 
+<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file -->
+
 This guide takes a new checkout from build to a rendered skill and optional MCP
 setup. It uses the local example skill in this repository so you can verify the
 tool without depending on any remote skill source.
@@ -127,7 +129,7 @@ You do not need to move those files into a special layout.
 Add the existing directory as a named source and inspect what skills it contains:
 
 ```bash
-upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian
+upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian --personal
 upskill source skills Obsidian
 upskill source find Obsidian hello
 ```
@@ -185,6 +187,18 @@ You can also set a source default for future installs:
 ```bash
 upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian --default-update-policy auto
 ```
+
+For a team source, mark the trust boundary explicitly:
+
+```bash
+upskill source add owner/repo --name team-skills --subpath skills --shared
+```
+
+Sources can also publish default metadata in `upskill.toml` at the source root
+or configured subpath root. Local config flags win over the manifest. Source
+policy appears in `upskill source list --json`, `upskill source show`, and MCP
+source results so agents can choose between overlays, drafts, promotion, or
+direct source edits.
 
 Read-only commands such as `upskill update --check`, `upskill update --diff`,
 `upskill source skills`, and `upskill source find` report pending automatic
@@ -256,7 +270,10 @@ Copy or adapt `prompts/AGENTS.md` into the agent or project instructions for
 clients that should use `upskill` as the skill server. The copied instructions
 must tell agents that local skill files are generated output. When asked to fix a
 skill, agents should write a local customization overlay for local or
-agent-specific behavior, or create a draft for an upstream base-skill change.
+agent-specific behavior. If the base skill itself should change, agents should
+create a draft, inspect source policy, and promote only after reviewing dry-run
+writes. Direct source edits are available only for configured local sources
+whose policy allows them.
 
 A first verification prompt:
 
