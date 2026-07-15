@@ -1,0 +1,7 @@
+schema_version = 1
+name = "example team skills"
+scope = "team"
+write_policy = "draft_promote"
+authors = ["Example Team"]
+owners = ["example-team"]
+llm_guidance = "Confirm whether the user wants an upstream team-skill change or a local overlay before creating a draft."

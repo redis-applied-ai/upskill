@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"upskill/internal/mcpserver"
 	"upskill/internal/overlay"
 	"upskill/internal/pathutil"
+	"upskill/internal/preview"
 	"upskill/internal/render"
 )
 
@@ -185,13 +187,15 @@ examples:
   upskill update --check
   upskill update redis --diff`
 
-	helpSync = `usage: upskill sync [--agent AGENT]
+	helpSync = `usage: upskill sync [--agent AGENT] [--dry-run] [--json]
 
 summary:
   Update all locked skills and build effective generated output.
 
 options:
   --agent AGENT     Build output only for one configured agent.
+  --dry-run         Preview source updates and render/copy targets without writing.
+  --json            Print the common machine-readable preview/apply contract.
 
 notes:
   sync is equivalent to updating locked skills, then building generated output
@@ -201,6 +205,7 @@ notes:
 
 examples:
   upskill sync
+  upskill sync --dry-run
   upskill sync --agent codex`
 
 	helpMigrate = `usage: upskill migrate [--from unmanaged|SOURCE] [--agent AGENT] [--skill NAME] [--to-source NAME] [--to-source-path DIR] [--yes]
@@ -279,7 +284,7 @@ summary:
 
 options:
   --json            Print machine-readable JSON including canonical_id, ref,
-                    and subpath.
+                    subpath, and effective source policy.
 
 notes:
   This command does not inspect upstream contents. Use source skills for that.
@@ -289,7 +294,7 @@ examples:
   upskill source list
   upskill source ls --json`
 
-	helpSourceAdd = `usage: upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH] [--default-update-policy manual|auto]
+	helpSourceAdd = `usage: upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH] [--shared|--personal|--external] [--write-policy POLICY]
 
 summary:
   Add, rename, or update a configured source without installing skills.
@@ -304,6 +309,11 @@ options:
   --default-update-policy manual|auto
                     Default update policy copied into future installs from
                     this source.
+  --shared          Mark source as team-owned; defaults write_policy to draft_promote.
+  --personal        Mark source as personal; defaults write_policy to direct_allowed.
+  --external        Mark source as externally owned; defaults write_policy to read_only.
+  --write-policy direct_allowed|overlay_preferred|draft_promote|read_only
+                    Override the scope's default write policy.
 
 notes:
   Source identity is source location plus ref plus subpath. Re-adding the same
@@ -312,8 +322,50 @@ notes:
 
 examples:
   upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian
-  upskill source add owner/repo --subpath skills --name team
+  upskill source add owner/repo --subpath skills --name team --shared
   upskill source add owner/repo --ref main --subpath skills`
+
+	helpSourceShow = `usage: upskill source show <source-or-name> [--json]
+
+summary:
+  Show one configured source and its effective source policy.
+
+arguments:
+  <source-or-name>  Stable source ID, configured name, display name
+                    (case-insensitive), exact source string, or normalized path.
+
+options:
+  --json            Print machine-readable JSON.
+
+examples:
+  upskill source show team
+  upskill source show team --json`
+
+	helpSourceEdit = `usage: upskill source edit <source-name> <skill-name> --file PATH (--content TEXT | --base64-content DATA) [--dry-run|--yes] [--reason TEXT] [--json]
+
+summary:
+  Create or update one file in a configured local source skill.
+
+arguments:
+  <source-name>     Stable source ID, configured name, display name
+                    (case-insensitive), exact source string, or normalized path.
+
+options:
+  --file PATH       Skill-relative file path. Defaults to SKILL.md.
+  --content TEXT    Plain-text file content.
+  --base64-content DATA
+                    Base64-encoded file content.
+  --yes             Apply the write. Without --yes, the command is a dry run.
+  --dry-run         Preview the target without changing files. This is the default.
+  --reason TEXT     Required for direct writes to draft_promote sources.
+  --json            Print the common machine-readable preview/apply contract.
+
+notes:
+  This writes the source checkout only. It never writes store, rendered output,
+  overlays, drafts, imports, Git branches, commits, pushes, or pull requests.
+
+examples:
+  upskill source edit local redis --file SKILL.md --content "$(cat SKILL.md)" --yes`
 
 	helpSourceSkills = `usage: upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
 
@@ -321,8 +373,9 @@ summary:
   Inspect skills currently available in a source without installing them.
 
 arguments:
-  <source-or-name>  Configured source name, local path, GitHub shorthand, or Git
-                    URL.
+  <source-or-name>  Stable source ID, configured name, display name
+                    (case-insensitive), exact source string, normalized local
+                    path, GitHub shorthand, or Git URL.
 
 options:
   --json            Print machine-readable JSON.
@@ -345,8 +398,9 @@ summary:
   Search skills currently available in one source without installing them.
 
 arguments:
-  <source-or-name>  Configured source name, local path, GitHub shorthand, or Git
-                    URL.
+  <source-or-name>  Stable source ID, configured name, display name
+                    (case-insensitive), exact source string, normalized local
+                    path, GitHub shorthand, or Git URL.
   [query]           Optional search text. Omit it to list matching source skills
                     up to --limit.
 
@@ -373,8 +427,8 @@ summary:
   Remove a configured source and installed skills from that source.
 
 arguments:
-  <source-or-name>  Source name or raw source string matching a configured
-                    source identity.
+  <source-or-name>  Stable source ID, configured name, display name
+                    (case-insensitive), exact source string, or normalized path.
 
 options:
   --yes             Confirm removal when installed skills will be removed.
@@ -578,7 +632,7 @@ notes:
 examples:
   upskill draft rebase redis`
 
-	helpDraftPromote = `usage: upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
+	helpDraftPromote = `usage: upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run|--yes] [--json]
 
 summary:
   Copy a draft bundle into an upstream local source checkout.
@@ -588,16 +642,20 @@ arguments:
 
 options:
   --to PATH         Destination directory in a local source checkout.
-  --to-source NAME  Configured local source name to promote into.
-  --dry-run         Show planned writes without changing files.
+  --to-source NAME  Stable source ID, configured name, display name
+                    (case-insensitive), exact source string, or normalized path.
+  --dry-run         Show planned writes without changing files. This is the default.
+  --yes             Apply promotion writes.
+  --json            Print the common machine-readable preview/apply contract.
 
 notes:
-  Promotion writes source files. It does not install or render the promoted
-  skill; run upskill add or sync afterward when needed.
+  Promotion previews source-file writes by default. With --yes it writes source
+  files. It does not install or render the promoted skill; run upskill add or
+  sync afterward when needed.
 
 examples:
   upskill draft promote redis --to-source Obsidian --dry-run
-  upskill draft promote redis --to ~/Documents/Notes/Memory/Skills/redis`
+  upskill draft promote redis --to ~/Documents/Notes/Memory/Skills/redis --yes`
 
 	helpDraftRemove = `usage: upskill draft remove|rm <skill-name>
 
@@ -1274,8 +1332,12 @@ func runUpdate(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 
 func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
 	agent := ""
+	dryRun := false
+	jsonOut := false
 	if err := parseFlags(args, map[string]func(string) error{
-		"--agent": func(v string) error { agent = v; return nil },
+		"--agent":   func(v string) error { agent = v; return nil },
+		"--dry-run": func(_ string) error { dryRun = true; return nil },
+		"--json":    func(_ string) error { jsonOut = true; return nil },
 		"--with-overlays": func(_ string) error {
 			return fmt.Errorf("--with-overlays is not supported; sync always renders overlays")
 		},
@@ -1286,20 +1348,122 @@ func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 2
 	}
+	if dryRun {
+		checks, err := library.CheckSkillUpdates(cfg, nil, true)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		installed, err := library.ListInstalled(cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		plannedRenders := cliPlannedSyncRenders(cfg, agent, installed)
+		plannedCount := 0
+		for _, check := range checks {
+			if check.Changed && check.Error == "" {
+				plannedCount++
+			}
+		}
+		result := preview.Normalize(cfg, "sync_skills", map[string]any{
+			"agent":                  agent,
+			"dry_run":                true,
+			"updated":                []library.InstalledSkill{},
+			"updated_count":          0,
+			"rendered":               []render.Result{},
+			"rendered_count":         0,
+			"planned_updates":        checks,
+			"planned_update_count":   plannedCount,
+			"planned_renders":        plannedRenders,
+			"planned_rendered_count": len(plannedRenders),
+			"warnings":               audit.AgentOutputWarningMessages(cfg, agent),
+		}, true)
+		printMutationResult(stdout, result, jsonOut)
+		return 0
+	}
 	updated, err := library.UpdateSkills(cfg, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
-	printInstalled(stdout, updated, "updated")
 	results, err := (render.Renderer{Config: cfg}).Render(render.Options{Agent: agent, Copy: true})
 	if err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
-	printResults(stdout, results)
+	if jsonOut {
+		result := preview.Normalize(cfg, "sync_skills", map[string]any{
+			"agent":          agent,
+			"dry_run":        false,
+			"updated":        updated,
+			"updated_count":  len(updated),
+			"rendered":       results,
+			"rendered_count": len(results),
+			"warnings":       audit.AgentOutputWarningMessages(cfg, agent),
+		}, false)
+		printMutationResult(stdout, result, true)
+	} else {
+		printInstalled(stdout, updated, "updated")
+		printResults(stdout, results)
+	}
 	warnAgentOutputSkills(cfg, agent, stderr)
 	return 0
+}
+
+func cliPlannedSyncRenders(cfg config.Config, agent string, skills []library.Skill) []render.Result {
+	outputs := make([]config.AgentOutput, 0, len(cfg.AgentOutputs))
+	for _, output := range cfg.AgentOutputs {
+		if agent == "" || output.Name == agent {
+			outputs = append(outputs, output)
+		}
+	}
+	sort.Slice(outputs, func(i, j int) bool { return outputs[i].Name < outputs[j].Name })
+	results := make([]render.Result, 0)
+	for _, skill := range skills {
+		if len(outputs) == 0 {
+			agentKey := agent
+			if agentKey == "" {
+				agentKey = "generic"
+			}
+			results = append(results, render.Result{
+				Skill: skill.StoreName, Agent: agent,
+				RenderedPath: filepath.Join(cfg.RenderedDir, agentKey, skill.StoreName),
+				Mode:         "preview",
+			})
+			continue
+		}
+		for _, output := range outputs {
+			results = append(results, render.Result{
+				Skill: skill.StoreName, Agent: output.Name,
+				RenderedPath: filepath.Join(cfg.RenderedDir, output.Name, skill.StoreName),
+				CopiedTo:     []string{filepath.Join(output.Path, skill.StoreName)},
+				Mode:         "preview",
+			})
+		}
+	}
+	return results
+}
+
+func printMutationResult(stdout io.Writer, value any, jsonOut bool) {
+	if jsonOut {
+		data, _ := json.MarshalIndent(value, "", "  ")
+		fmt.Fprintln(stdout, string(data))
+		return
+	}
+	result, _ := value.(map[string]any)
+	dryRun, _ := result["dry_run"].(bool)
+	verb := "applied"
+	if dryRun {
+		verb = "preview"
+	}
+	actions, _ := result["actions"].([]map[string]any)
+	if len(actions) == 0 {
+		fmt.Fprintf(stdout, "%s: no changes\n", verb)
+	}
+	for _, action := range actions {
+		fmt.Fprintf(stdout, "%s %s %s\n", verb, action["operation"], action["target"])
+	}
 }
 
 const (
@@ -1737,7 +1901,7 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 			return 2
 		}
 		if jsonOut {
-			data, _ := json.MarshalIndent(sourceRows(cfg.Sources), "", "  ")
+			data, _ := json.MarshalIndent(sourceRows(cfg, cfg.Sources), "", "  ")
 			fmt.Fprintln(stdout, string(data))
 			return 0
 		}
@@ -1766,6 +1930,7 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		if hasSubpath {
 			columns = append(columns, tableColumn{Header: "SUBPATH", MaxWidth: 36})
 		}
+		columns = append(columns, tableColumn{Header: "POLICY", MaxWidth: 28})
 		rows := make([][]string, 0, len(sources))
 		for _, src := range sources {
 			location := src.Source
@@ -1779,9 +1944,35 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 			if hasSubpath {
 				row = append(row, src.Subpath)
 			}
+			policy := library.SourcePolicyForSource(cfg, src)
+			row = append(row, policy.Scope+"/"+policy.WritePolicy)
 			rows = append(rows, row)
 		}
 		printTable(stdout, columns, rows)
+		return 0
+	case "show":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "upskill: source show requires <source-or-name>")
+			return 2
+		}
+		jsonOut := false
+		if err := parseFlags(args[2:], map[string]func(string) error{
+			"--json": func(_ string) error { jsonOut = true; return nil },
+		}); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		row, err := sourceRowForArg(cfg, args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
+		if jsonOut {
+			data, _ := json.MarshalIndent(row, "", "  ")
+			fmt.Fprintln(stdout, string(data))
+			return 0
+		}
+		printSourceRow(stdout, row)
 		return 0
 	case "add":
 		if len(args) < 2 {
@@ -1790,17 +1981,33 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		}
 		source := args[1]
 		name, ref, subpath, defaultPolicy := "", "", "", ""
+		shared, personal, external := false, false, false
+		writePolicy := ""
 		if err := parseFlags(args[2:], map[string]func(string) error{
 			"--name":                  func(v string) error { name = v; return nil },
 			"--ref":                   func(v string) error { ref = v; return nil },
 			"--subpath":               func(v string) error { subpath = v; return nil },
 			"--default-update-policy": func(v string) error { defaultPolicy = v; return nil },
+			"--shared":                func(_ string) error { shared = true; return nil },
+			"--personal":              func(_ string) error { personal = true; return nil },
+			"--external":              func(_ string) error { external = true; return nil },
+			"--write-policy":          func(v string) error { writePolicy = v; return nil },
 		}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 2
 		}
 		if defaultPolicy != "" && !config.ValidUpdatePolicy(defaultPolicy) {
 			fmt.Fprintf(stderr, "upskill: invalid update policy: %s\n", defaultPolicy)
+			return 2
+		}
+		scope, err := selectedSourceScope(shared, personal, external)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 2
+		}
+		writePolicy = config.NormalizeWritePolicy(writePolicy)
+		if !config.ValidWritePolicy(writePolicy) {
+			fmt.Fprintf(stderr, "upskill: invalid source write policy: %s\n", writePolicy)
 			return 2
 		}
 		canonical, _, err := library.CanonicalSource(source, name, ref, subpath)
@@ -1810,6 +2017,13 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		}
 		if defaultPolicy != "" {
 			canonical.DefaultUpdatePolicy = config.NormalizeUpdatePolicy(defaultPolicy)
+		}
+		if scope != "" {
+			canonical.Scope = scope
+			canonical.WritePolicy = config.DefaultWritePolicyForScope(scope)
+		}
+		if writePolicy != "" {
+			canonical.WritePolicy = writePolicy
 		}
 		if cfg.Sources == nil {
 			cfg.Sources = map[string]config.Source{}
@@ -1824,8 +2038,14 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		if updated {
 			verb = "updated"
 		}
-		fmt.Fprintf(stdout, "%s source %s\n", verb, config.SourceDisplayName(canonical))
+		policy := library.SourcePolicyForSource(cfg, canonical)
+		fmt.Fprintf(stdout, "%s source %s (%s/%s)\n", verb, config.SourceDisplayName(canonical), policy.Scope, policy.WritePolicy)
+		if policy.ManifestWarning != "" {
+			fmt.Fprintf(stderr, "warning: %s\n", policy.ManifestWarning)
+		}
 		return 0
+	case "edit":
+		return runSourceEdit(cfg, args[1:], stdout, stderr)
 	case "skills":
 		if len(args) < 2 {
 			fmt.Fprintln(stderr, "upskill: source skills requires <source-or-name>")
@@ -1929,11 +2149,12 @@ func runSource(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 			return 2
 		}
 		sourceArg := positionals[0]
-		key, ok := resolveConfiguredSourceKey(cfg, sourceArg)
-		if !ok {
-			fmt.Fprintf(stderr, "upskill: source not found: %s\n", sourceArg)
+		resolution, err := library.ResolveConfiguredSource(cfg, sourceArg)
+		if err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
 		}
+		key := resolution.ConfiguredAs
 		source := cfg.Sources[key]
 		removeSkills := []string{}
 		if !keepInstalled {
@@ -1996,7 +2217,7 @@ func runWorkon(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
-	printDraft(stdout, item)
+	printDraft(cfg, stdout, item)
 	if !noEdit {
 		if code := editDraftFile(item, "SKILL.md", stdout, stderr); code != 0 {
 			return code
@@ -2065,7 +2286,7 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
 		}
-		printDraft(stdout, item)
+		printDraft(cfg, stdout, item)
 		if !noEdit {
 			if code := editDraftFile(item, "SKILL.md", stdout, stderr); code != 0 {
 				return code
@@ -2330,16 +2551,35 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 		}
 		toPath := ""
 		toSource := ""
-		dryRun := false
+		dryRun := true
+		jsonOut := false
 		if err := parseFlags(args[2:], map[string]func(string) error{
 			"--to":        func(v string) error { toPath = v; return nil },
 			"--to-source": func(v string) error { toSource = v; return nil },
 			"--dry-run":   func(_ string) error { dryRun = true; return nil },
+			"--yes":       func(_ string) error { dryRun = false; return nil },
+			"--json":      func(_ string) error { jsonOut = true; return nil },
 		}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 2
 		}
+		var policy config.SourcePolicy
+		hasPolicy := false
+		var sourceResolution *library.SourceResolution
 		if toSource != "" {
+			resolution, err := library.ResolveConfiguredSource(cfg, toSource)
+			if err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+			source := resolution.Source
+			sourceResolution = &resolution
+			policy = library.SourcePolicyForSource(cfg, source)
+			hasPolicy = true
+			if policy.WritePolicy == config.WritePolicyReadOnly {
+				fmt.Fprintln(stderr, "upskill: source policy is read_only; promotion is not allowed")
+				return 1
+			}
 			dest, err := library.ResolveLocalSourceDestination(cfg, toSource)
 			if err != nil {
 				fmt.Fprintf(stderr, "upskill: %v\n", err)
@@ -2347,13 +2587,42 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 			}
 			toPath = dest
 		}
+		if toPath == "" {
+			fmt.Fprintln(stderr, "upskill: promotion destination is required")
+			return 2
+		}
+		if err := library.RejectManagedPath(cfg, toPath, "promotion"); err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", err)
+			return 1
+		}
 		result, err := draft.Promote(cfg, args[1], draft.PromoteOptions{ToPath: toPath, ToSource: toSource, DryRun: dryRun})
 		if err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
 		}
-		data, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Fprintln(stdout, string(data))
+		payload := map[string]any{
+			"draft_id":     result.DraftID,
+			"destination":  result.Destination,
+			"source":       result.Source,
+			"dry_run":      result.DryRun,
+			"files":        result.Files,
+			"overwrite":    result.Overwrite,
+			"base_mutated": result.BaseMutated,
+			"next_steps":   result.NextSteps,
+		}
+		if hasPolicy {
+			payload["source_policy"] = policy
+			payload["recommended_workflow"] = policy.RecommendedWorkflow
+			payload["policy_notices"] = config.PolicyNotices(policy)
+		}
+		if sourceResolution != nil {
+			payload["source_id"] = sourceResolution.Source.ID
+			payload["source_name"] = sourceResolution.ConfiguredAs
+			payload["source_display_name"] = config.SourceDisplayName(sourceResolution.Source)
+			payload["resolved_path"] = sourceResolution.ResolvedPath
+		}
+		common := preview.Normalize(cfg, "promote_skill_draft", payload, dryRun)
+		printMutationResult(stdout, common, jsonOut)
 		return 0
 	case "remove", "rm":
 		if len(args) < 2 {
@@ -2485,10 +2754,19 @@ func storeSkillExists(cfg config.Config, name string) bool {
 	return err == nil && info.IsDir()
 }
 
-func printDraft(w io.Writer, item draft.Draft) {
+func printDraft(cfg config.Config, w io.Writer, item draft.Draft) {
 	fmt.Fprintf(w, "%s\t%s\n", item.ID, item.Metadata.Type)
 	if item.Metadata.CreatedFrom == draft.CreatedFromRendered {
 		fmt.Fprintln(w, "warning: draft was created from rendered output and may include local overlays")
+	}
+	if item.Metadata.Type == draft.TypeVersion && item.Metadata.ParentSkill != "" {
+		policy, ok, err := library.SourcePolicyForInstalledSkill(cfg, item.Metadata.ParentSkill)
+		if err == nil && ok {
+			fmt.Fprintf(w, "source policy: %s/%s (%s)\n", policy.Scope, policy.WritePolicy, policy.RecommendedWorkflow)
+			for _, notice := range config.PolicyNotices(policy) {
+				fmt.Fprintf(w, "notice: %s\n", notice)
+			}
+		}
 	}
 }
 
@@ -3242,32 +3520,168 @@ func listSourceText(row installedSkillRow) string {
 }
 
 type sourceRow struct {
-	ID                  string `json:"id"`
-	Name                string `json:"name,omitempty"`
-	DisplayName         string `json:"display_name"`
-	Source              string `json:"source"`
-	Ref                 string `json:"ref,omitempty"`
-	Subpath             string `json:"subpath,omitempty"`
-	CanonicalID         string `json:"canonical_id"`
-	DefaultUpdatePolicy string `json:"default_update_policy"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name,omitempty"`
+	DisplayName         string   `json:"display_name"`
+	Source              string   `json:"source"`
+	Ref                 string   `json:"ref,omitempty"`
+	Subpath             string   `json:"subpath,omitempty"`
+	CanonicalID         string   `json:"canonical_id"`
+	DefaultUpdatePolicy string   `json:"default_update_policy"`
+	Scope               string   `json:"scope"`
+	WritePolicy         string   `json:"write_policy"`
+	Authors             []string `json:"authors,omitempty"`
+	Owners              []string `json:"owners,omitempty"`
+	LLMGuidance         string   `json:"llm_guidance,omitempty"`
+	PolicySource        string   `json:"policy_source"`
+	ManifestPath        string   `json:"manifest_path,omitempty"`
+	ManifestWarning     string   `json:"manifest_warning,omitempty"`
+	RecommendedWorkflow string   `json:"recommended_workflow"`
+	ResolvedPath        string   `json:"resolved_path,omitempty"`
 }
 
-func sourceRows(sources map[string]config.Source) []sourceRow {
+func sourceRows(cfg config.Config, sources map[string]config.Source) []sourceRow {
 	records := config.SourceRecords(sources)
 	rows := make([]sourceRow, 0, len(records))
 	for _, source := range records {
-		rows = append(rows, sourceRow{
-			ID:                  source.ID,
-			Name:                source.Name,
-			DisplayName:         config.SourceDisplayName(source),
-			Source:              source.Source,
-			Ref:                 source.Ref,
-			Subpath:             source.Subpath,
-			CanonicalID:         config.SourceKey(source),
-			DefaultUpdatePolicy: config.NormalizeUpdatePolicy(source.DefaultUpdatePolicy),
-		})
+		rows = append(rows, sourceRowFromSource(cfg, source))
 	}
 	return rows
+}
+
+func sourceRowFromSource(cfg config.Config, source config.Source) sourceRow {
+	source = config.NormalizeSource(source)
+	policy := library.SourcePolicyForSource(cfg, source)
+	resolvedPath := ""
+	if resolution, err := library.ResolveConfiguredSource(cfg, source.ID); err == nil {
+		resolvedPath = resolution.ResolvedPath
+	}
+	return sourceRow{
+		ID:                  source.ID,
+		Name:                source.Name,
+		DisplayName:         config.SourceDisplayName(source),
+		Source:              source.Source,
+		Ref:                 source.Ref,
+		Subpath:             source.Subpath,
+		CanonicalID:         config.SourceKey(source),
+		DefaultUpdatePolicy: config.NormalizeUpdatePolicy(source.DefaultUpdatePolicy),
+		Scope:               policy.Scope,
+		WritePolicy:         policy.WritePolicy,
+		Authors:             policy.Authors,
+		Owners:              policy.Owners,
+		LLMGuidance:         policy.LLMGuidance,
+		PolicySource:        policy.PolicySource,
+		ManifestPath:        policy.ManifestPath,
+		ManifestWarning:     policy.ManifestWarning,
+		RecommendedWorkflow: policy.RecommendedWorkflow,
+		ResolvedPath:        resolvedPath,
+	}
+}
+
+func sourceRowForArg(cfg config.Config, sourceArg string) (sourceRow, error) {
+	if resolved, err := library.ResolveConfiguredSource(cfg, sourceArg); err == nil {
+		return sourceRowFromSource(cfg, resolved.Source), nil
+	} else {
+		var resolutionErr library.SourceResolutionError
+		if errors.As(err, &resolutionErr) && resolutionErr.Ambiguous {
+			return sourceRow{}, err
+		}
+	}
+	source, _, err := library.CanonicalSource(sourceArg, "", "", "")
+	if err != nil {
+		return sourceRow{}, err
+	}
+	return sourceRowFromSource(cfg, source), nil
+}
+
+func printSourceRow(w io.Writer, row sourceRow) {
+	fmt.Fprintf(w, "source: %s\n", row.DisplayName)
+	fmt.Fprintf(w, "location: %s\n", row.Source)
+	if row.Ref != "" {
+		fmt.Fprintf(w, "ref: %s\n", row.Ref)
+	}
+	if row.Subpath != "" {
+		fmt.Fprintf(w, "subpath: %s\n", row.Subpath)
+	}
+	fmt.Fprintf(w, "policy: %s/%s\n", row.Scope, row.WritePolicy)
+	fmt.Fprintf(w, "recommended_workflow: %s\n", row.RecommendedWorkflow)
+	if row.PolicySource != "" {
+		fmt.Fprintf(w, "policy_source: %s\n", row.PolicySource)
+	}
+	if row.ManifestPath != "" {
+		fmt.Fprintf(w, "manifest_path: %s\n", row.ManifestPath)
+	}
+	if row.ManifestWarning != "" {
+		fmt.Fprintf(w, "manifest_warning: %s\n", row.ManifestWarning)
+	}
+	if row.LLMGuidance != "" {
+		fmt.Fprintf(w, "llm_guidance: %s\n", row.LLMGuidance)
+	}
+}
+
+func selectedSourceScope(shared bool, personal bool, external bool) (string, error) {
+	count := 0
+	scope := ""
+	if shared {
+		count++
+		scope = config.SourceScopeTeam
+	}
+	if personal {
+		count++
+		scope = config.SourceScopePersonal
+	}
+	if external {
+		count++
+		scope = config.SourceScopeExternal
+	}
+	if count > 1 {
+		return "", fmt.Errorf("use only one of --shared, --personal, or --external")
+	}
+	return scope, nil
+}
+
+func runSourceEdit(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "upskill: source edit requires <source-name> <skill-name>")
+		return 2
+	}
+	sourceName := args[0]
+	skillName := args[1]
+	path := "SKILL.md"
+	content := ""
+	base64Content := ""
+	apply := false
+	reason := ""
+	jsonOut := false
+	if err := parseFlags(args[2:], map[string]func(string) error{
+		"--file":           func(v string) error { path = v; return nil },
+		"--content":        func(v string) error { content = v; return nil },
+		"--base64-content": func(v string) error { base64Content = v; return nil },
+		"--yes":            func(_ string) error { apply = true; return nil },
+		"--dry-run":        func(_ string) error { apply = false; return nil },
+		"--reason":         func(v string) error { reason = v; return nil },
+		"--json":           func(_ string) error { jsonOut = true; return nil },
+	}); err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 2
+	}
+	result, err := library.UpsertSourceSkillFile(cfg, library.SourceSkillFileWriteOptions{
+		SourceName:         sourceName,
+		Skill:              skillName,
+		Path:               path,
+		Content:            content,
+		Base64Content:      base64Content,
+		DryRun:             !apply,
+		ConfirmSourceWrite: apply,
+		Reason:             reason,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	common := preview.Normalize(cfg, "upsert_source_skill_file", result, !apply)
+	printMutationResult(stdout, common, jsonOut)
+	return 0
 }
 
 func upsertSourceRecord(sources map[string]config.Source, source config.Source) (config.Source, string, bool) {
@@ -3281,6 +3695,21 @@ func upsertSourceRecord(sources map[string]config.Source, source config.Source) 
 		}
 		if source.DefaultUpdatePolicy == "" {
 			source.DefaultUpdatePolicy = existing.DefaultUpdatePolicy
+		}
+		if source.Scope == "" {
+			source.Scope = existing.Scope
+		}
+		if source.WritePolicy == "" {
+			source.WritePolicy = existing.WritePolicy
+		}
+		if len(source.Authors) == 0 {
+			source.Authors = existing.Authors
+		}
+		if len(source.Owners) == 0 {
+			source.Owners = existing.Owners
+		}
+		if source.LLMGuidance == "" {
+			source.LLMGuidance = existing.LLMGuidance
 		}
 		source = config.NormalizeSource(source)
 		key := config.SourceKey(source)
@@ -3311,23 +3740,6 @@ func sameSourceIdentity(left config.Source, right config.Source) bool {
 	return left.Source == right.Source &&
 		left.Ref == right.Ref &&
 		filepath.ToSlash(left.Subpath) == filepath.ToSlash(right.Subpath)
-}
-
-func resolveConfiguredSourceKey(cfg config.Config, sourceArg string) (string, bool) {
-	if _, ok := cfg.Sources[sourceArg]; ok {
-		return sourceArg, true
-	}
-	canonical, canonicalKey, err := library.CanonicalSource(sourceArg, "", "", "")
-	if err != nil {
-		return "", false
-	}
-	if _, ok := cfg.Sources[canonicalKey]; ok {
-		return canonicalKey, true
-	}
-	if existingKey, ok := findSourceRecordByIdentity(cfg.Sources, canonical); ok {
-		return existingKey, true
-	}
-	return "", false
 }
 
 func installedSkillsFromSource(cfg config.Config, source config.Source) ([]string, error) {
@@ -3476,7 +3888,7 @@ func parseFlagsWithValues(args []string, handlers map[string]func(string) error,
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--to-source-path", "--operation", "--update-policy", "--default-update-policy":
+	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--to-source-path", "--operation", "--update-policy", "--default-update-policy", "--write-policy", "--content", "--base64-content", "--reason":
 		return true
 	default:
 		return false
@@ -3524,6 +3936,8 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		return printNestedHelp(args[1:], w, printSourceHelp, map[string]string{
 			"list":   helpSourceList,
 			"add":    helpSourceAdd,
+			"show":   helpSourceShow,
+			"edit":   helpSourceEdit,
 			"skills": helpSourceSkills,
 			"find":   helpSourceFind,
 			"search": helpSourceFind,
@@ -3673,6 +4087,8 @@ func printSourceHelp(w io.Writer) {
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  list    List configured sources")
 	fmt.Fprintln(w, "  add     Add, rename, or update a source")
+	fmt.Fprintln(w, "  show    Show source policy and metadata")
+	fmt.Fprintln(w, "  edit    Edit one file in a configured local source")
 	fmt.Fprintln(w, "  skills  List skills available in a source")
 	fmt.Fprintln(w, "  find    Search skills in a source")
 	fmt.Fprintln(w, "  remove  Remove a configured source")

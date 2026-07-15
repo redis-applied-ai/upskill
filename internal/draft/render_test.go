@@ -346,14 +346,25 @@ func TestDraftRenderInjectedErrorBranches(t *testing.T) {
 	fsWalkFiles = oldWalkFiles
 
 	osRemoveAll = func(string) error { return errors.New("remove failed") }
-	if _, err := Promote(cfg, "demo", PromoteOptions{ToPath: filepath.Join(root, "repo")}); err == nil {
+	if result, err := Promote(cfg, "demo", PromoteOptions{ToPath: filepath.Join(root, "repo")}); err == nil {
 		t.Fatal("expected promote remove error")
+	} else {
+		var partial PromoteApplyError
+		if !errors.As(err, &partial) {
+			t.Fatalf("remove partial error type = %T %v", err, err)
+		}
+		provided, providedOK := partial.PartialResult().(PromoteResult)
+		if !providedOK || partial.Result.Destination != result.Destination || provided.Destination != result.Destination {
+			t.Fatalf("remove partial result = %#v, %T %v", result, err, err)
+		}
 	}
 	osRemoveAll = oldRemoveAll
 
 	fsCopyDir = func(string, string, func(string, os.DirEntry) bool) error { return errors.New("promote copy failed") }
-	if _, err := Promote(cfg, "demo", PromoteOptions{ToPath: filepath.Join(root, "repo")}); err == nil {
+	if result, err := Promote(cfg, "demo", PromoteOptions{ToPath: filepath.Join(root, "repo")}); err == nil {
 		t.Fatal("expected promote copy error")
+	} else if len(result.Files) == 0 {
+		t.Fatalf("copy failure omitted planned actions: %#v", result)
 	}
 	fsCopyDir = oldCopyDir
 

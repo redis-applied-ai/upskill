@@ -258,9 +258,158 @@ func CanonicalSource(input string, name string, ref string, subpath string) (con
 	return source, config.SourceKey(source), nil
 }
 
-func ResolveNamedSource(cfg config.Config, name string) (config.Source, bool) {
-	source, ok := cfg.Sources[name]
-	return source, ok
+type SourceResolution struct {
+	Source       config.Source
+	ConfiguredAs string
+	ResolvedPath string
+}
+
+type SourceResolutionError struct {
+	Identifier string
+	Ambiguous  bool
+	Choices    []string
+}
+
+func (e SourceResolutionError) Error() string {
+	kind := "not found"
+	if e.Ambiguous {
+		kind = "is ambiguous"
+	}
+	if len(e.Choices) == 0 {
+		return fmt.Sprintf("source %s: %s", kind, e.Identifier)
+	}
+	return fmt.Sprintf("source %s: %s (available: %s)", kind, e.Identifier, strings.Join(e.Choices, ", "))
+}
+
+type sourceCandidate struct {
+	key    string
+	source config.Source
+}
+
+func ResolveConfiguredSource(cfg config.Config, identifier string) (SourceResolution, error) {
+	identifier = strings.TrimSpace(identifier)
+	candidates := configuredSourceCandidates(cfg)
+	if identifier == "" {
+		return SourceResolution{}, sourceResolutionError(identifier, false, candidates)
+	}
+
+	matchPhases := []func(sourceCandidate) bool{
+		func(candidate sourceCandidate) bool { return candidate.source.ID == identifier },
+		func(candidate sourceCandidate) bool { return candidate.key == identifier },
+		func(candidate sourceCandidate) bool { return candidate.source.Name == identifier },
+		func(candidate sourceCandidate) bool {
+			return strings.EqualFold(config.SourceDisplayName(candidate.source), identifier)
+		},
+		func(candidate sourceCandidate) bool { return candidate.source.Source == identifier },
+		func(candidate sourceCandidate) bool {
+			return sourcePathMatches(candidate.source, identifier)
+		},
+	}
+	for _, matches := range matchPhases {
+		matched := make([]sourceCandidate, 0, 1)
+		for _, candidate := range candidates {
+			if matches(candidate) {
+				matched = append(matched, candidate)
+			}
+		}
+		if len(matched) == 1 {
+			return resolvedSource(matched[0]), nil
+		}
+		if len(matched) > 1 {
+			return SourceResolution{}, sourceResolutionError(identifier, true, matched)
+		}
+	}
+	return SourceResolution{}, sourceResolutionError(identifier, false, candidates)
+}
+
+func configuredSourceCandidates(cfg config.Config) []sourceCandidate {
+	keys := make([]string, 0, len(cfg.Sources))
+	for key := range cfg.Sources {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	candidates := make([]sourceCandidate, 0, len(keys))
+	for _, key := range keys {
+		source := cfg.Sources[key]
+		if source.Source == "" {
+			continue
+		}
+		if source.Name == "" {
+			source.Name = key
+		}
+		candidates = append(candidates, sourceCandidate{key: key, source: config.NormalizeSource(source)})
+	}
+	return candidates
+}
+
+func sourceResolutionError(identifier string, ambiguous bool, candidates []sourceCandidate) error {
+	choices := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		choices = append(choices, fmt.Sprintf("%s (%s)", config.SourceDisplayName(candidate.source), candidate.source.ID))
+	}
+	sort.Strings(choices)
+	return SourceResolutionError{Identifier: identifier, Ambiguous: ambiguous, Choices: choices}
+}
+
+func resolvedSource(candidate sourceCandidate) SourceResolution {
+	resolvedPath := ""
+	if parsed, err := ParseSource(candidate.source.Source); err == nil && parsed.Type == "local" {
+		resolvedPath = parsed.LocalPath
+		if candidate.source.Subpath != "" {
+			if joined, joinErr := pathutil.SafeJoin(resolvedPath, candidate.source.Subpath); joinErr == nil {
+				resolvedPath = joined
+			}
+		}
+	}
+	return SourceResolution{Source: candidate.source, ConfiguredAs: candidate.key, ResolvedPath: resolvedPath}
+}
+
+func sourcePathMatches(source config.Source, identifier string) bool {
+	parsed, err := ParseSource(source.Source)
+	if err != nil || parsed.Type != "local" {
+		return false
+	}
+	identifierPath, err := canonicalLocalPath(identifier)
+	if err != nil {
+		return false
+	}
+	paths := []string{parsed.LocalPath}
+	if source.Subpath != "" {
+		if joined, joinErr := pathutil.SafeJoin(parsed.LocalPath, source.Subpath); joinErr == nil {
+			paths = append(paths, joined)
+		}
+	}
+	for _, path := range paths {
+		canonical, canonicalErr := canonicalLocalPath(path)
+		if canonicalErr == nil && canonical == identifierPath {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalLocalPath(path string) (string, error) {
+	parsed, err := ParseSource(path)
+	if err != nil || parsed.Type != "local" {
+		return "", fmt.Errorf("not a local path")
+	}
+	abs, err := filepath.Abs(parsed.LocalPath)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	if evaluated, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
+		abs = evaluated
+	}
+	return abs, nil
+}
+
+func ResolveNamedSource(cfg config.Config, identifier string) (config.Source, bool) {
+	resolved, err := ResolveConfiguredSource(cfg, identifier)
+	if err != nil {
+		return config.Source{}, false
+	}
+	return resolved.Source, true
 }
 
 func ResolveSource(cfg config.Config, source string, opts InstallOptions) (ParsedSource, bool, error) {
@@ -393,10 +542,11 @@ func DiscoverSkillsWithIgnore(root string, subpath string, ignore []string) ([]S
 }
 
 func ResolveLocalSourceDestination(cfg config.Config, name string) (string, error) {
-	source, ok := ResolveNamedSource(cfg, name)
-	if !ok {
-		return "", fmt.Errorf("source not found: %s", name)
+	resolved, err := ResolveConfiguredSource(cfg, name)
+	if err != nil {
+		return "", err
 	}
+	source := resolved.Source
 	parsed, err := ParseSource(source.Source)
 	if err != nil {
 		return "", err

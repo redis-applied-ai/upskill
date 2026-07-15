@@ -50,6 +50,38 @@ func setupEnv(t *testing.T) (root string, configPath string) {
 	return root, configPath
 }
 
+func assertCommonCLIPreview(t *testing.T, data []byte, operation string, target string) map[string]any {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("preview JSON decode: %v\n%s", err, data)
+	}
+	if payload["dry_run"] != true || payload["applied"] != false {
+		t.Fatalf("preview status = %#v", payload)
+	}
+	if _, ok := payload["warnings"].([]any); !ok {
+		t.Fatalf("preview warnings = %#v", payload["warnings"])
+	}
+	if _, ok := payload["canonical_resources"].(map[string]any); !ok {
+		t.Fatalf("preview canonical resources = %#v", payload["canonical_resources"])
+	}
+	actions, ok := payload["actions"].([]any)
+	if !ok || len(actions) == 0 {
+		t.Fatalf("preview actions = %#v", payload["actions"])
+	}
+	found := false
+	for _, raw := range actions {
+		action, _ := raw.(map[string]any)
+		if action["operation"] == operation && action["target"] == target {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("preview missing %s %s: %#v", operation, target, actions)
+	}
+	return payload
+}
+
 func runCLIGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -130,6 +162,63 @@ func TestSyncUpdatesLockThenRenders(t *testing.T) {
 	if !strings.Contains(rendered, "Updated.") || !strings.Contains(rendered, "Overlay.") {
 		t.Fatalf("sync did not render overlay:\n%s", rendered)
 	}
+}
+
+func TestSyncDryRunPreviewsWithoutWriting(t *testing.T) {
+	root, configPath := setupEnv(t)
+	source := filepath.Join(root, "source", "redis")
+	writeTestFile(t, filepath.Join(source, "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--agent", "codex", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	writeTestFile(t, filepath.Join(source, "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n", 0o644)
+	storePath := filepath.Join(root, "home", "store", "redis", "SKILL.md")
+	lockPath := filepath.Join(root, "home", "upskill-lock.json")
+	storeBefore := readTestFile(t, storePath)
+	lockBefore := readTestFile(t, lockPath)
+	configBefore := readTestFile(t, configPath)
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"sync", "--agent", "codex", "--dry-run"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("sync preview code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "preview sync") || !strings.Contains(stdout.String(), "preview render") || !strings.Contains(stdout.String(), "preview write") {
+		t.Fatalf("sync preview output = %q", stdout.String())
+	}
+	if got := readTestFile(t, storePath); got != storeBefore {
+		t.Fatalf("sync preview updated store:\n%s", got)
+	}
+	if got := readTestFile(t, lockPath); got != lockBefore {
+		t.Fatalf("sync preview updated lock:\n%s", got)
+	}
+	if got := readTestFile(t, configPath); got != configBefore {
+		t.Fatalf("sync preview updated config:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "home", "rendered")); !os.IsNotExist(err) {
+		t.Fatalf("sync preview wrote rendered output: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "codex-skills", "redis")); !os.IsNotExist(err) {
+		t.Fatalf("sync preview wrote agent output: %v", err)
+	}
+}
+
+func TestSyncDryRunJSONUsesCommonPreviewContract(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "source", "redis")
+	writeTestFile(t, filepath.Join(source, "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"add", source, "--agent", "codex", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	writeTestFile(t, filepath.Join(source, "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"sync", "--agent", "codex", "--dry-run", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("sync preview code = %d stderr=%s", code, stderr.String())
+	}
+	assertCommonCLIPreview(t, stdout.Bytes(), "sync", filepath.Join(root, "home", "store", "redis"))
 }
 
 func TestSyncPrintsOnlyChangedSkills(t *testing.T) {
@@ -336,6 +425,12 @@ func TestHelpCommands(t *testing.T) {
 	if !strings.Contains(sourceRemoveAliasHelp, helpSourceRemove) {
 		t.Fatalf("source rm help = %q", sourceRemoveAliasHelp)
 	}
+	sourceEditHelp := runHelp("source", "edit", "--help")
+	for _, want := range []string{"Stable source ID", "exact source string", "--dry-run", "--json", "never writes store"} {
+		if !strings.Contains(sourceEditHelp, want) {
+			t.Fatalf("source edit help missing %q: %q", want, sourceEditHelp)
+		}
+	}
 
 	draftHelp := runHelp("draft", "--help")
 	if !strings.Contains(draftHelp, "usage: upskill draft <command> [args]") || !strings.Contains(draftHelp, "import    Import") {
@@ -355,6 +450,18 @@ func TestHelpCommands(t *testing.T) {
 	draftRemoveAliasHelp := runHelp("draft", "rm", "--help")
 	if !strings.Contains(draftRemoveAliasHelp, helpDraftRemove) {
 		t.Fatalf("draft rm help = %q", draftRemoveAliasHelp)
+	}
+	draftPromoteHelp := runHelp("draft", "promote", "--help")
+	for _, want := range []string{"Stable source ID", "--dry-run", "This is the default", "--json", "does not install or render"} {
+		if !strings.Contains(draftPromoteHelp, want) {
+			t.Fatalf("draft promote help missing %q: %q", want, draftPromoteHelp)
+		}
+	}
+	syncHelp := runHelp("sync", "--help")
+	for _, want := range []string{"--dry-run", "without writing", "--json", "writes installed store updates"} {
+		if !strings.Contains(syncHelp, want) {
+			t.Fatalf("sync help missing %q: %q", want, syncHelp)
+		}
 	}
 
 	overlayHelp := runHelp("overlay")
@@ -393,6 +500,8 @@ func TestHelpCommands(t *testing.T) {
 		{"workon", "--help"},
 		{"source", "list", "--help"},
 		{"source", "ls", "--help"},
+		{"source", "show", "--help"},
+		{"source", "edit", "--help"},
 		{"source", "skills", "--help"},
 		{"source", "find", "--help"},
 		{"source", "search", "--help"},
@@ -1468,15 +1577,16 @@ func TestDraftRenderDiffRebasePromoteCommands(t *testing.T) {
 	dest := filepath.Join(root, "repo")
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"draft", "promote", "redis", "--to", dest, "--dry-run"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"draft", "promote", "redis", "--to", dest, "--dry-run", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("draft promote dry-run code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"dry_run": true`) {
 		t.Fatalf("promote dry-run stdout = %q", stdout.String())
 	}
+	assertCommonCLIPreview(t, stdout.Bytes(), "write", filepath.Join(dest, "redis", "SKILL.md"))
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"draft", "promote", "redis", "--to", dest}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"draft", "promote", "redis", "--to", dest, "--yes"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("draft promote code = %d stderr=%s", code, stderr.String())
 	}
 	if readTestFile(t, filepath.Join(dest, "redis", "SKILL.md")) != "Draft.\n" {
@@ -1490,11 +1600,16 @@ func TestDraftRenderDiffRebasePromoteCommands(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"draft", "promote", "redis", "--to-source", "local", "--dry-run"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"draft", "promote", "redis", "--to-source", "local", "--dry-run", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("draft promote to-source code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"source": "local"`) {
 		t.Fatalf("promote to-source stdout = %q", stdout.String())
+	}
+	toSourcePayload := assertCommonCLIPreview(t, stdout.Bytes(), "write", filepath.Join(sourceRoot, "redis", "SKILL.md"))
+	resources := toSourcePayload["canonical_resources"].(map[string]any)
+	if resources["source_id"] == "" || resources["source_display_name"] != "local" || resources["resolved_path"] != sourceRoot {
+		t.Fatalf("promote canonical resources = %#v", resources)
 	}
 	stdout.Reset()
 	stderr.Reset()
@@ -2024,6 +2139,20 @@ func TestSourceCommands(t *testing.T) {
 		t.Fatalf("source rows = %#v", rows)
 	}
 	obsidianSourceID := rows[0].ID
+	for _, identifier := range []string{obsidianSourceID, "obsidian"} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run([]string{"source", "show", identifier, "--json"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("source show %q code = %d stderr=%s", identifier, code, stderr.String())
+		}
+		var shown sourceRow
+		if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
+			t.Fatalf("source show %q decode: %v\n%s", identifier, err, stdout.String())
+		}
+		if shown.ID != obsidianSourceID || shown.DisplayName != "Obsidian" || shown.ResolvedPath != source {
+			t.Fatalf("source show %q = %#v", identifier, shown)
+		}
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -2502,6 +2631,367 @@ func TestCLISourceDefaultUpdatePolicy(t *testing.T) {
 	}
 }
 
+func TestCLISourcePolicyFlagsAndOutput(t *testing.T) {
+	root, _ := setupEnv(t)
+	teamSource := filepath.Join(root, "team-source")
+	personalSource := filepath.Join(root, "personal-source")
+	externalSource := filepath.Join(root, "external-source")
+	manifestSource := filepath.Join(root, "manifest-source")
+	for _, source := range []string{teamSource, personalSource, externalSource, manifestSource} {
+		writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n", 0o644)
+	}
+	writeTestFile(t, filepath.Join(manifestSource, "upskill.toml"), `scope = "team"
+write_policy = "draft_promote"
+authors = ["Redis Applied AI"]
+llm_guidance = "Confirm overlay versus upstream source edit."
+`, 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", teamSource, "--name", "team", "--shared"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add shared code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "team/draft_promote") {
+		t.Fatalf("source add shared stdout = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", personalSource, "--name", "personal", "--personal"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add personal code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", externalSource, "--name", "external", "--external", "--write-policy", "overlay_preferred"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add external override code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", manifestSource, "--name", "manifest"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add manifest code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "team/draft_promote") {
+		t.Fatalf("source add manifest stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list json code = %d stderr=%s", code, stderr.String())
+	}
+	var rows []sourceRow
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("source rows decode: %v\n%s", err, stdout.String())
+	}
+	byName := map[string]sourceRow{}
+	for _, row := range rows {
+		byName[row.Name] = row
+	}
+	if byName["team"].Scope != config.SourceScopeTeam || byName["team"].WritePolicy != config.WritePolicyDraftPromote || byName["team"].PolicySource != config.PolicySourceConfig {
+		t.Fatalf("team row = %#v", byName["team"])
+	}
+	if byName["personal"].Scope != config.SourceScopePersonal || byName["personal"].WritePolicy != config.WritePolicyDirectAllowed {
+		t.Fatalf("personal row = %#v", byName["personal"])
+	}
+	if byName["external"].Scope != config.SourceScopeExternal || byName["external"].WritePolicy != config.WritePolicyOverlayPreferred {
+		t.Fatalf("external row = %#v", byName["external"])
+	}
+	if byName["manifest"].PolicySource != config.PolicySourceManifest ||
+		byName["manifest"].ManifestPath == "" ||
+		byName["manifest"].LLMGuidance == "" ||
+		byName["manifest"].RecommendedWorkflow != "draft_then_promote" {
+		t.Fatalf("manifest row = %#v", byName["manifest"])
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list text code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "POLICY") || !strings.Contains(stdout.String(), "team/draft_promote") {
+		t.Fatalf("source list text = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "show", "manifest"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source show code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "policy: team/draft_promote") ||
+		!strings.Contains(stdout.String(), "manifest_path:") ||
+		!strings.Contains(stdout.String(), "llm_guidance: Confirm overlay") {
+		t.Fatalf("source show = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", filepath.Join(root, "bad"), "--shared", "--personal"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("source add conflicting scope code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "use only one") {
+		t.Fatalf("conflicting scope stderr = %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", filepath.Join(root, "bad-policy"), "--write-policy", "merge"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("source add bad write policy code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid source write policy") {
+		t.Fatalf("bad write policy stderr = %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add help code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "--shared") || !strings.Contains(stdout.String(), "--write-policy") {
+		t.Fatalf("source add help = %q", stdout.String())
+	}
+}
+
+func TestCLISourceEditPolicyBehavior(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "editable-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", source, "--name", "editable", "--personal"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add editable code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "edit", "editable", "redis", "--file", "SKILL.md", "--content", "Dry run.\n", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source edit dry run code = %d stderr=%s", code, stderr.String())
+	}
+	payload := assertCommonCLIPreview(t, stdout.Bytes(), "write", filepath.Join(source, "redis", "SKILL.md"))
+	resources := payload["canonical_resources"].(map[string]any)
+	if resources["source_id"] == "" || resources["source_display_name"] != "editable" {
+		t.Fatalf("source edit resources = %#v", resources)
+	}
+	if strings.Contains(readTestFile(t, filepath.Join(source, "redis", "SKILL.md")), "Dry run.") {
+		t.Fatalf("source edit dry run stdout=%q file=%q", stdout.String(), readTestFile(t, filepath.Join(source, "redis", "SKILL.md")))
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "edit", "editable", "redis", "--content", "Dry run.\n"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source edit human preview code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "preview write "+filepath.Join(source, "redis", "SKILL.md")) {
+		t.Fatalf("source edit human preview = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "edit", "editable", "redis", "--file", "SKILL.md", "--content", "Edited.\n", "--yes"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source edit write code = %d stderr=%s", code, stderr.String())
+	}
+	if readTestFile(t, filepath.Join(source, "redis", "SKILL.md")) != "Edited.\n" {
+		t.Fatalf("source edit did not write file")
+	}
+
+	readOnly := filepath.Join(root, "read-only-source")
+	writeTestFile(t, filepath.Join(readOnly, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "add", readOnly, "--name", "read-only", "--external"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add read-only code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "edit", "read-only", "redis", "--file", "SKILL.md", "--content", "No.\n", "--yes"}, &stdout, &stderr); code == 0 {
+		t.Fatal("read-only source edit unexpectedly succeeded")
+	}
+	if !strings.Contains(stderr.String(), "read_only") {
+		t.Fatalf("read-only source edit stderr = %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "edit", "owner/repo", "redis", "--content", "No.\n"}, &stdout, &stderr); code == 0 {
+		t.Fatal("remote source edit unexpectedly succeeded")
+	}
+}
+
+func TestCLISourceIdentifierFormsAndResolutionErrors(t *testing.T) {
+	root, configPath := setupEnv(t)
+	source := filepath.Join(root, "Obsidian Skills")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n", 0o644)
+	link := filepath.Join(root, "skills-link")
+	if err := os.Symlink(source, link); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", source, "--name", "Obsidian"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source list code = %d stderr=%s", code, stderr.String())
+	}
+	var rows []sourceRow
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("source rows: %v %#v", err, rows)
+	}
+	for _, identifier := range []string{rows[0].ID, "Obsidian", "obsidian", source, filepath.Clean(source), link} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run([]string{"source", "show", identifier, "--json"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("source show %q code = %d stderr=%s", identifier, code, stderr.String())
+		}
+		var shown sourceRow
+		if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil || shown.ID != rows[0].ID {
+			t.Fatalf("source show %q: %v %#v", identifier, err, shown)
+		}
+	}
+
+	one := filepath.Join(root, "one")
+	two := filepath.Join(root, "two")
+	writeTestFile(t, filepath.Join(one, "redis", "SKILL.md"), "---\nname: Redis\n---\n", 0o644)
+	writeTestFile(t, filepath.Join(two, "redis", "SKILL.md"), "---\nname: Redis\n---\n", 0o644)
+	configData, err := json.Marshal(map[string]any{
+		"agents": map[string]string{"codex": filepath.Join(root, "codex-skills")},
+		"sources": []map[string]any{
+			{"name": "Team", "source": one},
+			{"name": "team", "source": two},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, configPath, string(configData), 0o644)
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "show", "TEAM"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("ambiguous show code = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ambiguous") || strings.Contains(stderr.String(), one) || strings.Contains(stderr.String(), two) {
+		t.Fatalf("ambiguous show error = %q", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "remove", "missing", "--keep-installed"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("unknown remove code = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not found") || !strings.Contains(stderr.String(), "available") || strings.Contains(stderr.String(), one) || strings.Contains(stderr.String(), two) {
+		t.Fatalf("unknown remove error = %q", stderr.String())
+	}
+}
+
+func TestE2EPersonalSourceDirectEditLifecycle(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "personal-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", source, "--name", "personal", "--personal"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", "personal", "--skill", "redis", "--agent", "codex"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "edit", "personal", "redis", "--file", "SKILL.md", "--content", "---\nname: Redis\n---\n\nEdited.\n", "--yes"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source edit code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update", "redis", "--agent", "codex"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("update code = %d stderr=%s", code, stderr.String())
+	}
+	rendered := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md"))
+	if !strings.Contains(rendered, "Edited.") {
+		t.Fatalf("rendered skill missing edited source content: %s", rendered)
+	}
+}
+
+func TestE2ETeamDraftPromoteLifecycle(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "team-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", source, "--name", "team", "--shared"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", "team", "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"draft", "create", "redis", "--no-edit"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("draft create code = %d stderr=%s", code, stderr.String())
+	}
+	writeTestFile(t, filepath.Join(root, "home", "drafts", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nDrafted.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"draft", "promote", "redis", "--to-source", "team", "--dry-run"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("promote dry run code = %d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(readTestFile(t, filepath.Join(source, "redis", "SKILL.md")), "Drafted.") {
+		t.Fatal("dry-run promotion mutated source")
+	}
+	if !strings.Contains(stdout.String(), "preview write "+filepath.Join(source, "redis", "SKILL.md")) {
+		t.Fatalf("promote human preview = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"draft", "promote", "redis", "--to-source", "team", "--yes"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("promote write code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(readTestFile(t, filepath.Join(source, "redis", "SKILL.md")), "Drafted.") {
+		t.Fatal("promotion did not update source")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("update code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")), "Drafted.") {
+		t.Fatal("updated store missing promoted content")
+	}
+}
+
+func TestE2EReadOnlySourceRejections(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "read-only-source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"source", "add", source, "--name", "read-only", "--external"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("source add code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", "read-only", "--skill", "redis", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
+	}
+	originalStore := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"))
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"source", "edit", "read-only", "redis", "--file", "SKILL.md", "--content", "Blocked.\n", "--yes"}, &stdout, &stderr); code == 0 {
+		t.Fatal("read-only source edit unexpectedly succeeded")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"draft", "create", "redis", "--no-edit"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("draft create code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"draft", "promote", "redis", "--to-source", "read-only", "--yes"}, &stdout, &stderr); code == 0 {
+		t.Fatal("read-only promotion unexpectedly succeeded")
+	}
+	if readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")) != originalStore {
+		t.Fatal("read-only failures mutated store")
+	}
+}
+
 func TestCLIUpdatePolicyCommandRemoved(t *testing.T) {
 	root, _ := setupEnv(t)
 	source := filepath.Join(root, "update-policy-source")
@@ -2568,7 +3058,7 @@ func TestSyncErrors(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"sync", "--dry-run"}, &stdout, &stderr); code != 2 {
+	if code := Run([]string{"sync", "--wat"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("unknown flag code = %d", code)
 	}
 
