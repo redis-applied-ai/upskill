@@ -70,14 +70,24 @@ type notice struct {
 }
 
 type sourceRow struct {
-	ID                  string `json:"id"`
-	Name                string `json:"name,omitempty"`
-	DisplayName         string `json:"display_name"`
-	Source              string `json:"source"`
-	Ref                 string `json:"ref,omitempty"`
-	Subpath             string `json:"subpath,omitempty"`
-	CanonicalID         string `json:"canonical_id"`
-	DefaultUpdatePolicy string `json:"default_update_policy"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name,omitempty"`
+	DisplayName         string   `json:"display_name"`
+	Source              string   `json:"source"`
+	Ref                 string   `json:"ref,omitempty"`
+	Subpath             string   `json:"subpath,omitempty"`
+	CanonicalID         string   `json:"canonical_id"`
+	DefaultUpdatePolicy string   `json:"default_update_policy"`
+	Scope               string   `json:"scope"`
+	WritePolicy         string   `json:"write_policy"`
+	Authors             []string `json:"authors,omitempty"`
+	Owners              []string `json:"owners,omitempty"`
+	LLMGuidance         string   `json:"llm_guidance,omitempty"`
+	PolicySource        string   `json:"policy_source"`
+	ManifestPath        string   `json:"manifest_path,omitempty"`
+	ManifestWarning     string   `json:"manifest_warning,omitempty"`
+	RecommendedWorkflow string   `json:"recommended_workflow"`
+	ResolvedPath        string   `json:"resolved_path,omitempty"`
 }
 
 func Serve(cfg config.Config, in io.Reader, out io.Writer) error {
@@ -130,9 +140,19 @@ func handle(cfg config.Config, req request) response {
 		result, err := callTool(cfg, params.Name, params.Arguments)
 		notices := updateNotices(cfg)
 		if err != nil {
-			resp.Result = toolResult(toolCallErrorPayload(params.Name, params.Arguments, err), true, notices)
+			payload := toolCallErrorPayload(params.Name, params.Arguments, err)
+			if partial, ok := err.(partialResultProvider); ok {
+				common := mutationResponse(cfg, params.Name, params.Arguments, partial.PartialResult())
+				if commonMap, commonOK := markPartialActionStatuses(common).(map[string]any); commonOK {
+					for key, value := range commonMap {
+						payload[key] = value
+					}
+				}
+			}
+			resp.Result = toolResult(payload, true, notices)
 			return resp
 		}
+		result = mutationResponse(cfg, params.Name, params.Arguments, result)
 		resp.Result = toolResult(result, false, notices)
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found"}
@@ -215,6 +235,17 @@ func toolList() []map[string]any {
 			"ref":     stringProp("Optional Git branch, tag, or commit override."),
 			"subpath": stringProp("Optional source subpath override."),
 			"skill":   stringProp("Optional skill ID or name filter."),
+		}, []string{"source"}),
+		tool("upsert_source_skill_file", "Dry-run or write one file in a configured local source skill. This never writes store, rendered output, overlays, drafts, imports, or VCS state.", map[string]any{
+			"source":               stringProp("Configured local source stable ID, configured name, display name (case-insensitive), exact source string, or normalized local path."),
+			"skill_id":             stringProp("Skill identifier inside the source."),
+			"skill_name":           stringProp("Alias for skill_id."),
+			"path":                 stringProp("Skill-relative file path. Defaults to SKILL.md."),
+			"content":              stringProp("Plain-text file content."),
+			"base64_content":       stringProp("Base64-encoded file content."),
+			"dry_run":              boolPropDefault("Preview planned write without changing files. Defaults to true.", true),
+			"confirm_source_write": boolProp("Set after confirming the user wants a source edit instead of an overlay or draft workflow."),
+			"reason":               stringProp("Reason for a direct source edit; required by draft_promote policy."),
 		}, []string{"source"}),
 		tool("check_skill_updates", "Check installed skills against their locked sources without updating them.", map[string]any{
 			"skill_id":     stringProp("Optional installed skill identifier."),
@@ -300,6 +331,11 @@ func tool(name string, description string, properties map[string]any, required [
 
 func addToolSchemaConstraints(name string, schema map[string]any) {
 	switch name {
+	case "upsert_source_skill_file":
+		schema["allOf"] = []any{
+			requiredAlternatives("anyOf", "skill_id", "skill_name"),
+			requiredAlternatives("oneOf", "content", "base64_content"),
+		}
 	case "upsert_skill_overlay_file":
 		schema["allOf"] = []any{
 			requiredAlternatives("anyOf", "skill_id", "skill_name"),
@@ -365,6 +401,8 @@ func callTool(cfg config.Config, name string, args map[string]any) (any, error) 
 		return listSources(cfg), nil
 	case "find_source_skills":
 		return findSourceSkills(cfg, args)
+	case "upsert_source_skill_file":
+		return upsertSourceSkillFile(cfg, args)
 	case "check_skill_updates":
 		return checkSkillUpdates(cfg, args)
 	case "read_skill":
@@ -436,6 +474,12 @@ func listSources(cfg config.Config) []sourceRow {
 	sources := config.SourceRecords(cfg.Sources)
 	rows := make([]sourceRow, 0, len(sources))
 	for _, source := range sources {
+		source = config.NormalizeSource(source)
+		policy := library.SourcePolicyForSource(cfg, source)
+		resolvedPath := ""
+		if resolution, err := library.ResolveConfiguredSource(cfg, source.ID); err == nil {
+			resolvedPath = resolution.ResolvedPath
+		}
 		rows = append(rows, sourceRow{
 			ID:                  source.ID,
 			Name:                source.Name,
@@ -445,6 +489,16 @@ func listSources(cfg config.Config) []sourceRow {
 			Subpath:             source.Subpath,
 			CanonicalID:         config.SourceKey(source),
 			DefaultUpdatePolicy: config.NormalizeUpdatePolicy(source.DefaultUpdatePolicy),
+			Scope:               policy.Scope,
+			WritePolicy:         policy.WritePolicy,
+			Authors:             policy.Authors,
+			Owners:              policy.Owners,
+			LLMGuidance:         policy.LLMGuidance,
+			PolicySource:        policy.PolicySource,
+			ManifestPath:        policy.ManifestPath,
+			ManifestWarning:     policy.ManifestWarning,
+			RecommendedWorkflow: policy.RecommendedWorkflow,
+			ResolvedPath:        resolvedPath,
 		})
 	}
 	return rows
@@ -456,24 +510,60 @@ func findSourceSkills(cfg config.Config, args map[string]any) (map[string]any, e
 		return nil, fmt.Errorf("source is required")
 	}
 	limit := intArg(args, "limit", 100)
-	skills, total, err := library.SearchSource(cfg, source, strArg(args, "query"), library.InstallOptions{
+	opts := library.InstallOptions{
 		SkillFilter: strArg(args, "skill"),
 		Ref:         strArg(args, "ref"),
 		Subpath:     strArg(args, "subpath"),
-	}, limit)
+	}
+	skills, total, err := library.SearchSource(cfg, source, strArg(args, "query"), opts, limit)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := library.SourcePolicyForInput(cfg, source, opts)
 	if err != nil {
 		return nil, err
 	}
 	if skills == nil {
 		skills = []library.SourceSkill{}
 	}
-	return map[string]any{
-		"source":       source,
-		"query":        strArg(args, "query"),
-		"total":        total,
-		"skills":       skills,
-		"base_mutated": false,
-	}, nil
+	result := map[string]any{
+		"source":               source,
+		"query":                strArg(args, "query"),
+		"total":                total,
+		"skills":               skills,
+		"source_policy":        policy,
+		"recommended_workflow": policy.RecommendedWorkflow,
+		"base_mutated":         false,
+	}
+	if resolution, resolveErr := library.ResolveConfiguredSource(cfg, source); resolveErr == nil {
+		result["source_id"] = resolution.Source.ID
+		result["source_name"] = resolution.ConfiguredAs
+		result["source_display_name"] = config.SourceDisplayName(resolution.Source)
+		result["resolved_path"] = resolution.ResolvedPath
+	} else {
+		var resolutionFailure library.SourceResolutionError
+		if errors.As(resolveErr, &resolutionFailure) && resolutionFailure.Ambiguous {
+			return nil, resolveErr
+		}
+	}
+	return result, nil
+}
+
+func upsertSourceSkillFile(cfg config.Config, args map[string]any) (any, error) {
+	skill := strArg(args, "skill_id")
+	if skill == "" {
+		skill = strArg(args, "skill_name")
+	}
+	return library.UpsertSourceSkillFile(cfg, library.SourceSkillFileWriteOptions{
+		SourceName:         strArg(args, "source"),
+		Skill:              skill,
+		Path:               strArgDefault(args, "path", "SKILL.md"),
+		Content:            strArg(args, "content"),
+		Base64Content:      strArg(args, "base64_content"),
+		DryRun:             boolArg(args, "dry_run", true),
+		ConfirmSourceWrite: boolArg(args, "confirm_source_write", false),
+		Reason:             strArg(args, "reason"),
+	})
 }
 
 func checkSkillUpdates(cfg config.Config, args map[string]any) (map[string]any, error) {
@@ -509,6 +599,7 @@ func checkSkillUpdates(cfg config.Config, args map[string]any) (map[string]any, 
 }
 
 func readSkill(cfg config.Config, args map[string]any) (any, error) {
+	rawID := strArg(args, "skill_id")
 	root, err := skillRoot(cfg, args)
 	if err != nil {
 		return nil, err
@@ -518,8 +609,15 @@ func readSkill(cfg config.Config, args map[string]any) (any, error) {
 		return nil, err
 	}
 	result := map[string]any{
-		"skill_id": resultSkillID(strArg(args, "skill_id")),
+		"skill_id": resultSkillID(rawID),
 		"content":  string(data),
+	}
+	if !isDraftID(rawID) {
+		if policy, ok, err := library.SourcePolicyForInstalledSkill(cfg, rawID); err == nil && ok {
+			result["source_policy"] = policy
+			result["recommended_workflow"] = policy.RecommendedWorkflow
+			result["policy_notices"] = config.PolicyNotices(policy)
+		}
 	}
 	if boolArg(args, "include_files", true) {
 		files, err := fileManifest(root, "", true, false, intArg(args, "file_limit", 100))

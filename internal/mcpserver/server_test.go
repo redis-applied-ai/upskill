@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -62,6 +63,25 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func configWithInstalledPolicySource(t *testing.T, scope string, writePolicy string) config.Config {
+	t.Helper()
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "policy-source")
+	writeFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n")
+	writeFile(t, filepath.Join(sourceRoot, "redis", "references", "guide.md"), "Guide.\n")
+	source := config.NormalizeSource(config.Source{
+		Name:        "policy-source",
+		Source:      sourceRoot,
+		Scope:       scope,
+		WritePolicy: writePolicy,
+	})
+	cfg.Sources[config.SourceKey(source)] = source
+	if _, err := library.InstallSource(cfg, "policy-source", library.InstallOptions{SkillFilter: "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }
 
 func writeMCPZip(t *testing.T, path string, files map[string]string) {
@@ -168,7 +188,192 @@ func TestMCPRegistryDescriptionAndGeneratedInstructions(t *testing.T) {
 	initialized := handle(testConfig(t), request{ID: json.RawMessage(`1`), Method: "initialize"})
 	result := initialized.Result.(map[string]any)
 	if result["instructions"] != instructions {
-		t.Fatal("initialize instructions are not registry-generated")
+		t.Fatalf("initialize instructions are not registry-generated")
+	}
+}
+
+func TestCallableToolDocumentationMarkers(t *testing.T) {
+	for name, content := range map[string]string{
+		"valid":   "<!-- upskill-callable-tools: find_skills, read_skill -->",
+		"ignored": "<!-- upskill-callable-tools: find_skills, old_tool -->\n<!-- upskill-callable-tools-ignore: old_tool -->",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := lintCallableToolMarkers(content); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if err := lintCallableToolMarkers("<!-- upskill-callable-tools: upsert_skill_file -->"); err == nil || !strings.Contains(err.Error(), "upsert_skill_file") {
+		t.Fatalf("stale callable marker error = %v", err)
+	}
+
+	for _, path := range []string{
+		"../../README.md",
+		"../../prompts/AGENTS.md",
+		"../../docs/getting-started.md",
+		"../../docs/workflows.md",
+	} {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := lintCallableToolMarkers(string(content)); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+	}
+}
+
+func TestMCPRegistryDefinitionsAreComplete(t *testing.T) {
+	seen := map[string]bool{}
+	for _, definition := range toolList() {
+		name, nameOK := definition["name"].(string)
+		description, descriptionOK := definition["description"].(string)
+		schema, schemaOK := definition["inputSchema"].(map[string]any)
+		if !nameOK || strings.TrimSpace(name) == "" {
+			t.Fatalf("tool has no name: %#v", definition)
+		}
+		if seen[name] {
+			t.Fatalf("duplicate tool name: %s", name)
+		}
+		seen[name] = true
+		if !descriptionOK || strings.TrimSpace(description) == "" {
+			t.Fatalf("tool %s has no description", name)
+		}
+		if !schemaOK || schema["type"] != "object" {
+			t.Fatalf("tool %s has invalid object schema: %#v", name, schema)
+		}
+		if _, ok := schema["properties"].(map[string]any); !ok {
+			t.Fatalf("tool %s has invalid properties: %#v", name, schema["properties"])
+		}
+		if schema["additionalProperties"] != false {
+			t.Fatalf("tool %s must reject unknown parameters: %#v", name, schema)
+		}
+	}
+}
+
+func TestMCPDescribeToolMatchesEveryRegistryDefinition(t *testing.T) {
+	cfg := testConfig(t)
+	for _, definition := range toolList() {
+		name := definition["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			described, err := callTool(cfg, "describe_tool", map[string]any{"name": name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := described.(map[string]any)
+			if mustJSON(payload["inputSchema"]) != mustJSON(definition["inputSchema"]) {
+				t.Fatalf("described schema drift for %s\nwant: %s\n got: %s", name, mustJSON(definition["inputSchema"]), mustJSON(payload["inputSchema"]))
+			}
+			if mustJSON(payload["accepted_parameter_names"]) != mustJSON(acceptedParameterNames(definition)) {
+				t.Fatalf("accepted names drift for %s: %#v", name, payload)
+			}
+		})
+	}
+}
+
+func TestMCPRegistryArgumentValidationCases(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		args    map[string]any
+		wantErr string
+	}{
+		{name: "required", tool: "read_skill", args: map[string]any{}, wantErr: `parameter "skill_id" is required`},
+		{name: "wrong type", tool: "find_skills", args: map[string]any{"limit": "ten"}, wantErr: `parameter "limit" must be integer`},
+		{name: "one of missing", tool: "upsert_skill_draft_file", args: map[string]any{"draft_id": "draft:redis", "path": "SKILL.md"}, wantErr: `exactly one of "content" or "base64_content" is required`},
+		{name: "one of duplicate", tool: "upsert_skill_draft_file", args: map[string]any{"draft_id": "draft:redis", "path": "SKILL.md", "content": "a", "base64_content": "Yg=="}, wantErr: `use only one of "content" or "base64_content"`},
+		{name: "any of", tool: "render_skill_draft", args: map[string]any{}, wantErr: `one of "draft_id" or "skill_id" or "skill_name" is required`},
+		{name: "unknown", tool: "find_skills", args: map[string]any{"bogus": true}, wantErr: `unknown parameter "bogus"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateToolArguments(tc.tool, tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validateToolArguments(%s, %#v) error = %v, want %q", tc.tool, tc.args, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestMCPUnknownParametersAvoidWeakSuggestionsAndValues(t *testing.T) {
+	cfg := testConfig(t)
+	params, _ := json.Marshal(callParams{Name: "find_skills", Arguments: map[string]any{
+		"completely_unrelated_parameter": "do-not-echo-this-value",
+	}})
+	resp := handle(cfg, request{ID: json.RawMessage(`1`), Method: "tools/call", Params: params})
+	result := resp.Result.(map[string]any)
+	structured := result["structuredContent"].(map[string]any)
+	if _, ok := structured["did_you_mean"]; ok {
+		t.Fatalf("weak parameter suggestion returned: %#v", structured)
+	}
+	if strings.Contains(mustJSON(structured), "do-not-echo-this-value") {
+		t.Fatalf("validation error exposed argument value: %#v", structured)
+	}
+
+	params, _ = json.Marshal(callParams{Name: "find_skills", Arguments: map[string]any{
+		"limit": "another-secret-value",
+	}})
+	resp = handle(cfg, request{ID: json.RawMessage(`2`), Method: "tools/call", Params: params})
+	result = resp.Result.(map[string]any)
+	if strings.Contains(mustJSON(result["structuredContent"]), "another-secret-value") {
+		t.Fatalf("type error exposed argument value: %#v", result)
+	}
+}
+
+func TestMCPUnknownToolErrorSuggestsRegisteredTool(t *testing.T) {
+	params, _ := json.Marshal(callParams{Name: "describe_too", Arguments: map[string]any{}})
+	resp := handle(testConfig(t), request{ID: json.RawMessage(`1`), Method: "tools/call", Params: params})
+	result := resp.Result.(map[string]any)
+	structured := result["structuredContent"].(map[string]any)
+	if structured["error"] != "unknown_tool" || structured["schema_version"] != 1 {
+		t.Fatalf("unknown tool payload = %#v", structured)
+	}
+	if structured["did_you_mean"].(map[string]string)["describe_too"] != "describe_tool" {
+		t.Fatalf("unknown tool suggestion = %#v", structured)
+	}
+	if !strings.Contains(mustJSON(structured["available_tool_names"]), "describe_tool") {
+		t.Fatalf("available names missing describe_tool: %#v", structured)
+	}
+}
+
+func TestMCPStdioRegistryAndValidationLifecycle(t *testing.T) {
+	var input bytes.Buffer
+	for _, message := range []map[string]any{
+		{"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+		{"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+		{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": callParams{Name: "describe_tool", Arguments: map[string]any{"name": "find_skills"}}},
+		{"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": callParams{Name: "find_skills", Arguments: map[string]any{"bogus": true}}},
+		{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": callParams{Name: "find_skills", Arguments: map[string]any{"query": "cache"}}},
+	} {
+		input.Write(EncodeForTest(message))
+	}
+	var output bytes.Buffer
+	if err := Serve(testConfig(t), &input, &output); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(&output)
+	responses := make([]string, 0, 5)
+	for index := 0; index < 5; index++ {
+		frame, err := readMessage(reader)
+		if err != nil {
+			t.Fatalf("read response %d: %v", index+1, err)
+		}
+		responses = append(responses, string(frame))
+		var response map[string]any
+		if err := json.Unmarshal(frame, &response); err != nil {
+			t.Fatalf("response %d is not JSON: %v\n%s", index+1, err, frame)
+		}
+		if response["id"] != float64(index+1) {
+			t.Fatalf("response %d id = %#v", index+1, response["id"])
+		}
+	}
+	if _, err := readMessage(reader); !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected extra stdio response: %v", err)
+	}
+	text := strings.Join(responses, "\n")
+	for _, want := range []string{"Upskill MCP tools", `"tools"`, `"accepted_parameter_names"`, `"invalid_tool_arguments"`, "cache"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stdio lifecycle missing %q in %s", want, text)
+		}
 	}
 }
 
@@ -184,9 +389,14 @@ func TestMCPToolErrorsIncludeSchemaAndUnknownKeySuggestion(t *testing.T) {
 	resp := handle(cfg, request{ID: json.RawMessage(`1`), Method: "tools/call", Params: params})
 	result := resp.Result.(map[string]any)
 	structured := result["structuredContent"].(map[string]any)
-	if structured["error"] != "invalid_tool_arguments" ||
-		structured["message"] != `unknown parameter "destination"; did you mean "to_source"?` {
-		t.Fatalf("unknown parameter payload = %#v", structured)
+	if structured["message"] != `unknown parameter "destination"; did you mean "to_source"?` {
+		t.Fatalf("unknown parameter message = %#v", structured["message"])
+	}
+	if structured["schema_version"] != 1 {
+		t.Fatalf("error schema version = %#v", structured["schema_version"])
+	}
+	if path, ok := structured["validation_path"].([]string); !ok || len(path) != 0 {
+		t.Fatalf("validation path = %#v", structured["validation_path"])
 	}
 	if structured["did_you_mean"].(map[string]string)["destination"] != "to_source" ||
 		!strings.Contains(mustJSON(structured["inputSchema"]), "to_source") {
@@ -282,7 +492,10 @@ func TestMCPListSources(t *testing.T) {
 		rows[0].DisplayName != "team" ||
 		rows[0].Ref != "main" ||
 		rows[0].Subpath != "skills" ||
-		rows[0].DefaultUpdatePolicy != config.UpdatePolicyAuto {
+		rows[0].DefaultUpdatePolicy != config.UpdatePolicyAuto ||
+		rows[0].Scope != config.SourceScopePersonal ||
+		rows[0].WritePolicy != config.WritePolicyDirectAllowed ||
+		rows[0].RecommendedWorkflow != "direct_source_edit" {
 		t.Fatalf("source row = %#v", rows[0])
 	}
 }
@@ -294,7 +507,8 @@ func TestMCPSourceIdentifiersResolveByNameIDAndPath(t *testing.T) {
 	source := config.NormalizeSource(config.Source{Name: "Obsidian", Source: sourceRoot})
 	cfg.Sources[config.SourceKey(source)] = source
 
-	for _, identifier := range []string{"Obsidian", source.ID, sourceRoot} {
+	identifiers := []string{"Obsidian", "obsidian", source.ID, sourceRoot, filepath.Join(sourceRoot, ".")}
+	for _, identifier := range identifiers {
 		found, err := callTool(cfg, "find_source_skills", map[string]any{"source": identifier})
 		if err != nil {
 			t.Fatalf("find source by %q: %v", identifier, err)
@@ -308,17 +522,38 @@ func TestMCPSourceIdentifiersResolveByNameIDAndPath(t *testing.T) {
 	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
 		t.Fatal(err)
 	}
-	promoted, err := callTool(cfg, "promote_skill_draft", map[string]any{
-		"draft_id":  "draft:redis",
-		"to_source": source.ID,
-		"dry_run":   true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := promoted.(draft.PromoteResult)
-	if payload.Source != "Obsidian" || payload.Destination != filepath.Join(sourceRoot, "redis") || !payload.DryRun {
-		t.Fatalf("promotion source resolution = %#v", payload)
+	for _, identifier := range identifiers {
+		promoted, err := callTool(cfg, "promote_skill_draft", map[string]any{
+			"draft_id":  "draft:redis",
+			"to_source": identifier,
+			"dry_run":   true,
+		})
+		if err != nil {
+			t.Fatalf("promote by %q: %v", identifier, err)
+		}
+		payload := promoted.(map[string]any)
+		if payload["source"] != "Obsidian" ||
+			payload["source_identifier"] != identifier ||
+			payload["source_id"] != source.ID ||
+			payload["source_display_name"] != "Obsidian" ||
+			payload["resolved_path"] != sourceRoot {
+			t.Fatalf("promotion source resolution by %q = %#v", identifier, payload)
+		}
+
+		edited, err := callTool(cfg, "upsert_source_skill_file", map[string]any{
+			"source":   identifier,
+			"skill_id": "redis",
+			"path":     "SKILL.md",
+			"content":  "Preview only.\n",
+			"dry_run":  true,
+		})
+		if err != nil {
+			t.Fatalf("source edit by %q: %v", identifier, err)
+		}
+		editPayload := edited.(library.SourceSkillFileWriteResult)
+		if editPayload.SourceID != source.ID || editPayload.SourceDisplayName != "Obsidian" || editPayload.ResolvedPath != sourceRoot {
+			t.Fatalf("source edit resolution by %q = %#v", identifier, editPayload)
+		}
 	}
 }
 
@@ -339,6 +574,10 @@ func TestMCPFindSourceSkillsDoesNotInstall(t *testing.T) {
 	skills, ok := payload["skills"].([]library.SourceSkill)
 	if !ok || len(skills) != 2 {
 		t.Fatalf("skills = %#v", payload["skills"])
+	}
+	if !strings.Contains(mustJSON(payload["source_policy"]), config.WritePolicyDirectAllowed) ||
+		payload["recommended_workflow"] != "direct_source_edit" {
+		t.Fatalf("source policy missing from source search: %#v", payload)
 	}
 	if got := readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md")); strings.Contains(got, "New source copy.") {
 		t.Fatalf("source inspection mutated installed store:\n%s", got)
@@ -367,6 +606,49 @@ func TestMCPDoesNotExposeSourceInstallTool(t *testing.T) {
 	}
 	if _, err := callTool(testConfig(t), "install_skill", map[string]any{}); err == nil {
 		t.Fatal("install_skill unexpectedly succeeded")
+	}
+}
+
+func TestMCPInstalledSkillPolicyResults(t *testing.T) {
+	cfg := configWithInstalledPolicySource(t, config.SourceScopeTeam, config.WritePolicyDraftPromote)
+	found, err := callTool(cfg, "find_skills", map[string]any{"query": "redis", "limit": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := mustJSON(found)
+	if !strings.Contains(text, `"source_policy"`) ||
+		!strings.Contains(text, config.WritePolicyDraftPromote) ||
+		!strings.Contains(text, `"recommended_workflow":"draft_then_promote"`) {
+		t.Fatalf("find_skills policy = %s", text)
+	}
+	read, err := callTool(cfg, "read_skill", map[string]any{"skill_id": "redis", "include_files": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = mustJSON(read)
+	if !strings.Contains(text, `"source_policy"`) ||
+		!strings.Contains(text, config.SourceScopeTeam) ||
+		!strings.Contains(text, config.WritePolicyDraftPromote) {
+		t.Fatalf("read_skill policy = %s", text)
+	}
+}
+
+func TestMCPSourcePolicyToolSchema(t *testing.T) {
+	var sourceEdit map[string]any
+	for _, tool := range toolList() {
+		if tool["name"] == "upsert_source_skill_file" {
+			sourceEdit = tool
+			break
+		}
+	}
+	if sourceEdit == nil {
+		t.Fatal("upsert_source_skill_file tool missing")
+	}
+	text := mustJSON(sourceEdit)
+	for _, want := range []string{"dry_run", "confirm_source_write", "reason", "source edit instead of an overlay", "never writes store"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("schema missing %q: %s", want, text)
+		}
 	}
 }
 
@@ -631,6 +913,136 @@ func TestMCPMutableFileDryRunsDoNotWriteOrDelete(t *testing.T) {
 	}
 }
 
+func TestMCPMutationPreviewContractAndActionParity(t *testing.T) {
+	cfg := testConfig(t)
+	args := map[string]any{
+		"skill_id": "redis",
+		"path":     "SKILL.md",
+		"content":  "Overlay.\n",
+		"dry_run":  true,
+	}
+	preview := successfulToolPayload(t, cfg, "upsert_skill_overlay_file", args)
+	if preview["dry_run"] != true || preview["applied"] != false {
+		t.Fatalf("preview contract = %#v", preview)
+	}
+	if len(preview["warnings"].([]any)) != 0 {
+		t.Fatalf("preview warnings = %#v", preview["warnings"])
+	}
+	resources := preview["canonical_resources"].(map[string]any)
+	if resources["skill_id"] != "redis" {
+		t.Fatalf("canonical resources = %#v", resources)
+	}
+	previewActions := preview["actions"].([]any)
+	if len(previewActions) != 1 || previewActions[0].(map[string]any)["operation"] != "write" || previewActions[0].(map[string]any)["overwrite"] != false {
+		t.Fatalf("preview actions = %#v", previewActions)
+	}
+	path := previewActions[0].(map[string]any)["target"].(string)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("preview wrote %s: %v", path, err)
+	}
+
+	args["dry_run"] = false
+	applied := successfulToolPayload(t, cfg, "upsert_skill_overlay_file", args)
+	if applied["dry_run"] != false || applied["applied"] != true {
+		t.Fatalf("apply contract = %#v", applied)
+	}
+	if !reflect.DeepEqual(preview["actions"], applied["actions"]) {
+		t.Fatalf("preview/apply actions differ:\npreview=%#v\napply=%#v", preview["actions"], applied["actions"])
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("apply did not write %s: %v", path, err)
+	}
+
+	args["dry_run"] = true
+	overwrite := successfulToolPayload(t, cfg, "upsert_skill_overlay_file", args)
+	if overwrite["actions"].([]any)[0].(map[string]any)["overwrite"] != true {
+		t.Fatalf("overwrite action = %#v", overwrite["actions"])
+	}
+	deleteArgs := map[string]any{"skill_id": "redis", "path": "SKILL.md", "dry_run": true}
+	deletePreview := successfulToolPayload(t, cfg, "delete_skill_overlay_file", deleteArgs)
+	deleteAction := deletePreview["actions"].([]any)[0].(map[string]any)
+	if deleteAction["operation"] != "delete" || deleteAction["target"] != path {
+		t.Fatalf("delete action = %#v", deleteAction)
+	}
+	deleteArgs["dry_run"] = false
+	deleteApply := successfulToolPayload(t, cfg, "delete_skill_overlay_file", deleteArgs)
+	if !reflect.DeepEqual(deletePreview["actions"], deleteApply["actions"]) {
+		t.Fatalf("delete preview/apply actions differ: %#v %#v", deletePreview["actions"], deleteApply["actions"])
+	}
+}
+
+func TestMutationContractCoversEveryPreviewCapableTool(t *testing.T) {
+	cfg := testConfig(t)
+	results := map[string]any{
+		"sync_skills":                syncSkillsResult{DryRun: true, Applied: false},
+		"upsert_source_skill_file":   library.SourceSkillFileWriteResult{DryRun: true, SourceID: "src_test", SkillID: "redis", AbsPath: "/tmp/source/SKILL.md"},
+		"upsert_skill_overlay_file":  map[string]any{"dry_run": true, "skill_id": "redis", "path": "/tmp/overlay", "overwrite": false},
+		"delete_skill_overlay_file":  map[string]any{"dry_run": true, "skill_id": "redis", "path": "/tmp/overlay"},
+		"upsert_skill_draft_file":    map[string]any{"dry_run": true, "draft_id": "draft:redis", "target": "/tmp/draft/file", "overwrite": false},
+		"delete_skill_draft_file":    map[string]any{"dry_run": true, "draft_id": "draft:redis", "target": "/tmp/draft/file"},
+		"delete_skill_draft":         map[string]any{"dry_run": true, "draft_id": "draft:redis", "path": "/tmp/draft"},
+		"import_skill_draft_archive": draft.ImportResult{DraftID: "draft:redis", DryRun: true, Files: []draft.ImportedFile{{Path: "SKILL.md"}}},
+		"import_skill_draft_file":    draft.ImportResult{DraftID: "draft:redis", DryRun: true, Files: []draft.ImportedFile{{Path: "reference.md"}}},
+		"promote_skill_draft":        draft.PromoteResult{DraftID: "draft:redis", DryRun: true, Destination: "/tmp/source/redis", Files: []draft.ImportedFile{{Path: "SKILL.md"}}},
+	}
+	for name, result := range results {
+		t.Run(name, func(t *testing.T) {
+			payload, ok := mutationResponse(cfg, name, map[string]any{"dry_run": true}, result).(map[string]any)
+			if !ok {
+				t.Fatalf("payload type = %T", result)
+			}
+			for _, field := range []string{"dry_run", "applied", "actions", "warnings", "canonical_resources"} {
+				if _, ok := payload[field]; !ok {
+					t.Fatalf("%s missing %s: %#v", name, field, payload)
+				}
+			}
+		})
+	}
+}
+
+func TestMutationActionsSortAndPartialFailureStatus(t *testing.T) {
+	cfg := testConfig(t)
+	root := t.TempDir()
+	completed := filepath.Join(root, "a.md")
+	if err := os.WriteFile(completed, []byte("done"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := draft.PromoteResult{
+		DraftID:     "draft:redis",
+		Destination: root,
+		DryRun:      false,
+		Files: []draft.ImportedFile{
+			{Path: "z.md"},
+			{Path: "a.md"},
+		},
+	}
+	payload := mutationResponse(cfg, "promote_skill_draft", map[string]any{"dry_run": false}, result)
+	marked := markPartialActionStatuses(payload).(map[string]any)
+	actions := marked["actions"].([]map[string]any)
+	if actions[0]["target"] != completed || actions[0]["status"] != "completed" || actions[1]["status"] != "failed" {
+		t.Fatalf("partial actions = %#v", actions)
+	}
+	if marked["applied"] != false {
+		t.Fatalf("partial apply claimed success: %#v", marked)
+	}
+}
+
+func TestMutationDefaultsRemainBackwardCompatible(t *testing.T) {
+	cfg := testConfig(t)
+	payload := successfulToolPayload(t, cfg, "upsert_skill_overlay_file", map[string]any{
+		"skill_id": "redis",
+		"path":     "SKILL.md",
+		"content":  "Applied by legacy default.\n",
+	})
+	if payload["dry_run"] != false || payload["applied"] != true {
+		t.Fatalf("legacy default changed: %#v", payload)
+	}
+	path := payload["actions"].([]any)[0].(map[string]any)["target"].(string)
+	if !strings.Contains(readFile(t, path), "legacy default") {
+		t.Fatalf("legacy default did not write %s", path)
+	}
+}
+
 func TestMCPDraftWorkflow(t *testing.T) {
 	cfg := testConfig(t)
 	created, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"})
@@ -734,12 +1146,12 @@ func TestMCPDraftWorkflow(t *testing.T) {
 	inspected, err := callTool(cfg, "import_skill_draft_archive", map[string]any{
 		"draft_id":     "draft:redis",
 		"archive_path": archive,
-		"dry_run":      true,
+		"inspect":      true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(mustJSON(inspected), `"dry_run":true`) || !strings.Contains(mustJSON(inspected), `"imported":false`) {
+	if !strings.Contains(mustJSON(inspected), `"imported":false`) {
 		t.Fatalf("inspected = %#v", inspected)
 	}
 	if _, err := callTool(cfg, "import_skill_draft_archive", map[string]any{"draft_id": "draft:redis", "archive_path": archive}); err != nil {
@@ -779,6 +1191,290 @@ func TestMCPDraftWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(mustJSON(promote), `"dry_run":true`) {
 		t.Fatalf("promote = %#v", promote)
+	}
+}
+
+func TestMCPDraftCreationIncludesSourcePolicyGuidance(t *testing.T) {
+	cases := []struct {
+		name        string
+		scope       string
+		writePolicy string
+		want        string
+	}{
+		{"team overlay preferred", config.SourceScopeTeam, config.WritePolicyOverlayPreferred, "overlay is the preferred workflow"},
+		{"personal direct", config.SourceScopePersonal, config.WritePolicyDirectAllowed, "direct source edits are allowed"},
+		{"external read only", config.SourceScopeExternal, config.WritePolicyReadOnly, "this source is read-only"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := configWithInstalledPolicySource(t, tc.scope, tc.writePolicy)
+			created, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := mustJSON(created)
+			if !strings.Contains(text, `"source_policy"`) ||
+				!strings.Contains(text, tc.writePolicy) ||
+				!strings.Contains(text, tc.want) {
+				t.Fatalf("created draft missing policy guidance: %s", text)
+			}
+		})
+	}
+}
+
+func TestMCPDraftPromotionPolicy(t *testing.T) {
+	cfg := configWithInstalledPolicySource(t, config.SourceScopeTeam, config.WritePolicyDraftPromote)
+	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "team-source")
+	cfg.Sources["team-dest"] = config.NormalizeSource(config.Source{
+		Name:        "team-dest",
+		Source:      dest,
+		Scope:       config.SourceScopeTeam,
+		WritePolicy: config.WritePolicyDraftPromote,
+	})
+	dryRun, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "team-dest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(dryRun), `"dry_run":true`) || !strings.Contains(mustJSON(dryRun), `"draft_promote"`) {
+		t.Fatalf("dry-run promote = %#v", dryRun)
+	}
+	written, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "team-dest", "dry_run": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dest, "redis", "SKILL.md")), "Base.") ||
+		!strings.Contains(mustJSON(written), `"dry_run":false`) {
+		t.Fatalf("written promote = %#v", written)
+	}
+
+	overlayDest := filepath.Join(t.TempDir(), "overlay-source")
+	cfg.Sources["overlay-dest"] = config.NormalizeSource(config.Source{
+		Name:        "overlay-dest",
+		Source:      overlayDest,
+		Scope:       config.SourceScopeTeam,
+		WritePolicy: config.WritePolicyOverlayPreferred,
+	})
+	overlay, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "overlay-dest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(overlay), `"overlay_preferred"`) ||
+		!strings.Contains(mustJSON(overlay), "overlay is the preferred workflow") {
+		t.Fatalf("overlay promote = %#v", overlay)
+	}
+
+	readOnlyDest := filepath.Join(t.TempDir(), "read-only-source")
+	cfg.Sources["read-only-dest"] = config.NormalizeSource(config.Source{
+		Name:        "read-only-dest",
+		Source:      readOnlyDest,
+		Scope:       config.SourceScopeExternal,
+		WritePolicy: config.WritePolicyReadOnly,
+	})
+	if _, err := callTool(cfg, "promote_skill_draft", map[string]any{"draft_id": "draft:redis", "to_source": "read-only-dest"}); err == nil {
+		t.Fatal("read-only promotion unexpectedly succeeded")
+	}
+}
+
+func TestMCPUpsertSourceSkillFileContract(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "editable-source")
+	writeFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
+	cfg.Sources["editable"] = config.NormalizeSource(config.Source{
+		Name:        "editable",
+		Source:      sourceRoot,
+		Scope:       config.SourceScopePersonal,
+		WritePolicy: config.WritePolicyDirectAllowed,
+	})
+
+	dryRun, err := callTool(cfg, "upsert_source_skill_file", map[string]any{
+		"source":   "editable",
+		"skill_id": "redis",
+		"path":     "SKILL.md",
+		"content":  "Edited.\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := mustJSON(dryRun)
+	if !strings.Contains(text, `"dry_run":true`) ||
+		!strings.Contains(text, `"source_mutated":false`) ||
+		!strings.Contains(text, `"base_mutated":false`) ||
+		!strings.Contains(text, `"source_policy"`) ||
+		!strings.Contains(readFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md")), "Base.") {
+		t.Fatalf("dry-run source edit = %s", text)
+	}
+
+	written, err := callTool(cfg, "upsert_source_skill_file", map[string]any{
+		"source":               "editable",
+		"skill_name":           "redis",
+		"path":                 "SKILL.md",
+		"content":              "Edited.\n",
+		"dry_run":              false,
+		"confirm_source_write": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(written), `"source_mutated":true`) ||
+		readFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md")) != "Edited.\n" {
+		t.Fatalf("written source edit = %#v", written)
+	}
+}
+
+func TestE2ETeamSourceOverlayFirstLifecycle(t *testing.T) {
+	cfg := configWithInstalledPolicySource(t, config.SourceScopeTeam, config.WritePolicyOverlayPreferred)
+	source := cfg.Sources["policy-source"].Source
+	originalSource := readFile(t, filepath.Join(source, "redis", "SKILL.md"))
+	if _, err := callTool(cfg, "upsert_skill_overlay_file", map[string]any{
+		"skill_id": "redis",
+		"path":     "SKILL.md",
+		"content":  "\nOverlay guidance.\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := callTool(cfg, "render_skill", map[string]any{"skill_id": "redis", "agent": "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(rendered), `"redis"`) {
+		t.Fatalf("rendered = %#v", rendered)
+	}
+	read, err := callTool(cfg, "read_skill", map[string]any{"skill_id": "redis", "agent": "codex", "rendered": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustJSON(read), "Overlay guidance.") {
+		t.Fatalf("rendered skill missing overlay: %#v", read)
+	}
+	if readFile(t, filepath.Join(source, "redis", "SKILL.md")) != originalSource {
+		t.Fatal("overlay workflow mutated source")
+	}
+}
+
+func TestE2EMCPStdioAgentLifecycle(t *testing.T) {
+	cfg := configWithInstalledPolicySource(t, config.SourceScopePersonal, config.WritePolicyDirectAllowed)
+	source := cfg.Sources["policy-source"].Source
+	var input bytes.Buffer
+	for i, msg := range []map[string]any{
+		{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": callParams{Name: "list_sources", Arguments: map[string]any{}}},
+		{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": callParams{Name: "describe_tool", Arguments: map[string]any{"name": "promote_skill_draft"}}},
+		{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": callParams{Name: "create_skill_draft", Arguments: map[string]any{"skill_name": "redis"}}},
+		{"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": callParams{Name: "upsert_source_skill_file", Arguments: map[string]any{"source": "policy-source", "skill_id": "redis", "path": "SKILL.md", "content": "Dry run.\n"}}},
+		{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": callParams{Name: "promote_skill_draft", Arguments: map[string]any{"draft_id": "draft:redis", "to_source": "policy-source"}}},
+		{"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": callParams{Name: "promote_skill_draft", Arguments: map[string]any{"draft_id": "draft:redis", "to_source": "policy-source", "dry_run": false}}},
+		{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": callParams{Name: "find_source_skills", Arguments: map[string]any{"source": "policy-source", "query": "redis"}}},
+		{"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": callParams{Name: "render_skill_draft", Arguments: map[string]any{"draft_id": "draft:redis", "copy": false}}},
+	} {
+		if msg["id"].(int) != i+1 {
+			t.Fatalf("bad test message id: %#v", msg)
+		}
+		input.Write(EncodeForTest(msg))
+	}
+	var output bytes.Buffer
+	if err := Serve(cfg, &input, &output); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"policy-source", "source_policy", "draft:redis", "dry_run", "applied", "actions", "canonical_resources", "inputSchema", "rendered_path"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stdio lifecycle missing %q in %s", want, text)
+		}
+	}
+	if strings.Contains(readFile(t, filepath.Join(source, "redis", "SKILL.md")), "Dry run.") {
+		t.Fatal("stdio source edit dry run mutated source")
+	}
+}
+
+func TestREADMEMCPJSONExamplesReplayThroughStdio(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, mcpSection, found := strings.Cut(string(readme), "## MCP Server")
+	if !found {
+		t.Fatal("README is missing the MCP Server section")
+	}
+	if nextSection := strings.Index(mcpSection, "\n## "); nextSection >= 0 {
+		mcpSection = mcpSection[:nextSection]
+	}
+
+	var examples []callParams
+	for remaining := mcpSection; ; {
+		_, afterFence, ok := strings.Cut(remaining, "```json\n")
+		if !ok {
+			break
+		}
+		body, afterBlock, ok := strings.Cut(afterFence, "\n```")
+		if !ok {
+			t.Fatal("README has an unterminated JSON example")
+		}
+		var example callParams
+		if err := json.Unmarshal([]byte(body), &example); err != nil {
+			t.Fatalf("parse README MCP example %q: %v", body, err)
+		}
+		examples = append(examples, example)
+		remaining = afterBlock
+	}
+	if len(examples) != 3 {
+		t.Fatalf("README MCP JSON example count = %d, want 3", len(examples))
+	}
+
+	cfg := configWithInstalledPolicySource(t, config.SourceScopePersonal, config.WritePolicyDirectAllowed)
+	source := cfg.Sources["policy-source"]
+	delete(cfg.Sources, "policy-source")
+	source.Name = "personal"
+	cfg.Sources["personal"] = source
+	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var input bytes.Buffer
+	for index, example := range examples {
+		input.Write(EncodeForTest(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      index + 1,
+			"method":  "tools/call",
+			"params":  example,
+		}))
+	}
+	var output bytes.Buffer
+	if err := Serve(cfg, &input, &output); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(&output)
+	var resultText strings.Builder
+	for index := range examples {
+		frame, err := readMessage(reader)
+		if err != nil {
+			t.Fatalf("read README example response %d: %v", index+1, err)
+		}
+		var response struct {
+			Result struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+				IsError bool `json:"isError"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(frame, &response); err != nil {
+			t.Fatalf("decode README example response %d: %v", index+1, err)
+		}
+		if response.Result.IsError {
+			t.Fatalf("README MCP example %d failed: %s", index+1, frame)
+		}
+		for _, content := range response.Result.Content {
+			resultText.WriteString(content.Text)
+		}
+	}
+	if !strings.Contains(resultText.String(), `"dry_run": true`) ||
+		!strings.Contains(resultText.String(), `"applied": true`) {
+		t.Fatalf("README MCP lifecycle missing preview or apply result: %s", resultText.String())
+	}
+	if _, err := os.Stat(filepath.Join(source.Source, "redis", "SKILL.md")); err != nil {
+		t.Fatalf("README MCP apply result was not readable: %v", err)
 	}
 }
 
@@ -1357,4 +2053,26 @@ func TestToolArgumentErrors(t *testing.T) {
 func mustJSON(v any) string {
 	data, _ := json.Marshal(v)
 	return string(data)
+}
+
+func successfulToolPayload(t *testing.T, cfg config.Config, name string, args map[string]any) map[string]any {
+	t.Helper()
+	params, err := json.Marshal(callParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := handle(cfg, request{ID: json.RawMessage(`1`), Method: "tools/call", Params: params})
+	if resp.Error != nil {
+		t.Fatalf("%s RPC error: %#v", name, resp.Error)
+	}
+	result := resp.Result.(map[string]any)
+	if result["isError"] != false {
+		t.Fatalf("%s tool error: %#v", name, result)
+	}
+	content := result["content"].([]map[string]string)
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(content[0]["text"]), &payload); err != nil {
+		t.Fatalf("%s payload: %v\n%s", name, err, content[0]["text"])
+	}
+	return payload
 }

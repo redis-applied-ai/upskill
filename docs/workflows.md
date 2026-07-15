@@ -1,5 +1,7 @@
 # upskill Workflows
 
+<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file, render_skill, upsert_skill_draft_file, render_skill_draft, promote_skill_draft -->
+
 This guide shows the common workflows for using `upskill` as a local skill
 manager and MCP skill server. The examples use GitHub-style sources, but every
 source command also accepts local paths.
@@ -74,7 +76,7 @@ Use a local source when skills already live in normal editable files and
 `upskill` should keep installed base skills as synced copies.
 
 ```bash
-upskill source add ~/Documents/Notes/Memory/Skills --name personal
+upskill source add ~/Documents/Notes/Memory/Skills --name personal --personal
 upskill source skills personal
 upskill add personal --skill hello-skill --agent codex
 ```
@@ -109,7 +111,7 @@ If an existing memory server stores skill bundles as ordinary directories, point
 `upskill` at that directory:
 
 ```bash
-upskill source add ~/Obsidian/Skills --name personal
+upskill source add ~/Obsidian/Skills --name personal --personal
 upskill source skills personal
 upskill add personal --agent codex
 ```
@@ -177,7 +179,7 @@ upskill add local-examples --agent codex
 Git sources behave the same way from the user's point of view:
 
 ```bash
-upskill source add owner/repo --name team-skills --subpath skills
+upskill source add owner/repo --name team-skills --subpath skills --shared
 upskill source skills team-skills
 upskill source find team-skills redis
 upskill add team-skills --skill redis --agent codex
@@ -186,6 +188,24 @@ upskill add team-skills --skill redis --agent codex
 `source skills` and `source find` inspect the current upstream ref. They do not
 answer from the installed store and they do not install newly added upstream
 skills.
+
+## Choose Overlay, Draft, Promotion, Or Source Edit
+
+Use source policy to choose the write target:
+
+- Use an overlay when the requested behavior change is local, team-specific, or
+  agent-specific and should survive base skill updates.
+- Use a draft when the base skill itself should change upstream, especially for
+  team sources with `write_policy=draft_promote`.
+- Use direct source edit only for configured local sources with
+  `write_policy=direct_allowed`, or after explicit confirmation for
+  `overlay_preferred` / `draft_promote` sources.
+- Treat `read_only` sources as overlay-or-draft-only; source edit and promotion
+  are rejected.
+
+`upskill source show <source>` displays the effective source policy and any
+`upskill.toml` manifest metadata. MCP results expose the same policy fields to
+agents.
 
 ## Customize An Installed Skill With An Agent
 
@@ -641,7 +661,7 @@ upskill draft promote gamma-tool --to ~/src/skills/skills --dry-run
 Apply it:
 
 ```bash
-upskill draft promote gamma-tool --to ~/src/skills/skills
+upskill draft promote gamma-tool --to ~/src/skills/skills --yes
 ```
 
 Commit and open the PR:
@@ -658,11 +678,18 @@ gh pr create --fill
 Through MCP, use `promote_skill_draft` first with `dry_run: true`, then with
 `dry_run: false` after reviewing the planned writes.
 
+Do not guess the destination key. Call `describe_tool` first and copy the exact
+accepted name, `to_source`, from its live `inputSchema`. A successful preview
+returns deterministic `actions`, `warnings`, and `canonical_resources`; an
+apply returns the same action targets with `dry_run: false` and `applied: true`.
+If a client sends `destination`, the validation error includes the accepted
+names and a `to_source` suggestion before any source handler runs.
+
 If the destination is a named local source, prefer `--to-source`:
 
 ```bash
 upskill draft promote gamma-tool --to-source personal --dry-run
-upskill draft promote gamma-tool --to-source personal
+upskill draft promote gamma-tool --to-source personal --yes
 upskill add personal --skill gamma-tool
 ```
 

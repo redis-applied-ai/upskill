@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -276,6 +277,322 @@ func TestLocalSourceDiscoveryAndResolution(t *testing.T) {
 	t.Setenv("HOME", "")
 	if _, err := ParseSource("~"); err == nil {
 		t.Fatal("empty HOME tilde source unexpectedly parsed")
+	}
+}
+
+func TestResolveConfiguredSourceIdentifierFormsAndPrecedence(t *testing.T) {
+	cfg := testConfig(t)
+	root := filepath.Join(cfg.Home, "source-root")
+	destination := filepath.Join(root, "skills")
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cfg.Home, "source-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	local := config.NormalizeSource(config.Source{Name: "Obsidian", Source: root, Subpath: "skills"})
+	remote := config.NormalizeSource(config.Source{Name: "GitHub Skills", Source: "owner/repo"})
+	cfg.Sources["personal-notes"] = local
+	cfg.Sources["team-git"] = remote
+
+	tests := []struct {
+		name       string
+		identifier string
+		wantKey    string
+		wantPath   string
+	}{
+		{"stable id", local.ID, "personal-notes", destination},
+		{"configured name", "personal-notes", "personal-notes", destination},
+		{"display name", "Obsidian", "personal-notes", destination},
+		{"display case insensitive", "oBsIdIaN", "personal-notes", destination},
+		{"source string", root, "personal-notes", destination},
+		{"absolute destination", destination, "personal-notes", destination},
+		{"symlink normalized", filepath.Join(link, "skills"), "personal-notes", destination},
+		{"git stable id", remote.ID, "team-git", ""},
+		{"git configured name", "team-git", "team-git", ""},
+		{"git display name", "github skills", "team-git", ""},
+		{"git source string", "owner/repo", "team-git", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resolved, err := ResolveConfiguredSource(cfg, test.identifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.ConfiguredAs != test.wantKey || resolved.ResolvedPath != test.wantPath {
+				t.Fatalf("resolved = %#v", resolved)
+			}
+		})
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cfg.Home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	relative, err := filepath.Rel(cfg.Home, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ResolveConfiguredSource(cfg, "."+string(filepath.Separator)+relative)
+	if err != nil || resolved.ConfiguredAs != "personal-notes" {
+		t.Fatalf("relative resolution = %#v, %v", resolved, err)
+	}
+}
+
+func TestResolveConfiguredSourceAmbiguityAndSafeUnknownChoices(t *testing.T) {
+	cfg := testConfig(t)
+	secretOne := filepath.Join(cfg.Home, "secret-one")
+	secretTwo := filepath.Join(cfg.Home, "secret-two")
+	cfg.Sources["one"] = config.Source{Name: "Shared", Source: secretOne}
+	cfg.Sources["two"] = config.Source{Name: "shared", Source: secretTwo}
+
+	_, err := ResolveConfiguredSource(cfg, "SHARED")
+	var resolutionErr SourceResolutionError
+	if !errors.As(err, &resolutionErr) || !resolutionErr.Ambiguous {
+		t.Fatalf("ambiguity error = %T %v", err, err)
+	}
+	if !sort.StringsAreSorted(resolutionErr.Choices) {
+		t.Fatalf("choices are not sorted: %#v", resolutionErr.Choices)
+	}
+
+	_, err = ResolveConfiguredSource(cfg, "missing")
+	if !errors.As(err, &resolutionErr) || resolutionErr.Ambiguous {
+		t.Fatalf("unknown error = %T %v", err, err)
+	}
+	rendered := err.Error()
+	if strings.Contains(rendered, secretOne) || strings.Contains(rendered, secretTwo) {
+		t.Fatalf("unknown choices leaked source paths: %s", rendered)
+	}
+	if !strings.Contains(rendered, "src_") || !strings.Contains(rendered, "Shared") {
+		t.Fatalf("unknown choices are not actionable: %s", rendered)
+	}
+
+	exact := config.NormalizeSource(config.Source{Name: "shared", Source: filepath.Join(cfg.Home, "third")})
+	cfg.Sources["SHARED"] = exact
+	resolved, err := ResolveConfiguredSource(cfg, "SHARED")
+	if err != nil || resolved.ConfiguredAs != "SHARED" {
+		t.Fatalf("exact key should win before display matching: %#v, %v", resolved, err)
+	}
+}
+
+func TestSourcePolicyResolution(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "source-policy")
+	writeFile(t, filepath.Join(sourceRoot, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
+	writeFile(t, filepath.Join(sourceRoot, "upskill.toml"), `scope = "team"
+write_policy = "draft_promote"
+owners = ["redis"]
+`)
+	cfg.Sources["team"] = config.NormalizeSource(config.Source{Name: "team", Source: sourceRoot, Subpath: "skills"})
+
+	policy := SourcePolicyForSource(cfg, cfg.Sources["team"])
+	if policy.Scope != config.SourceScopeTeam ||
+		policy.WritePolicy != config.WritePolicyDraftPromote ||
+		policy.PolicySource != config.PolicySourceManifest ||
+		len(policy.Owners) != 1 ||
+		policy.Owners[0] != "redis" {
+		t.Fatalf("manifest policy = %#v", policy)
+	}
+
+	cfg.Sources["team"] = config.NormalizeSource(config.Source{
+		Name:        "team",
+		Source:      sourceRoot,
+		Subpath:     "skills",
+		Scope:       config.SourceScopePersonal,
+		WritePolicy: config.WritePolicyOverlayPreferred,
+	})
+	policy = SourcePolicyForSource(cfg, cfg.Sources["team"])
+	if policy.Scope != config.SourceScopePersonal ||
+		policy.WritePolicy != config.WritePolicyOverlayPreferred ||
+		policy.PolicySource != config.PolicySourceConfig {
+		t.Fatalf("config policy = %#v", policy)
+	}
+
+	rawPolicy, err := SourcePolicyForInput(cfg, sourceRoot, InstallOptions{Subpath: "skills"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawPolicy.Scope != config.SourceScopePersonal || rawPolicy.WritePolicy != config.WritePolicyOverlayPreferred {
+		t.Fatalf("configured source path policy = %#v", rawPolicy)
+	}
+
+	remotePolicy, err := SourcePolicyForInput(cfg, "owner/repo", InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remotePolicy.Scope != config.SourceScopeExternal || remotePolicy.WritePolicy != config.WritePolicyReadOnly {
+		t.Fatalf("remote policy = %#v", remotePolicy)
+	}
+}
+
+func TestInstalledSkillPolicyLookupThroughLockEntry(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "locked-source")
+	writeFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
+	cfg.Sources["team"] = config.NormalizeSource(config.Source{
+		Name:        "team",
+		Source:      sourceRoot,
+		Scope:       config.SourceScopeTeam,
+		WritePolicy: config.WritePolicyDraftPromote,
+	})
+	if _, err := InstallSource(cfg, "team", InstallOptions{SkillFilter: "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	policy, ok, err := SourcePolicyForInstalledSkill(cfg, "redis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok ||
+		policy.Scope != config.SourceScopeTeam ||
+		policy.WritePolicy != config.WritePolicyDraftPromote ||
+		policy.PolicySource != config.PolicySourceConfig {
+		t.Fatalf("installed policy = %#v ok=%v", policy, ok)
+	}
+	if _, ok, err := SourcePolicyForInstalledSkill(cfg, "missing"); err != nil || ok {
+		t.Fatalf("missing installed policy ok=%v err=%v", ok, err)
+	}
+}
+
+func TestSourceSkillFileWritePolicyBehavior(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "editable-source")
+	writeFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
+	cfg.Sources["editable"] = config.NormalizeSource(config.Source{
+		Name:        "editable",
+		Source:      sourceRoot,
+		Scope:       config.SourceScopePersonal,
+		WritePolicy: config.WritePolicyDirectAllowed,
+	})
+
+	target, err := ResolveSourceSkillFile(cfg, "editable", "redis", "SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.SkillID != "redis" || target.Path != "SKILL.md" || target.Policy.WritePolicy != config.WritePolicyDirectAllowed {
+		t.Fatalf("target = %#v", target)
+	}
+	dryRun, err := UpsertSourceSkillFile(cfg, SourceSkillFileWriteOptions{
+		SourceName: "editable",
+		Skill:      "redis",
+		Path:       "SKILL.md",
+		Content:    "Dry run.\n",
+		DryRun:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dryRun.Updated || dryRun.SourceMutated || !strings.Contains(string(mustRead(t, filepath.Join(sourceRoot, "redis", "SKILL.md"))), "Base.") {
+		t.Fatalf("dry run result=%#v file=%s", dryRun, mustRead(t, filepath.Join(sourceRoot, "redis", "SKILL.md")))
+	}
+	written, err := UpsertSourceSkillFile(cfg, SourceSkillFileWriteOptions{
+		SourceName: "editable",
+		Skill:      "redis",
+		Path:       "SKILL.md",
+		Content:    "Edited.\n",
+		DryRun:     false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !written.Updated || !written.SourceMutated || string(mustRead(t, filepath.Join(sourceRoot, "redis", "SKILL.md"))) != "Edited.\n" {
+		t.Fatalf("written result=%#v file=%s", written, mustRead(t, filepath.Join(sourceRoot, "redis", "SKILL.md")))
+	}
+}
+
+func TestSourceSkillFileWriteRejections(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "policy-write-source")
+	writeFile(t, filepath.Join(sourceRoot, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
+
+	cfg.Sources["remote"] = config.NormalizeSource(config.Source{Name: "remote", Source: "owner/repo"})
+	if _, err := ResolveSourceSkillFile(cfg, "remote", "redis", "SKILL.md"); err == nil {
+		t.Fatal("remote source file unexpectedly resolved")
+	}
+
+	cfg.Sources["editable"] = config.NormalizeSource(config.Source{Name: "editable", Source: sourceRoot})
+	if _, err := ResolveSourceSkillFile(cfg, "editable", "redis", "../bad.md"); err == nil {
+		t.Fatal("path traversal unexpectedly resolved")
+	}
+
+	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "---\nname: Redis\n---\n\nBase.\n")
+	cfg.Sources["managed"] = config.NormalizeSource(config.Source{Name: "managed", Source: cfg.StoreDir})
+	if _, err := ResolveSourceSkillFile(cfg, "managed", "redis", "SKILL.md"); err == nil {
+		t.Fatal("managed directory source unexpectedly resolved")
+	}
+
+	cfg.Sources["overlay"] = config.NormalizeSource(config.Source{
+		Name:        "overlay",
+		Source:      sourceRoot,
+		Scope:       config.SourceScopeTeam,
+		WritePolicy: config.WritePolicyOverlayPreferred,
+	})
+	if _, err := UpsertSourceSkillFile(cfg, SourceSkillFileWriteOptions{
+		SourceName: "overlay",
+		Skill:      "redis",
+		Path:       "SKILL.md",
+		Content:    "Overlay write.\n",
+		DryRun:     false,
+	}); err == nil {
+		t.Fatal("overlay-preferred write without confirmation unexpectedly succeeded")
+	}
+	if _, err := UpsertSourceSkillFile(cfg, SourceSkillFileWriteOptions{
+		SourceName:         "overlay",
+		Skill:              "redis",
+		Path:               "SKILL.md",
+		Content:            "Overlay confirmed.\n",
+		DryRun:             false,
+		ConfirmSourceWrite: true,
+	}); err != nil {
+		t.Fatalf("overlay-preferred confirmed write failed: %v", err)
+	}
+
+	cfg.Sources["draft-promote"] = config.NormalizeSource(config.Source{
+		Name:        "draft-promote",
+		Source:      sourceRoot,
+		Scope:       config.SourceScopeTeam,
+		WritePolicy: config.WritePolicyDraftPromote,
+	})
+	if _, err := UpsertSourceSkillFile(cfg, SourceSkillFileWriteOptions{
+		SourceName:         "draft-promote",
+		Skill:              "redis",
+		Path:               "SKILL.md",
+		Content:            "No reason.\n",
+		DryRun:             false,
+		ConfirmSourceWrite: true,
+	}); err == nil {
+		t.Fatal("draft-promote write without reason unexpectedly succeeded")
+	}
+	if _, err := UpsertSourceSkillFile(cfg, SourceSkillFileWriteOptions{
+		SourceName:         "draft-promote",
+		Skill:              "redis",
+		Path:               "SKILL.md",
+		Content:            "Reasoned.\n",
+		DryRun:             false,
+		ConfirmSourceWrite: true,
+		Reason:             "User asked for a direct source edit.",
+	}); err != nil {
+		t.Fatalf("draft-promote reasoned write failed: %v", err)
+	}
+
+	cfg.Sources["read-only"] = config.NormalizeSource(config.Source{
+		Name:        "read-only",
+		Source:      sourceRoot,
+		Scope:       config.SourceScopeExternal,
+		WritePolicy: config.WritePolicyReadOnly,
+	})
+	if _, err := UpsertSourceSkillFile(cfg, SourceSkillFileWriteOptions{
+		SourceName: "read-only",
+		Skill:      "redis",
+		Path:       "SKILL.md",
+		Content:    "Blocked.\n",
+		DryRun:     false,
+	}); err == nil {
+		t.Fatal("read-only write unexpectedly succeeded")
 	}
 }
 

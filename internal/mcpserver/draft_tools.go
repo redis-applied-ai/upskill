@@ -109,7 +109,7 @@ func draftToolList() []map[string]any {
 			"skill_id":   stringProp("Alias for draft_id."),
 			"skill_name": stringProp("Alias for draft name."),
 			"to_path":    stringProp("Local upstream checkout or skill directory destination."),
-			"to_source":  stringProp("Configured local source name, ID, or configured path to promote into."),
+			"to_source":  stringProp("Configured local source stable ID, configured name, display name (case-insensitive), exact source string, or normalized local path."),
 			"dry_run":    boolPropDefault("Preview planned writes without changing files. Defaults to true.", true),
 		}, []string{}),
 	}
@@ -129,14 +129,20 @@ func findSkills(cfg config.Config, query string, limit int) ([]map[string]any, e
 		if !matchesSearch(query, skill.StoreName, skill.Name, skill.Description, skill.Body) {
 			continue
 		}
-		entries = append(entries, map[string]any{
+		entry := map[string]any{
 			"kind":        "base",
 			"skill_id":    skill.StoreName,
 			"store_name":  skill.StoreName,
 			"name":        skill.Name,
 			"description": skill.Description,
 			"path":        skill.Path,
-		})
+		}
+		if policy, ok, err := library.SourcePolicyForInstalledSkill(cfg, skill.StoreName); err == nil && ok {
+			entry["source_policy"] = policy
+			entry["recommended_workflow"] = policy.RecommendedWorkflow
+			entry["policy_notices"] = config.PolicyNotices(policy)
+		}
+		entries = append(entries, entry)
 		if limit > 0 && len(entries) >= limit {
 			return entries, nil
 		}
@@ -147,15 +153,7 @@ func findSkills(cfg config.Config, query string, limit int) ([]map[string]any, e
 		if !matchesSearch(query, item.ID, item.StoreName, item.Metadata.Type, item.Metadata.ParentSkill, description, body) {
 			continue
 		}
-		entries = append(entries, map[string]any{
-			"kind":        "draft",
-			"skill_id":    item.ID,
-			"store_name":  item.StoreName,
-			"name":        item.StoreName,
-			"description": description,
-			"path":        item.Path,
-			"metadata":    item.Metadata,
-		})
+		entries = append(entries, draftSummary(cfg, item))
 		if limit > 0 && len(entries) >= limit {
 			return entries, nil
 		}
@@ -182,7 +180,7 @@ func createSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 			if !draftMatchesRequest(item, desiredType, desiredParent) {
 				return nil, fmt.Errorf("existing draft %s is a %s draft; requested %s draft%s. Use delete_skill_draft or replace_existing to replace it", item.ID, item.Metadata.Type, desiredType, requestedParentSuffix(desiredParent))
 			}
-			summary := draftSummary(item)
+			summary := draftSummary(cfg, item)
 			summary["existing"] = true
 			return summary, nil
 		} else {
@@ -193,7 +191,7 @@ func createSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return draftSummary(item), nil
+	return draftSummary(cfg, item), nil
 }
 
 func listSkillDrafts(cfg config.Config, args map[string]any) (any, error) {
@@ -206,7 +204,7 @@ func listSkillDrafts(cfg config.Config, args map[string]any) (any, error) {
 	out := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		body := readOptional(filepath.Join(item.Path, "SKILL.md"))
-		summary := draftSummary(item)
+		summary := draftSummary(cfg, item)
 		if matchesSearch(query, item.ID, item.StoreName, item.Metadata.Type, item.Metadata.ParentSkill, body) {
 			out = append(out, summary)
 		}
@@ -230,6 +228,11 @@ func readSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 		"skill_id": item.ID,
 		"content":  string(data),
 		"metadata": item.Metadata,
+	}
+	if policy, ok := draftSourcePolicy(cfg, item); ok {
+		result["source_policy"] = policy
+		result["recommended_workflow"] = policy.RecommendedWorkflow
+		result["policy_notices"] = config.PolicyNotices(policy)
 	}
 	if boolArg(args, "include_files", true) {
 		files, err := fileManifest(item.Path, "", true, false, intArg(args, "file_limit", 100))
@@ -418,14 +421,22 @@ func promoteSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 	toSource := strArg(args, "to_source")
 	toPath := strArg(args, "to_path")
 	resolvedSource := config.Source{}
+	resolvedSourceKey := ""
+	resolvedSourcePath := ""
 	if toSource != "" {
 		if toPath != "" {
 			return nil, fmt.Errorf("use only one of to_path or to_source")
 		}
-		var ok bool
-		resolvedSource, ok = library.ResolveNamedSource(cfg, toSource)
-		if !ok {
-			return nil, fmt.Errorf("source not found: %s", toSource)
+		resolution, resolveErr := library.ResolveConfiguredSource(cfg, toSource)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		resolvedSource = resolution.Source
+		resolvedSourceKey = resolution.ConfiguredAs
+		resolvedSourcePath = resolution.ResolvedPath
+		policy := library.SourcePolicyForSource(cfg, resolvedSource)
+		if policy.WritePolicy == config.WritePolicyReadOnly {
+			return nil, fmt.Errorf("source policy is read_only; promotion is not allowed")
 		}
 		toPath, err = library.ResolveLocalSourceDestination(cfg, toSource)
 		if err != nil {
@@ -442,11 +453,38 @@ func promoteSkillDraft(cfg config.Config, args map[string]any) (any, error) {
 	if resolvedSource.Source != "" {
 		resolvedSourceName = config.SourceDisplayName(resolvedSource)
 	}
-	return draft.Promote(cfg, item.StoreName, draft.PromoteOptions{
+	result, err := draft.Promote(cfg, item.StoreName, draft.PromoteOptions{
 		ToPath:   toPath,
 		ToSource: resolvedSourceName,
 		DryRun:   boolArg(args, "dry_run", true),
 	})
+	if err != nil {
+		return nil, err
+	}
+	if toSource != "" {
+		policy := library.SourcePolicyForSource(cfg, resolvedSource)
+		data := map[string]any{
+			"draft_id":             result.DraftID,
+			"destination":          result.Destination,
+			"source":               result.Source,
+			"source_identifier":    toSource,
+			"source_id":            resolvedSource.ID,
+			"source_name":          resolvedSourceKey,
+			"source_display_name":  config.SourceDisplayName(resolvedSource),
+			"source_path":          resolvedSource.Source,
+			"resolved_path":        resolvedSourcePath,
+			"dry_run":              result.DryRun,
+			"files":                result.Files,
+			"overwrite":            result.Overwrite,
+			"base_mutated":         result.BaseMutated,
+			"next_steps":           result.NextSteps,
+			"source_policy":        policy,
+			"recommended_workflow": policy.RecommendedWorkflow,
+			"policy_notices":       config.PolicyNotices(policy),
+		}
+		return data, nil
+	}
+	return result, nil
 }
 
 func draftFromID(cfg config.Config, id string) (draft.Draft, error) {
@@ -696,8 +734,8 @@ func matchesSearch(query string, values ...string) bool {
 	return false
 }
 
-func draftSummary(item draft.Draft) map[string]any {
-	return map[string]any{
+func draftSummary(cfg config.Config, item draft.Draft) map[string]any {
+	summary := map[string]any{
 		"kind":        "draft",
 		"skill_id":    item.ID,
 		"store_name":  item.StoreName,
@@ -706,6 +744,23 @@ func draftSummary(item draft.Draft) map[string]any {
 		"path":        item.Path,
 		"metadata":    item.Metadata,
 	}
+	if policy, ok := draftSourcePolicy(cfg, item); ok {
+		summary["source_policy"] = policy
+		summary["recommended_workflow"] = policy.RecommendedWorkflow
+		summary["policy_notices"] = config.PolicyNotices(policy)
+	}
+	return summary
+}
+
+func draftSourcePolicy(cfg config.Config, item draft.Draft) (config.SourcePolicy, bool) {
+	if item.Metadata.Type != draft.TypeVersion || item.Metadata.ParentSkill == "" {
+		return config.SourcePolicy{}, false
+	}
+	policy, ok, err := library.SourcePolicyForInstalledSkill(cfg, item.Metadata.ParentSkill)
+	if err != nil || !ok {
+		return config.SourcePolicy{}, false
+	}
+	return policy, true
 }
 
 func draftDescription(item draft.Draft) string {

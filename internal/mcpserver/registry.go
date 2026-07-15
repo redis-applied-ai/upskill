@@ -127,9 +127,10 @@ func quotedList(values []string) string {
 
 func toolCallErrorPayload(name string, args map[string]any, callErr error) map[string]any {
 	payload := map[string]any{
-		"error":   "tool_call_failed",
-		"message": callErr.Error(),
-		"tool":    name,
+		"schema_version": 1,
+		"error":          "tool_call_failed",
+		"message":        callErr.Error(),
+		"tool":           name,
 	}
 	definition, ok := findToolDefinition(name)
 	if !ok {
@@ -143,6 +144,7 @@ func toolCallErrorPayload(name string, args map[string]any, callErr error) map[s
 	var validationErr argumentValidationError
 	if errors.As(callErr, &validationErr) {
 		payload["error"] = "invalid_tool_arguments"
+		payload["validation_path"] = []string{}
 	}
 
 	payload["accepted_parameter_names"] = acceptedParameterNames(definition)

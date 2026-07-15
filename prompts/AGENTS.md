@@ -1,5 +1,7 @@
 # Using Skills
 
+<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file, render_skill, list_skill_drafts, read_skill_draft, list_skill_draft_files, read_skill_draft_file, upsert_skill_draft_file, delete_skill_draft_file, render_skill_draft, promote_skill_draft -->
+
 Use the `upskill` MCP server for skill work whenever its tools are available.
 Do not use built-in skill servers for listing, searching, reading, creating, or
 customizing skills unless the `upskill` MCP server is unavailable.
@@ -22,6 +24,8 @@ Use the right write target:
   team-specific, or agent-specific behavior.
 - Use a draft when the base skill itself should change upstream or when you are
   creating a new skill.
+- Use direct source edit only when the target is a configured local source and
+  `source_policy.write_policy` allows it.
 - Ask for scope only when the user's requested fix could reasonably be either
   a local customization or an upstream base-skill revision.
 
@@ -32,6 +36,8 @@ Use the right write target:
 - `find_skills` returns base skills and drafts. Draft IDs look like
   `draft:<skill-name>` and should be passed back exactly as returned.
 - Use `list_sources` when you need to see configured upstream sources.
+  Results include `scope`, `write_policy`, `recommended_workflow`, and optional
+  `llm_guidance`.
 - Use `find_source_skills` when the user asks what is available in a source or
   wants to search a source before installing. This reads the current source
   catalog and does not install or update anything.
@@ -126,6 +132,10 @@ For creating a new skill or drafting a new upstream version, use draft tools:
   checkout or configured local source. Prefer `to_source` when the user has an
   upskill named local source. Promotion defaults to dry-run; review the planned
   writes before setting `dry_run` to false.
+- If `source_policy.write_policy` is `read_only`, do not attempt promotion.
+  If it is `overlay_preferred`, confirm the user wants an upstream source
+  change instead of an overlay. If it is `draft_promote`, use draft plus dry-run
+  promotion as the normal path.
 - After promotion, the skill is not automatically installed. For a new skill,
   tell the user to run `upskill add <source> --skill <skill-name>` or use the
   equivalent workflow. For an existing locked skill, use `sync_skills` or
@@ -145,9 +155,27 @@ Use `--from-rendered` only when the draft should intentionally start from the
 rendered effective skill, including local overlays.
 
 Never attempt to overwrite base `SKILL.md` files or base support files through
-the MCP server. If a base skill needs to change, create a version draft, iterate
-locally, promote it into an upstream checkout or named source, and then use the
-normal upstream review process.
+the store or rendered agent-local directories. If a base skill needs to change,
+create a version draft, iterate locally, promote it into an upstream checkout or
+named source, and then use the normal upstream review process.
+
+## Direct Source Edits
+
+Use `upsert_source_skill_file` only for configured local sources. It defaults to
+dry-run and never installs skills, updates the lock, renders output, commits,
+pushes, opens pull requests, or merges.
+
+- For `direct_allowed`, direct source edits are allowed after normal path
+  validation.
+- For `overlay_preferred`, ask whether the user wants a source edit instead of
+  an overlay before setting `confirm_source_write`.
+- For `draft_promote`, prefer draft promotion. If the user explicitly wants a
+  direct source edit, set `confirm_source_write` and provide `reason`.
+- For `read_only`, do not call source-edit writes; use overlays or drafts
+  rendered locally.
+
+After any source edit, tell the user that installed skills are not updated until
+they run `upskill update <skill-name>` or reinstall from the source.
 
 If the `upskill` MCP server or any of these tools are unavailable, tell the user
 which tool is missing and ask them to configure or restart the MCP server. If

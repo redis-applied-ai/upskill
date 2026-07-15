@@ -61,7 +61,9 @@ Source shortcuts:
 
 ```bash
 upskill source list|ls [--json]
-upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH] [--default-update-policy manual|auto]
+upskill source add <source> [--name NAME] [--ref REF] [--subpath PATH] [--shared|--personal|--external] [--write-policy POLICY] [--default-update-policy manual|auto]
+upskill source show <source-or-name> [--json]
+upskill source edit <source-name> <skill-name> --file PATH (--content TEXT | --base64-content DATA) [--yes] [--reason TEXT]
 upskill source skills <source-or-name> [--json] [--ref REF] [--subpath PATH]
 upskill source find|search <source-or-name> [query] [--json] [--limit N] [--ref REF] [--subpath PATH]
 upskill source remove|rm <source-or-name> [--yes] [--keep-installed]
@@ -106,7 +108,7 @@ upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-comp
 upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-overlays]
 upskill draft diff <skill-name>
 upskill draft rebase <skill-name>
-upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
+upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--yes]
 upskill draft remove|rm <skill-name>
 ```
 
@@ -229,11 +231,19 @@ as unconfigured.
 Add an existing local directory as a named source:
 
 ```bash
-upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian
+upskill source add ~/Documents/Notes/Memory/Skills --name Obsidian --personal
 upskill source skills Obsidian
 upskill source find Obsidian redis
 upskill add Obsidian --skill redis
 ```
+
+Source records can include policy metadata that tells agents which write
+workflow to prefer. Use `--personal` for local sources where direct source edits
+are acceptable, `--shared` for team sources where draft promotion is the normal
+upstream path, and `--external` for read-only sources. `--write-policy` can be
+`direct_allowed`, `overlay_preferred`, `draft_promote`, or `read_only`.
+`upskill source list --json` and `upskill source show` include the effective
+policy, including metadata read from an optional checked-in `upskill.toml`.
 
 Removing a source also removes skills installed from that source, plus managed
 rendered output and marked agent-output copies. When installed skills would be
@@ -442,6 +452,8 @@ templates/SKILL.md.j2 -> SKILL.md
 
 ## MCP Server
 
+<!-- upskill-callable-tools: describe_tool, promote_skill_draft -->
+
 Run:
 
 ```bash
@@ -455,19 +467,52 @@ accepted parameter names. Tool errors include the same schema and accepted
 parameter list, so client-visible guidance cannot drift from the registered
 surface.
 
+Use the same discover, describe, preview, apply, and read-back lifecycle for
+mutations:
+
+1. Discover `promote_skill_draft` with `tools/list`.
+2. Call `describe_tool` with `name: "promote_skill_draft"` and use only names
+   from `accepted_parameter_names`.
+3. Call `promote_skill_draft` with `dry_run: true` and inspect `actions`,
+   `warnings`, and `canonical_resources`.
+4. Repeat the same arguments with `dry_run: false` only after the preview is
+   approved.
+5. Read the destination or source again to confirm the applied state.
+
+For example, the tool-call arguments for steps 2 through 4 are:
+
+```json
+{"name":"describe_tool","arguments":{"name":"promote_skill_draft"}}
+```
+
+```json
+{"name":"promote_skill_draft","arguments":{"draft_id":"draft:redis","to_source":"personal","dry_run":true}}
+```
+
+```json
+{"name":"promote_skill_draft","arguments":{"draft_id":"draft:redis","to_source":"personal","dry_run":false}}
+```
+
+These argument examples are illustrative because they require a matching draft
+and configured local source. The stdio integration suite runs the equivalent
+lifecycle in a disposable environment.
+
 Mutating tools that expose `dry_run` follow the same preview convention: call
 with `dry_run: true`, inspect the planned targets and actions, then repeat with
 `dry_run: false` to apply. Existing apply-by-default tools retain that default
-for compatibility, while draft promotion remains preview-by-default.
+for compatibility, while draft promotion and direct source edits remain
+preview-by-default.
 
-MCP writes are limited to overlays and mutable drafts. Agents can inspect
-configured sources, search live source skills, check installed updates, and
-read base or generated skills, but they cannot install new source skills,
-change update policy, or overwrite `store/` through the MCP server. To change
-an installed skill's update policy, reinstall it with `upskill add` plus
-`--skill <name> --update-policy manual|auto`. Draft promotion can write only to
-a local checkout or named local source and rejects managed upskill directories
-such as `store/`, `rendered/`, `overlays/`, `drafts/`, and `imports/`.
+MCP writes are limited to overlays, mutable drafts, dry-run-first draft
+promotion, and policy-checked source-file edits in configured local sources.
+Agents can inspect configured sources, search live source skills, check
+installed updates, and read base or generated skills, but they cannot install
+new source skills, change update policy, perform VCS operations, or overwrite
+`store/` through the MCP server. To change an installed skill's update policy,
+reinstall it with `upskill add` plus `--skill <name> --update-policy
+manual|auto`. Draft promotion and source-file edits reject managed upskill
+directories such as `store/`, `rendered/`, `overlays/`, `drafts/`, and
+`imports/`.
 
 Copy `prompts/AGENTS.md` into an agent configuration when you want an agent to
 use `upskill` MCP tools for skill management instead of built-in skill servers.
