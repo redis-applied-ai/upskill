@@ -160,6 +160,24 @@ The primary local example source is `./examples`:
 upskill add ./examples --skill hello-skill --agent codex
 ```
 
+A successful mutation groups its primary result and labels the managed render
+path separately from the configured agent-output copy:
+
+```text
+Result
+  OK installed hello-skill
+    digest: sha256:<full-digest>
+  OK rendered hello-skill for codex
+    rendered: /Users/example/.skills/rendered/codex/hello-skill
+    copied: /Users/example/.codex/skills/hello-skill
+```
+
+Upskill still executes preflight before the requested command. It defers only
+non-fatal preflight messages so a successful result appears first in a combined
+terminal view. Primary results remain on stdout. Passive `Preflight` and
+`Agent output audit` sections remain on stderr. Payload commands such as
+`show`, `render --print`, and JSON modes do not gain a `Result` heading.
+
 ## Layout
 
 By default, `upskill` uses:
@@ -249,16 +267,18 @@ rendered/
 
 Most commands create the managed files and directories they need automatically.
 Use `upskill status` to inspect the current home, store path, installed skill
-count, overlay count, and draft count. `doctor` and `status` warn when
-configured agent output directories contain skill folders that are not installed
-in Upskill from configured sources. Use `upskill migrate` to copy those
-unmanaged agent-output skills into a local source, install them from that
-source, and render managed output. By default, `migrate` reads from unmanaged
-agent output directories and writes to a `local-skills` source at
-`~/Documents/Upskill/local-skills`. The command is a dry run unless `--yes` is
-passed. Duplicate skill names are preserved with numeric suffixes such as
-`redis`, `redis-2`, and `redis-3`. `migrate` can also copy from one configured
-local source to another with `--from SOURCE --to-source NAME`.
+count, overlay count, and draft count. `doctor` and `status` show a detailed
+`Agent output audit` when configured output directories contain unmanaged
+skills, managed skills without render markers, or directories that cannot be
+inspected. The audit is read-only: `add`, `status`, and `doctor` leave those
+skills unchanged. Run `upskill migrate` to preview copying unmanaged skills
+into a local source; run `upskill migrate --yes` to apply the migration,
+install the copied skills, and render managed output. By default, `migrate`
+reads from unmanaged agent output directories and writes to a `local-skills`
+source at `~/Documents/Upskill/local-skills`. The command is a dry run unless
+`--yes` is passed. Duplicate skill names are preserved with numeric suffixes
+such as `redis`, `redis-2`, and `redis-3`. `migrate` can also copy from one
+configured local source to another with `--from SOURCE --to-source NAME`.
 
 ## Local Sources
 
@@ -335,7 +355,9 @@ If a known installed skill change has policy `manual`, Upskill prints a notice
 to stderr. JSON stdout stays machine-readable.
 
 ```text
-notice: updates available for redis; run upskill sync or upskill update --diff redis
+Preflight
+  NOTICE redis: update available
+    next: upskill update --diff redis
 ```
 
 Use manual updates when you want to review changes:
@@ -487,6 +509,18 @@ directly, changing agent output config, recreating `rendered/`, or checking the
 base skill with `--base-only`. Output is skipped when the base skill, overlays,
 mode, and agent are unchanged.
 
+Human render results always label the two path roles:
+
+```text
+Result
+  OK rendered redis for codex
+    rendered: /Users/example/.skills/rendered/codex/redis
+    copied: /Users/example/.codex/skills/redis
+```
+
+`render --copy=false` reports `not copied`. `render --print` keeps stdout as
+the requested file content without headings.
+
 ## Jinja Templates
 
 Only `.j2` files are rendered through Jinja-style templates using
@@ -606,6 +640,13 @@ files are generated output, not the source to edit when a skill needs to change.
 the effective final skill directories to configured outputs. If overlays exist,
 they are always applied. There is no `--with-overlays` or `--without-overlays`
 mode.
+
+Text sync output uses `OK` for applied results and `PLAN` for `--dry-run`
+targets. `sync --json` and MCP `sync_skills` preserve their legacy `warnings`
+and add `agent_output_audit`, including counts, per-agent summaries, and the
+detailed findings used to build those warnings. MCP preflight notices include
+`phase: "preflight"`; audit findings stay in the sync result rather than the
+notice list.
 
 To inspect the base state:
 

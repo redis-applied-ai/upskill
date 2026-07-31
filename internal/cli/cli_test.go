@@ -19,6 +19,7 @@ import (
 
 	"upskill/internal/activity"
 	"upskill/internal/config"
+	"upskill/internal/diagnostic"
 	"upskill/internal/library"
 	"upskill/internal/render"
 	"upskill/internal/updatecache"
@@ -544,7 +545,10 @@ func TestSyncDryRunPreviewsWithoutWriting(t *testing.T) {
 	if code := Run([]string{"sync", "--agent", "codex", "--dry-run"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("sync preview code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "preview sync") || !strings.Contains(stdout.String(), "preview render") || !strings.Contains(stdout.String(), "preview write") {
+	if !strings.Contains(stdout.String(), humanSectionResult) ||
+		!strings.Contains(stdout.String(), "PLAN update redis") ||
+		!strings.Contains(stdout.String(), "PLAN render redis for codex") ||
+		!strings.Contains(stdout.String(), "copy: "+filepath.Join(root, "codex-skills", "redis")) {
 		t.Fatalf("sync preview output = %q", stdout.String())
 	}
 	if got := readTestFile(t, storePath); got != storeBefore {
@@ -599,7 +603,7 @@ func TestSyncPrintsOnlyChangedSkills(t *testing.T) {
 		t.Fatalf("sync code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	output := stdout.String()
-	if !strings.Contains(output, "updated redis (sha256:") {
+	if !strings.Contains(output, "OK updated redis") || !strings.Contains(output, "digest: sha256:") {
 		t.Fatalf("sync stdout missing changed skill update: %q", output)
 	}
 	if strings.Contains(output, "updated writing") {
@@ -729,7 +733,7 @@ func TestCLIGitSourceFreshnessE2E(t *testing.T) {
 	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cached list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "notice: updates available for redis") {
+	if !strings.Contains(stderr.String(), "NOTICE redis: update available") {
 		t.Fatalf("cached manual notice missing: %q", stderr.String())
 	}
 	if data, err := os.ReadFile(countPath); err == nil && len(bytes.TrimSpace(data)) > 0 {
@@ -831,7 +835,7 @@ func TestCLIAutomaticGitPreflightLifecycle(t *testing.T) {
 	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("changed list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "notice: automatically updated redis") {
+	if !strings.Contains(stderr.String(), "NOTICE redis: automatically updated") {
 		t.Fatalf("changed list notice = %q", stderr.String())
 	}
 	if counts := cliGitOperationCounts(t, countPath); counts["ls-remote"] != 1 || counts["clone"] != 2 {
@@ -1742,7 +1746,7 @@ func TestStatusAndDoctorWarnAboutUnmanagedAgentOutputSkill(t *testing.T) {
 		if code := Run([]string{command}, &stdout, &stderr); code != 0 {
 			t.Fatalf("%s code = %d stderr=%s", command, code, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "warning:") ||
+		if !strings.Contains(stderr.String(), "WARNING codex") ||
 			!strings.Contains(stderr.String(), "gitnexus-repo-redis-sre-agent") ||
 			!strings.Contains(stderr.String(), "not installed in Upskill from any configured source") {
 			t.Fatalf("%s warning missing unmanaged skill context: %q", command, stderr.String())
@@ -3016,7 +3020,7 @@ func TestCLIUpdateNoticeGoesToStderr(t *testing.T) {
 	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("list code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "notice: updates available for redis") {
+	if !strings.Contains(stderr.String(), "NOTICE redis: update available") {
 		t.Fatalf("stderr missing update notice: %q", stderr.String())
 	}
 	var rows []installedSkillRow
@@ -3029,27 +3033,28 @@ func TestCLIUpdateNoticeGoesToStderr(t *testing.T) {
 }
 
 func TestCLIMapsStructuredPreflightWarnings(t *testing.T) {
-	var stderr bytes.Buffer
-	printCLIUpdateWarnings(
-		[]library.UpdateCheckWarning{
-			{
-				Type:      library.UpdateCheckWarningRemoteDeferred,
-				SourceKey: "sha256:remote",
-				Message:   "automatic Git update check deferred",
+	items := diagnostic.FromUpdateResult(
+		library.UpdateCheckResult{
+			Warnings: []library.UpdateCheckWarning{
+				{
+					Type:      library.UpdateCheckWarningRemoteDeferred,
+					SourceKey: "sha256:remote",
+					Message:   "automatic Git update check deferred",
+				},
+				{
+					Type:      library.UpdateCheckWarningCacheIgnored,
+					SourceKey: "sha256:cache",
+					Message:   "update-check cache ignored",
+				},
 			},
-			{
-				Type:      library.UpdateCheckWarningCacheIgnored,
-				SourceKey: "sha256:cache",
-				Message:   "update-check cache ignored",
-			},
+			Checks: []library.UpdateCheck{{StoreName: "redis", Stale: true}},
 		},
-		[]library.UpdateCheck{{StoreName: "redis", Stale: true}},
-		&stderr,
+		nil,
 	)
-	output := stderr.String()
+	output := strings.Join(formatPreflightLines(items), "\n")
 	for _, want := range []string{
-		"warning: automatic update check deferred for sha256:remote; using cached status",
-		"warning: update-check cache ignored for sha256:cache",
+		"WARNING sha256:remote: automatic update check deferred; using cached status",
+		"WARNING sha256:cache: update-check cache ignored",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("warning output missing %q: %s", want, output)
@@ -3072,7 +3077,7 @@ func TestCLIPreflightAutoUpdatesNormalCommands(t *testing.T) {
 	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("list code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "notice: automatically updated redis") {
+	if !strings.Contains(stderr.String(), "NOTICE redis: automatically updated") {
 		t.Fatalf("stderr missing auto-update notice: %q", stderr.String())
 	}
 	if got := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")); !strings.Contains(got, "New.") {
@@ -3815,7 +3820,7 @@ func TestCLICompletionBranches(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runStatus(statusCfg, &stdout, &stderr); code == 0 {
+	if code := runStatus(statusCfg, &stdout, &stderr, newCLIDiagnosticCollector()); code == 0 {
 		t.Fatal("status overlay failure unexpectedly succeeded")
 	}
 	badDraftRoot := filepath.Join(root, "draft-file")
@@ -3827,7 +3832,7 @@ func TestCLICompletionBranches(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runStatus(statusCfg, &stdout, &stderr); code == 0 {
+	if code := runStatus(statusCfg, &stdout, &stderr, newCLIDiagnosticCollector()); code == 0 {
 		t.Fatal("status draft failure unexpectedly succeeded")
 	}
 
@@ -3839,7 +3844,7 @@ func TestCLICompletionBranches(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runDoctor(doctorCfg, &stdout, &stderr); code == 0 {
+	if code := runDoctor(doctorCfg, &stdout, &stderr, newCLIDiagnosticCollector()); code == 0 {
 		t.Fatal("doctor mkdir failure unexpectedly succeeded")
 	}
 
@@ -3850,7 +3855,7 @@ func TestCLICompletionBranches(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := renderInstalled(renderCfg, []library.InstalledSkill{{StoreName: "missing"}}, "", &stdout, &stderr); code == 0 {
+	if code := renderInstalled(renderCfg, []library.InstalledSkill{{StoreName: "missing"}}, "", &stdout, &stderr, newCLIDiagnosticCollector()); code == 0 {
 		t.Fatal("renderInstalled failure unexpectedly succeeded")
 	}
 }

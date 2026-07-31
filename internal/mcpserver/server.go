@@ -49,22 +49,24 @@ type callParams struct {
 }
 
 type syncSkillsResult struct {
-	Agent                string                   `json:"agent,omitempty"`
-	DryRun               bool                     `json:"dry_run"`
-	Applied              bool                     `json:"applied"`
-	Updated              []library.InstalledSkill `json:"updated"`
-	UpdatedCount         int                      `json:"updated_count"`
-	Rendered             []render.Result          `json:"rendered"`
-	RenderedCount        int                      `json:"rendered_count"`
-	PlannedUpdates       []library.UpdateCheck    `json:"planned_updates,omitempty"`
-	PlannedUpdateCount   int                      `json:"planned_update_count,omitempty"`
-	PlannedRenders       []render.Result          `json:"planned_renders,omitempty"`
-	PlannedRenderedCount int                      `json:"planned_rendered_count,omitempty"`
-	Warnings             []string                 `json:"warnings,omitempty"`
+	Agent                string                        `json:"agent,omitempty"`
+	DryRun               bool                          `json:"dry_run"`
+	Applied              bool                          `json:"applied"`
+	Updated              []library.InstalledSkill      `json:"updated"`
+	UpdatedCount         int                           `json:"updated_count"`
+	Rendered             []render.Result               `json:"rendered"`
+	RenderedCount        int                           `json:"rendered_count"`
+	PlannedUpdates       []library.UpdateCheck         `json:"planned_updates,omitempty"`
+	PlannedUpdateCount   int                           `json:"planned_update_count,omitempty"`
+	PlannedRenders       []render.Result               `json:"planned_renders,omitempty"`
+	PlannedRenderedCount int                           `json:"planned_rendered_count,omitempty"`
+	Warnings             []string                      `json:"warnings"`
+	AgentOutputAudit     audit.AgentOutputAuditSummary `json:"agent_output_audit"`
 }
 
 type notice struct {
 	Type      string `json:"type"`
+	Phase     string `json:"phase,omitempty"`
 	SkillID   string `json:"skill_id,omitempty"`
 	Message   string `json:"message"`
 	Error     string `json:"error,omitempty"`
@@ -207,6 +209,7 @@ func updateNotices(cfg config.Config) []notice {
 	if err != nil {
 		return []notice{{
 			Type:    "update_check_failed",
+			Phase:   "preflight",
 			Message: "update check failed",
 			Error:   err.Error(),
 		}}
@@ -215,6 +218,7 @@ func updateNotices(cfg config.Config) []notice {
 	for _, warning := range result.Warnings {
 		notices = append(notices, notice{
 			Type:      warning.Type,
+			Phase:     "preflight",
 			Message:   warning.Message,
 			SourceKey: warning.SourceKey,
 			Stale:     warning.Type == library.UpdateCheckWarningRemoteDeferred && hasStaleUpdateCheck(result.Checks),
@@ -224,6 +228,7 @@ func updateNotices(cfg config.Config) []notice {
 		if check.Error != "" {
 			notices = append(notices, notice{
 				Type:    "update_check_failed",
+				Phase:   "preflight",
 				SkillID: check.StoreName,
 				Message: fmt.Sprintf("update check failed for %s", check.StoreName),
 				Error:   check.Error,
@@ -233,6 +238,7 @@ func updateNotices(cfg config.Config) []notice {
 		if check.Changed {
 			notices = append(notices, notice{
 				Type:    "update_available",
+				Phase:   "preflight",
 				SkillID: check.StoreName,
 				Message: fmt.Sprintf("update available for %s", check.StoreName),
 			})
@@ -796,7 +802,9 @@ func syncSkillsTool(cfg config.Config, args map[string]any) (syncSkillsResult, e
 	if len(updated) == 0 && len(rendered) == 0 {
 		result.Warnings = []string{"no locked or installed skills were found"}
 	}
-	result.Warnings = append(result.Warnings, audit.AgentOutputWarningMessages(cfg, agent)...)
+	findings := audit.AgentOutputWarnings(cfg, agent)
+	result.AgentOutputAudit = audit.SummarizeAgentOutputWarnings(findings)
+	result.Warnings = append(result.Warnings, audit.AgentOutputWarningMessagesFrom(findings)...)
 	return result, nil
 }
 
@@ -816,6 +824,8 @@ func previewSyncSkills(cfg config.Config, agent string) (syncSkillsResult, error
 		}
 	}
 	plannedRenders := plannedSyncRenders(cfg, agent, installed)
+	findings := audit.AgentOutputWarnings(cfg, agent)
+	auditSummary := audit.SummarizeAgentOutputWarnings(findings)
 	result := syncSkillsResult{
 		Agent:                agent,
 		DryRun:               true,
@@ -826,7 +836,8 @@ func previewSyncSkills(cfg config.Config, agent string) (syncSkillsResult, error
 		PlannedUpdateCount:   plannedUpdateCount,
 		PlannedRenders:       plannedRenders,
 		PlannedRenderedCount: len(plannedRenders),
-		Warnings:             audit.AgentOutputWarningMessages(cfg, agent),
+		Warnings:             audit.AgentOutputWarningMessagesFrom(findings),
+		AgentOutputAudit:     auditSummary,
 	}
 	if len(checks) == 0 && len(plannedRenders) == 0 {
 		result.Warnings = append([]string{"no locked or installed skills were found"}, result.Warnings...)

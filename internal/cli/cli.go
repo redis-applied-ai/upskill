@@ -18,6 +18,7 @@ import (
 	"upskill/internal/activity"
 	"upskill/internal/audit"
 	"upskill/internal/config"
+	"upskill/internal/diagnostic"
 	"upskill/internal/draft"
 	"upskill/internal/fsutil"
 	"upskill/internal/library"
@@ -67,6 +68,9 @@ notes:
   A raw source is recorded automatically as an unnamed configured source.
   Installed skill IDs use SKILL.md name when present, otherwise the directory
   name, normalized for filesystem use.
+  Human output labels the installed digest, managed rendered path, and each
+  configured copied path. Passive preflight and audit sections follow the
+  primary result and remain on stderr.
 
 examples:
   upskill add Obsidian --skill redis
@@ -209,6 +213,8 @@ notes:
   with local customizations.
   It writes installed store updates, lock metadata, generated output, and agent
   output copies when configured.
+  Text dry runs use PLAN labels and do not write. JSON results retain warnings
+  and include agent_output_audit counts, per-agent summaries, and findings.
 
 examples:
   upskill sync
@@ -236,6 +242,8 @@ notes:
   from that source, then renders managed output back to configured agent
   outputs. It does not delete from the source. Duplicate skill names are
   preserved with numeric suffixes such as redis, redis-2, redis-3.
+  Without --yes, migrate only previews the plan. Agent-output audits are
+  read-only and leave unmanaged skills unchanged until --yes is supplied.
 
 examples:
   upskill migrate
@@ -774,6 +782,8 @@ notes:
   to inspect the effective output with --print or --base-only.
   If the base skill, customizations, mode, and agent are unchanged, render reuses
   the existing rendered directory.
+  Human results label managed rendered paths and configured copied paths.
+  --copy=false reports not copied. --print writes only file content to stdout.
 
 examples:
   upskill render redis --agent codex
@@ -858,9 +868,10 @@ summary:
 notes:
   status reads configured store, overlay, and draft state. It does not create
   missing directories; use doctor for that.
-  It warns when configured agent output directories contain skill folders that
-  are not installed in Upskill from configured sources. Run upskill migrate to
-  copy those skills into a local source.
+  Its detailed agent-output audit reports unmanaged skills, missing render
+  markers, and inspection failures with paths and reasons. The audit is
+  read-only. Run upskill migrate to preview unmanaged-skill migration; add
+  --yes to apply it.
 
 examples:
   upskill status`
@@ -873,9 +884,10 @@ summary:
 notes:
   doctor creates the home, store, overlays, drafts, imports, and rendered
   directories when needed. It does not install or update skills.
-  It warns when configured agent output directories contain skill folders that
-  are not installed in Upskill from configured sources. Run upskill migrate to
-  copy those skills into a local source.
+  Its detailed agent-output audit reports unmanaged skills, missing render
+  markers, and inspection failures with paths and reasons. The audit does not
+  change those skills. Run upskill migrate to preview unmanaged-skill
+  migration; add --yes to apply it.
 
 examples:
   upskill doctor`
@@ -900,53 +912,61 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
+	collector := newCLIDiagnosticCollector()
 	if !noCheck && !envNoCheck() {
-		if code := runCLIPreflight(cfg, args, stderr); code != 0 {
-			return code
+		preflight := runCLIPreflight(cfg, args)
+		if preflight.Err != nil {
+			fmt.Fprintf(stderr, "upskill: %v\n", preflight.Err)
+			collector.Flush(stderr)
+			return preflight.ExitCode
 		}
+		collector.Add(preflight.Diagnostics...)
 	}
 
+	code := 0
 	switch args[0] {
 	case "add":
-		return runAdd(cfg, args[1:], stdout, stderr)
+		code = runAdd(cfg, args[1:], stdout, stderr, collector)
 	case "show":
-		return runShow(cfg, args[1:], stdout, stderr)
+		code = runShow(cfg, args[1:], stdout, stderr)
 	case "list", "ls":
-		return runList(cfg, args[1:], stdout, stderr)
+		code = runList(cfg, args[1:], stdout, stderr)
 	case "find", "search":
-		return runFind(cfg, args[1:], stdout, stderr)
+		code = runFind(cfg, args[1:], stdout, stderr)
 	case "remove", "rm":
-		return runRemove(cfg, args[1:], stdout, stderr)
+		code = runRemove(cfg, args[1:], stdout, stderr)
 	case "update":
-		return runUpdate(cfg, args[1:], stdout, stderr)
+		code = runUpdate(cfg, args[1:], stdout, stderr, collector)
 	case "sync":
-		return runSync(cfg, args[1:], stdout, stderr)
+		code = runSync(cfg, args[1:], stdout, stderr, collector)
 	case "migrate":
-		return runMigrate(cfg, args[1:], stdout, stderr)
+		code = runMigrate(cfg, args[1:], stdout, stderr, collector)
 	case "init":
-		return runInit(args[1:], stdout, stderr)
+		code = runInit(args[1:], stdout, stderr)
 	case "workon":
-		return runWorkon(cfg, args[1:], stdout, stderr)
+		code = runWorkon(cfg, args[1:], stdout, stderr)
 	case "source":
-		return runSource(cfg, args[1:], stdout, stderr)
+		code = runSource(cfg, args[1:], stdout, stderr)
 	case "draft":
-		return runDraft(cfg, args[1:], stdout, stderr)
+		code = runDraft(cfg, args[1:], stdout, stderr)
 	case "overlay":
-		return runOverlay(cfg, args[1:], stdout, stderr)
+		code = runOverlay(cfg, args[1:], stdout, stderr)
 	case "render":
-		return runRender(cfg, args[1:], stdout, stderr)
+		code = runRender(cfg, args[1:], stdout, stderr, collector)
 	case "stats":
-		return runStats(cfg, args[1:], stdout, stderr)
+		code = runStats(cfg, args[1:], stdout, stderr)
 	case "mcp":
-		return runMCP(cfg, stdout, stderr)
+		code = runMCP(cfg, stdout, stderr)
 	case "status":
-		return runStatus(cfg, stdout, stderr)
+		code = runStatus(cfg, stdout, stderr, collector)
 	case "doctor":
-		return runDoctor(cfg, stdout, stderr)
+		code = runDoctor(cfg, stdout, stderr, collector)
 	default:
 		fmt.Fprintf(stderr, "upskill: unknown command: %s\n", args[0])
-		return 2
+		code = 2
 	}
+	collector.Flush(stderr)
+	return code
 }
 
 func stripGlobalNoCheck(args []string) ([]string, bool) {
@@ -998,103 +1018,44 @@ func cliPreflightModeFor(args []string) cliPreflightMode {
 	return cliPreflightAutoApply
 }
 
-func runCLIPreflight(cfg config.Config, args []string, stderr io.Writer) int {
+type cliPreflightResult struct {
+	Diagnostics []diagnostic.Diagnostic
+	Err         error
+	ExitCode    int
+}
+
+func runCLIPreflight(cfg config.Config, args []string) cliPreflightResult {
 	switch cliPreflightModeFor(args) {
 	case cliPreflightSkip:
-		return 0
+		return cliPreflightResult{Diagnostics: []diagnostic.Diagnostic{}}
 	case cliPreflightNoticeOnly:
-		printCLIUpdateNotices(cfg, stderr)
-		return 0
+		result, err := library.CheckSkillUpdatesForPreflight(cfg)
+		if err != nil {
+			return cliPreflightResult{Diagnostics: []diagnostic.Diagnostic{{
+				Phase:    diagnostic.PhasePreflight,
+				Severity: diagnostic.SeverityWarning,
+				Code:     diagnostic.CodeUpdateCheckFailed,
+				Message:  err.Error(),
+				Details:  map[string]any{},
+				Actions:  []diagnostic.Action{},
+			}}}
+		}
+		return cliPreflightResult{Diagnostics: diagnostic.FromUpdateResult(result, nil)}
 	default:
 		result, err := library.AutoUpdateSkills(cfg)
+		diagnostics := diagnostic.FromUpdateResult(library.UpdateCheckResult{
+			Checks:   result.Checks,
+			Warnings: result.Warnings,
+		}, result.Updated)
 		if err != nil {
-			fmt.Fprintf(stderr, "upskill: %v\n", err)
-			return 1
+			return cliPreflightResult{Diagnostics: diagnostics, Err: err, ExitCode: 1}
 		}
 		if len(result.Updated) > 0 {
 			if err := renderPreflightUpdates(cfg, result.Updated, preflightAgent(args)); err != nil {
-				fmt.Fprintf(stderr, "upskill: %v\n", err)
-				return 1
+				return cliPreflightResult{Diagnostics: diagnostics, Err: err, ExitCode: 1}
 			}
 		}
-		printCLIUpdateWarnings(result.Warnings, result.Checks, stderr)
-		printCLIUpdateCheckNotices(result.Checks, result.Updated, stderr)
-		return 0
-	}
-}
-
-func printCLIUpdateNotices(cfg config.Config, stderr io.Writer) {
-	result, err := library.CheckSkillUpdatesForPreflight(cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "warning: update check failed: %v\n", err)
-		return
-	}
-	printCLIUpdateWarnings(result.Warnings, result.Checks, stderr)
-	printCLIUpdateCheckNotices(result.Checks, nil, stderr)
-}
-
-func printCLIUpdateWarnings(warnings []library.UpdateCheckWarning, checks []library.UpdateCheck, stderr io.Writer) {
-	hasStale := false
-	for _, check := range checks {
-		if check.Stale {
-			hasStale = true
-			break
-		}
-	}
-	for _, warning := range warnings {
-		switch warning.Type {
-		case library.UpdateCheckWarningRemoteDeferred:
-			fmt.Fprintf(stderr, "warning: automatic update check deferred for %s", warning.SourceKey)
-			if hasStale {
-				fmt.Fprint(stderr, "; using cached status")
-			}
-			fmt.Fprintln(stderr)
-		case library.UpdateCheckWarningCacheIgnored:
-			fmt.Fprintf(stderr, "warning: update-check cache ignored for %s\n", warning.SourceKey)
-		default:
-			fmt.Fprintf(stderr, "warning: %s\n", warning.Message)
-		}
-	}
-}
-
-func printCLIUpdateCheckNotices(checks []library.UpdateCheck, updated []library.InstalledSkill, stderr io.Writer) {
-	updatedSet := map[string]struct{}{}
-	updatedNames := make([]string, 0, len(updated))
-	for _, item := range updated {
-		updatedSet[item.StoreName] = struct{}{}
-		updatedNames = append(updatedNames, item.StoreName)
-	}
-	sort.Strings(updatedNames)
-	if len(updatedNames) > 0 {
-		fmt.Fprintf(stderr, "notice: automatically updated %s\n", strings.Join(updatedNames, ", "))
-	}
-
-	autoPending := make([]string, 0, len(checks))
-	manualPending := make([]string, 0, len(checks))
-	for _, check := range checks {
-		if check.Error != "" {
-			fmt.Fprintf(stderr, "warning: update check failed for %s: %s\n", check.StoreName, check.Error)
-			continue
-		}
-		if !check.Changed {
-			continue
-		}
-		if _, ok := updatedSet[check.StoreName]; ok {
-			continue
-		}
-		if check.UpdatePolicy == config.UpdatePolicyAuto {
-			autoPending = append(autoPending, check.StoreName)
-		} else {
-			manualPending = append(manualPending, check.StoreName)
-		}
-	}
-	sort.Strings(autoPending)
-	sort.Strings(manualPending)
-	if len(autoPending) > 0 {
-		fmt.Fprintf(stderr, "notice: automatic updates pending for %s; run a normal command or upskill sync\n", strings.Join(autoPending, ", "))
-	}
-	if len(manualPending) > 0 {
-		fmt.Fprintf(stderr, "notice: updates available for %s; run upskill sync or upskill update --diff %s\n", strings.Join(manualPending, ", "), manualPending[0])
+		return cliPreflightResult{Diagnostics: diagnostics}
 	}
 }
 
@@ -1173,7 +1134,7 @@ func buildSetting(info *debug.BuildInfo, key string) string {
 	return ""
 }
 
-func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer, collector *cliDiagnosticCollector) int {
 	if len(args) == 0 || isHelp(args[0]) {
 		printUsage(stdout, helpAdd)
 		return 0
@@ -1217,11 +1178,22 @@ func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
-	printInstalled(stdout, installed, "installed")
 	if noRender {
+		writeResultSection(stdout, formatInstalledResultLines(installed, "installed", false))
 		return 0
 	}
-	return renderInstalled(cfg, installed, agent, stdout, stderr)
+	results, err := renderInstalledResults(cfg, installed, agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	writeResultSection(
+		stdout,
+		formatInstalledResultLines(installed, "installed", false),
+		formatRenderResultLines(results),
+	)
+	collector.CollectAudit(cfg, agent, cliAuditConcise)
+	return 0
 }
 
 func runShow(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -1459,7 +1431,7 @@ func runRemove(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 	return 0
 }
 
-func runUpdate(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+func runUpdate(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer, collector *cliDiagnosticCollector) int {
 	agent := ""
 	noRender := false
 	check := false
@@ -1492,14 +1464,25 @@ func runUpdate(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
-	printInstalled(stdout, updated, "updated")
 	if noRender {
+		writeResultSection(stdout, formatInstalledResultLines(updated, "updated", false))
 		return 0
 	}
-	return renderInstalled(cfg, updated, agent, stdout, stderr)
+	results, err := renderInstalledResults(cfg, updated, agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	groups := [][]string{formatInstalledResultLines(updated, "updated", false)}
+	if len(results) > 0 {
+		groups = append(groups, formatRenderResultLines(results))
+	}
+	writeResultSection(stdout, groups...)
+	collector.CollectAudit(cfg, agent, cliAuditConcise)
+	return 0
 }
 
-func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer, collector *cliDiagnosticCollector) int {
 	agent := ""
 	dryRun := false
 	jsonOut := false
@@ -1535,6 +1518,7 @@ func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 				plannedCount++
 			}
 		}
+		auditSummary := collector.ScanAudit(cfg, agent)
 		result := preview.Normalize(cfg, "sync_skills", map[string]any{
 			"agent":                  agent,
 			"dry_run":                true,
@@ -1546,9 +1530,22 @@ func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 			"planned_update_count":   plannedCount,
 			"planned_renders":        plannedRenders,
 			"planned_rendered_count": len(plannedRenders),
-			"warnings":               audit.AgentOutputWarningMessages(cfg, agent),
+			"warnings":               audit.AgentOutputWarningMessagesFrom(auditSummary.Items),
+			"agent_output_audit":     auditSummary,
 		}, true)
-		printMutationResult(stdout, result, jsonOut)
+		if jsonOut {
+			printMutationResult(stdout, result, true)
+		} else {
+			groups := [][]string{formatPlannedUpdateResultLines(checks)}
+			if len(plannedRenders) > 0 {
+				groups = append(groups, formatRenderResultLines(plannedRenders))
+			}
+			if len(groups[0]) == 0 && len(plannedRenders) == 0 {
+				groups = [][]string{formatNoChangeResultLines(true)}
+			}
+			writeResultSection(stdout, groups...)
+			collector.AddAudit(agent, cliAuditConcise, auditSummary)
+		}
 		return 0
 	}
 	updated, err := library.UpdateSkills(cfg, nil)
@@ -1562,21 +1559,26 @@ func runSync(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 		return 1
 	}
 	if jsonOut {
+		auditSummary := collector.ScanAudit(cfg, agent)
 		result := preview.Normalize(cfg, "sync_skills", map[string]any{
-			"agent":          agent,
-			"dry_run":        false,
-			"updated":        updated,
-			"updated_count":  len(updated),
-			"rendered":       results,
-			"rendered_count": len(results),
-			"warnings":       audit.AgentOutputWarningMessages(cfg, agent),
+			"agent":              agent,
+			"dry_run":            false,
+			"updated":            updated,
+			"updated_count":      len(updated),
+			"rendered":           results,
+			"rendered_count":     len(results),
+			"warnings":           audit.AgentOutputWarningMessagesFrom(auditSummary.Items),
+			"agent_output_audit": auditSummary,
 		}, false)
 		printMutationResult(stdout, result, true)
 	} else {
-		printInstalled(stdout, updated, "updated")
-		printResults(stdout, results)
+		writeResultSection(
+			stdout,
+			formatInstalledResultLines(updated, "updated", false),
+			formatRenderResultLines(results),
+		)
+		collector.CollectAudit(cfg, agent, cliAuditConcise)
 	}
-	warnAgentOutputSkills(cfg, agent, stderr)
 	return 0
 }
 
@@ -1660,7 +1662,7 @@ type migrationPlan struct {
 	Candidates []migrationCandidate
 }
 
-func runMigrate(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+func runMigrate(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer, collector *cliDiagnosticCollector) int {
 	from := migrationSourceUnmanaged
 	agent := ""
 	skill := ""
@@ -1711,7 +1713,7 @@ func runMigrate(cfg config.Config, args []string, stdout io.Writer, stderr io.Wr
 		installed = append(installed, items...)
 	}
 	printInstalled(stdout, installed, "installed")
-	return renderInstalled(cfg, installed, agent, stdout, stderr)
+	return renderInstalled(cfg, installed, agent, stdout, stderr, collector)
 }
 
 func buildMigrationPlan(cfg config.Config, from string, agent string, skill string, toSource string, toPath string) (migrationPlan, error) {
@@ -3228,7 +3230,7 @@ func runOverlay(cfg config.Config, args []string, stdout io.Writer, stderr io.Wr
 	}
 }
 
-func runRender(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+func runRender(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer, collector *cliDiagnosticCollector) int {
 	var skill, agent, file string
 	copyOutput := true
 	baseOnly := false
@@ -3283,9 +3285,9 @@ func runRender(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 1
 	}
-	printResults(stdout, results)
+	writeResultSection(stdout, formatRenderResultLines(results))
 	if copyOutput && !baseOnly {
-		warnAgentOutputSkills(cfg, agent, stderr)
+		collector.CollectAudit(cfg, agent, cliAuditConcise)
 	}
 	return 0
 }
@@ -3415,7 +3417,7 @@ func runMCP(cfg config.Config, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
-func runStatus(cfg config.Config, stdout io.Writer, stderr io.Writer) int {
+func runStatus(cfg config.Config, stdout io.Writer, stderr io.Writer, collector *cliDiagnosticCollector) int {
 	skills, err := library.ListInstalled(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
@@ -3432,11 +3434,11 @@ func runStatus(cfg config.Config, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "home: %s\nstore: %s\ninstalled skills: %d\noverlays: %d\ndrafts: %d\n", cfg.Home, cfg.StoreDir, len(skills), len(overlays), len(drafts))
-	warnAgentOutputSkills(cfg, "", stderr)
+	collector.CollectAudit(cfg, "", cliAuditDetailed)
 	return 0
 }
 
-func runDoctor(cfg config.Config, stdout io.Writer, stderr io.Writer) int {
+func runDoctor(cfg config.Config, stdout io.Writer, stderr io.Writer, collector *cliDiagnosticCollector) int {
 	for _, dir := range []string{cfg.Home, cfg.StoreDir, cfg.OverlaysDir, cfg.DraftsDir, cfg.ImportsDir, cfg.RenderedDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
@@ -3444,41 +3446,30 @@ func runDoctor(cfg config.Config, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	fmt.Fprintln(stdout, "ok")
-	warnAgentOutputSkills(cfg, "", stderr)
+	collector.CollectAudit(cfg, "", cliAuditDetailed)
 	return 0
 }
 
-func renderInstalled(cfg config.Config, installed []library.InstalledSkill, agent string, stdout io.Writer, stderr io.Writer) int {
+func renderInstalled(cfg config.Config, installed []library.InstalledSkill, agent string, stdout io.Writer, stderr io.Writer, _ *cliDiagnosticCollector) int {
+	results, err := renderInstalledResults(cfg, installed, agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	printResults(stdout, results)
+	return 0
+}
+
+func renderInstalledResults(cfg config.Config, installed []library.InstalledSkill, agent string) ([]render.Result, error) {
+	results := []render.Result{}
 	for _, item := range installed {
-		results, err := (render.Renderer{Config: cfg}).Render(render.Options{Skill: item.StoreName, Agent: agent, Copy: true})
+		items, err := (render.Renderer{Config: cfg}).Render(render.Options{Skill: item.StoreName, Agent: agent, Copy: true})
 		if err != nil {
-			fmt.Fprintf(stderr, "upskill: %v\n", err)
-			return 1
+			return nil, err
 		}
-		printResults(stdout, results)
+		results = append(results, items...)
 	}
-	warnAgentOutputSkills(cfg, agent, stderr)
-	return 0
-}
-
-func warnAgentOutputSkills(cfg config.Config, agent string, stderr io.Writer) {
-	warnings := audit.AgentOutputWarnings(cfg, agent)
-	migratable := false
-	for _, warning := range warnings {
-		if warning.Skill != "" && strings.Contains(warning.Reason, "not installed in Upskill") {
-			migratable = true
-		}
-	}
-	for _, warning := range audit.AgentOutputWarningMessages(cfg, agent) {
-		fmt.Fprintf(stderr, "warning: %s\n", warning)
-	}
-	if migratable {
-		command := "upskill migrate"
-		if agent != "" {
-			command += " --agent " + agent
-		}
-		fmt.Fprintf(stderr, "hint: run %q to copy unmanaged skills into a local source, or add --yes to apply\n", command)
-	}
+	return results, nil
 }
 
 func printInstalled(w io.Writer, installed []library.InstalledSkill, verb string) {

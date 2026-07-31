@@ -512,20 +512,41 @@ Check timing:
 
 Notice behavior:
 
-- Text CLI notices go to stderr so stdout remains stable for command output.
-- JSON CLI commands include a top-level `notices` array when the command's
-  normal JSON shape is an object. Commands that return arrays keep stdout as the
-  requested array and print notices to stderr.
+- Text CLI notices appear in a `Preflight` section on stderr so stdout remains
+  stable for command output. Non-fatal notices are collected during preflight
+  and displayed after the primary result or primary error.
+- JSON CLI objects and arrays remain valid JSON on stdout. Preflight notices
+  remain on stderr rather than being inserted into those payloads.
 - MCP tool results include a `notices` field when checks find updates, checks
-  fail, or automatic updates run.
+  fail, or automatic updates run. Every such notice includes
+  `phase: "preflight"`.
 - Notices are only for installed skills, failed checks, or automatic updates.
   Upskill must not print "new skill available" notices for uninstalled upstream
   skills.
 - A typical update notice is:
 
   ```text
-  notice: updates available for redis, docs-helper; run upskill sync or upskill update --diff redis
+  Preflight
+    NOTICE redis: update available
+      next: upskill update --diff redis
   ```
+
+Command reporting behavior:
+
+- Successful human mutation commands present non-empty sections in this order:
+  `Result`, `Preflight`, then `Agent output audit`.
+- `Result` is written to stdout. `Preflight`, `Agent output audit`, hints,
+  prompts, and errors are written to stderr.
+- Result lines use `OK` for completed outcomes and `PLAN` for dry-run targets.
+  Render results label `rendered:` managed cache paths and `copied:` configured
+  output paths. A render without a copy says `not copied`.
+- `add`, rendered `update`, text `sync`, and copied `render` use concise audit
+  output. `status` and `doctor` retain each finding's agent, output root, skill
+  path, and reason.
+- Agent-output audits are read-only. They may recommend `migrate`, `sync`, or
+  `doctor`, but they never execute those commands or change an unmanaged skill.
+- `show`, `render --print`, and JSON payload commands never receive a human
+  `Result` heading.
 
 Automatic update behavior:
 
@@ -1260,9 +1281,11 @@ Write semantics:
   `rendered/`, `overlays/`, `drafts/`, `imports/`, or configured import
   directories.
 - `sync_skills` returns a structured summary with `updated`,
-  `updated_count`, `rendered`, `rendered_count`, and warnings when nothing was
-  updated or rendered. It also includes `notices` for preflight checks and
-  automatic updates.
+  `updated_count`, `rendered`, `rendered_count`, legacy `warnings`, and an
+  `agent_output_audit` object. The audit object includes occurrence and category
+  counts, per-agent summaries, and detailed items, including non-nil empty
+  `agents` and `items` arrays when no findings exist. Wrapper `notices` remain
+  separate preflight metadata.
 - `sync_skills(dry_run=true)` returns planned source updates and render/copy
   targets without changing the store, rendered cache, or agent output paths.
 - Initialization instructions are generated from the live registry.
@@ -1588,8 +1611,9 @@ configuration. It must instruct agents to:
   configured local sources.
 - MCP tools cannot overwrite base `SKILL.md` or files in `store/`.
 - `sync_skills` updates from lock/config, renders final output, and returns a
-  structured summary.
-- MCP tool calls run preflight checks and return notices.
+  structured summary with legacy warnings and additive agent-output audit data.
+- MCP tool calls run preflight checks and return notices labeled with
+  `phase: "preflight"`.
 - MCP `find_source_skills` performs live source inspection without installing.
 - MCP `check_skill_updates` is read-only and reports changed, unchanged, and
   failed installed-skill checks.

@@ -38,6 +38,26 @@ When a command prints a rendered path, use that path as the source of truth.
 If agents are configured, render output is agent-specific, such as
 `~/.skills/rendered/codex/<skill-name>`.
 
+## Read Command Reports
+
+Upskill executes preflight before the requested command, then performs any
+post-operation agent-output audit. Successful human output presents those facts
+in the order a reader needs them:
+
+```text
+Result
+Preflight
+Agent output audit
+```
+
+Empty sections are omitted. `Result` stays on stdout. Passive `Preflight` and
+`Agent output audit` sections stay on stderr, so redirected JSON and file
+content remain valid. Fatal errors and confirmation prompts are never deferred.
+
+Mutation commands use concise audits with occurrence, agent, and unique-skill
+counts. Run `upskill doctor` or `upskill status` for paths and reasons grouped
+by agent. Audits do not migrate, delete, overwrite, or repair a skill.
+
 ## Migrate Existing Skills
 
 Use `migrate` when skill bundles already exist outside an Upskill source and
@@ -51,10 +71,16 @@ upskill migrate
 upskill migrate --yes
 ```
 
-The first command is a dry run. The second command copies the bundles into
+Run `upskill migrate` to preview and `upskill migrate --yes` to apply. The
+preview changes nothing. Applying copies the bundles into
 `~/Documents/Upskill/local-skills`, records that source if needed, installs the
 copied skills into `store/`, and renders managed output. Duplicate names are
 kept with numeric suffixes such as `redis`, `redis-2`, and `redis-3`.
+
+An audit may recommend migration, but it leaves unmanaged skills unchanged
+until you run `upskill migrate --yes`. A missing render marker recommends
+`upskill sync`; an inspection failure does not imply that migration will fix
+the directory.
 
 Limit migration to one agent or skill when reviewing a noisy system:
 
@@ -148,6 +174,17 @@ What happens:
 - Only the selected skill is copied into the read-only base store.
 - The lock file records the source and hash.
 - The effective skill is rendered and copied to the configured `codex` output.
+
+The command reports those outcomes explicitly:
+
+```text
+Result
+  OK installed hello-skill
+    digest: sha256:<full-digest>
+  OK rendered hello-skill for codex
+    rendered: /Users/example/.skills/rendered/codex/hello-skill
+    copied: /Users/example/.codex/skills/hello-skill
+```
 
 Use `--no-render` when you only want to populate the base store:
 
