@@ -362,8 +362,17 @@ Use `upskill source skills <source>` to discover new upstream skills and
 
 ## Use Automatic Update Policy
 
-Manual update policy is the default. With manual policy, normal commands print a
-notice when an installed skill has changed upstream:
+Manual update policy is the default. Local manual skills are checked live during
+ordinary commands. Manual Git skills are checked only by explicit live
+operations, so start with:
+
+```bash
+upskill update --check
+upskill update hello-skill --diff
+```
+
+A successful explicit Git check can seed a cached notice for later ordinary
+commands:
 
 ```text
 notice: updates available for hello-skill; run upskill sync or upskill update --diff hello-skill
@@ -387,9 +396,11 @@ upskill add local-examples --skill hello-skill
 
 Automatic updates refresh the installed base skill, update the lock entry, and
 render/copy configured agent outputs. If the command has `--agent`, preflight
-rendering is limited to that agent.
+rendering is limited to that agent. Automatic Git sources reuse a successful
+preflight result for one hour by default. When it expires, Upskill probes the
+remote revision and clones only if that revision changed.
 
-Read-only commands report pending automatic updates without applying them:
+Explicit read-only operations stay live without applying updates:
 
 ```bash
 upskill update --check
@@ -398,12 +409,37 @@ upskill source skills local-examples
 upskill source find local-examples hello
 ```
 
+The update and sync commands report installed-skill changes. The source
+commands report the current source catalog. All four skip unrelated implicit
+automatic-update preflight.
+
 Skip all preflight checks and notices for one command with:
 
 ```bash
 upskill list --no-check
 UPSKILL_NO_CHECK=1 upskill list
 ```
+
+`--no-check` skips only implicit preflight. Explicit update, sync, and source
+catalog commands still perform their requested live work.
+
+Configure the automatic Git freshness window with Go duration syntax:
+
+```json
+{
+  "preflight_check_ttl": "1h"
+}
+```
+
+```bash
+UPSKILL_PREFLIGHT_CHECK_TTL=30m upskill list
+UPSKILL_PREFLIGHT_CHECK_TTL=0 upskill list
+```
+
+The second command forces an automatic Git revision probe on every implicit
+preflight. If a probe fails, Upskill warns and lets the primary command finish;
+inside the retry window it reuses a stale successful status when available and
+performs no Git work.
 
 ## Search For Skills
 

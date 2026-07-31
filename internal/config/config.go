@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 var (
@@ -41,33 +43,35 @@ type Source struct {
 }
 
 type Config struct {
-	Home         string
-	StoreDir     string
-	OverlaysDir  string
-	DraftsDir    string
-	ImportsDir   string
-	ImportDirs   []string
-	RenderedDir  string
-	SourceIgnore []string
-	ConfigPath   string
-	LockPath     string
-	SkillsBin    string
-	AgentOutputs []AgentOutput
-	Sources      map[string]Source
+	Home              string
+	StoreDir          string
+	OverlaysDir       string
+	DraftsDir         string
+	ImportsDir        string
+	ImportDirs        []string
+	RenderedDir       string
+	SourceIgnore      []string
+	ConfigPath        string
+	LockPath          string
+	SkillsBin         string
+	PreflightCheckTTL time.Duration
+	AgentOutputs      []AgentOutput
+	Sources           map[string]Source
 }
 
 type rawConfig struct {
-	StoreDir     string          `json:"store_dir"`
-	OverlaysDir  string          `json:"overlays_dir"`
-	DraftsDir    string          `json:"drafts_dir"`
-	ImportsDir   string          `json:"imports_dir"`
-	ImportDirs   json.RawMessage `json:"import_dirs"`
-	RenderedDir  string          `json:"rendered_dir"`
-	SourceIgnore json.RawMessage `json:"source_ignore"`
-	LockPath     string          `json:"lock_path"`
-	SkillsBin    string          `json:"skills_bin"`
-	Agents       json.RawMessage `json:"agents"`
-	Sources      json.RawMessage `json:"sources"`
+	StoreDir          string          `json:"store_dir"`
+	OverlaysDir       string          `json:"overlays_dir"`
+	DraftsDir         string          `json:"drafts_dir"`
+	ImportsDir        string          `json:"imports_dir"`
+	ImportDirs        json.RawMessage `json:"import_dirs"`
+	RenderedDir       string          `json:"rendered_dir"`
+	SourceIgnore      json.RawMessage `json:"source_ignore"`
+	LockPath          string          `json:"lock_path"`
+	SkillsBin         string          `json:"skills_bin"`
+	PreflightCheckTTL string          `json:"preflight_check_ttl,omitempty"`
+	Agents            json.RawMessage `json:"agents"`
+	Sources           json.RawMessage `json:"sources"`
 }
 
 var DefaultSourceIgnore = []string{
@@ -86,8 +90,9 @@ var DefaultSourceIgnore = []string{
 }
 
 const (
-	UpdatePolicyManual = "manual"
-	UpdatePolicyAuto   = "auto"
+	UpdatePolicyManual       = "manual"
+	UpdatePolicyAuto         = "auto"
+	DefaultPreflightCheckTTL = time.Hour
 )
 
 func Load() (Config, error) {
@@ -137,6 +142,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	preflightCheckTTL, err := parsePreflightCheckTTL(raw.PreflightCheckTTL)
+	if err != nil {
+		return Config{}, err
+	}
 
 	agentOutputs, err := parseAgentOutputs(raw.Agents)
 	if err != nil {
@@ -151,20 +160,39 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Home:         home,
-		StoreDir:     storeDir,
-		OverlaysDir:  overlaysDir,
-		DraftsDir:    draftsDir,
-		ImportsDir:   importsDir,
-		ImportDirs:   importDirs,
-		RenderedDir:  renderedDir,
-		SourceIgnore: sourceIgnore,
-		ConfigPath:   configPath,
-		LockPath:     lockPath,
-		SkillsBin:    envDefault("UPSKILL_SKILLS_BIN", defaultString(raw.SkillsBin, "skills")),
-		AgentOutputs: agentOutputs,
-		Sources:      sources,
+		Home:              home,
+		StoreDir:          storeDir,
+		OverlaysDir:       overlaysDir,
+		DraftsDir:         draftsDir,
+		ImportsDir:        importsDir,
+		ImportDirs:        importDirs,
+		RenderedDir:       renderedDir,
+		SourceIgnore:      sourceIgnore,
+		ConfigPath:        configPath,
+		LockPath:          lockPath,
+		SkillsBin:         envDefault("UPSKILL_SKILLS_BIN", defaultString(raw.SkillsBin, "skills")),
+		PreflightCheckTTL: preflightCheckTTL,
+		AgentOutputs:      agentOutputs,
+		Sources:           sources,
 	}, nil
+}
+
+func parsePreflightCheckTTL(configValue string) (time.Duration, error) {
+	value := strings.TrimSpace(configValue)
+	if envValue, ok := os.LookupEnv("UPSKILL_PREFLIGHT_CHECK_TTL"); ok {
+		value = strings.TrimSpace(envValue)
+	}
+	if value == "" {
+		return DefaultPreflightCheckTTL, nil
+	}
+	ttl, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid preflight check TTL %q: %w", value, err)
+	}
+	if ttl < 0 {
+		return 0, fmt.Errorf("invalid preflight check TTL %q: duration must not be negative", value)
+	}
+	return ttl, nil
 }
 
 func OverlayDir(cfg Config, skill string, agent string) string {

@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -63,6 +65,63 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func runMCPGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Upskill Test",
+		"GIT_AUTHOR_EMAIL=upskill@example.invalid",
+		"GIT_COMMITTER_NAME=Upskill Test",
+		"GIT_COMMITTER_EMAIL=upskill@example.invalid",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
+}
+
+func installMCPGitCounter(t *testing.T, lsRemoteAction ...string) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	countPath := filepath.Join(root, "operations.log")
+	action := ""
+	if len(lsRemoteAction) > 0 && strings.TrimSpace(lsRemoteAction[0]) != "" {
+		action = fmt.Sprintf("if [ \"$1\" = \"ls-remote\" ]; then\n  %s\nfi", lsRemoteAction[0])
+	}
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$1\" >> %q\n%s\nexec %q \"$@\"\n", countPath, action, realGit)
+	writeFile(t, filepath.Join(root, "git"), script)
+	if err := os.Chmod(filepath.Join(root, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return countPath
+}
+
+func mcpGitOperationCounts(t *testing.T, path string) map[string]int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return map[string]int{}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, operation := range strings.Fields(string(data)) {
+		counts[operation]++
+	}
+	return counts
 }
 
 func configWithInstalledPolicySource(t *testing.T, scope string, writePolicy string) config.Config {
@@ -465,6 +524,194 @@ func TestMCPToolResultIncludesUpdateNotices(t *testing.T) {
 	notices, ok = result["notices"].([]notice)
 	if !ok || len(notices) != 1 || notices[0].Type != "update_available" {
 		t.Fatalf("array result notices = %#v", result["notices"])
+	}
+}
+
+func TestMCPExplicitGitCheckDoesNotRepeatLiveWorkForNotices(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	work := filepath.Join(root, "work")
+	runMCPGit(t, "", "init", "--bare", remote)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runMCPGit(t, work, "init")
+	writeFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	runMCPGit(t, work, "add", ".")
+	runMCPGit(t, work, "commit", "-m", "old")
+	runMCPGit(t, work, "branch", "-M", "main")
+	runMCPGit(t, work, "remote", "add", "origin", remote)
+	runMCPGit(t, work, "push", "-u", "origin", "main")
+	runMCPGit(t, "", "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	cfg := testConfig(t)
+	source := "file://" + remote
+	if _, err := library.InstallSource(cfg, source, library.InstallOptions{
+		Ref:          "main",
+		Subpath:      "skills",
+		SkillFilter:  "redis",
+		UpdatePolicy: config.UpdatePolicyManual,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew.\n")
+	runMCPGit(t, work, "add", ".")
+	runMCPGit(t, work, "commit", "-m", "new")
+	runMCPGit(t, work, "push", "origin", "main")
+	countPath := installMCPGitCounter(t)
+
+	if err := os.RemoveAll(filepath.Join(cfg.Home, "cache", "update-checks")); err != nil {
+		t.Fatal(err)
+	}
+	readParams, _ := json.Marshal(callParams{Name: "read_skill", Arguments: map[string]any{
+		"skill_id":      "redis",
+		"rendered":      false,
+		"include_files": false,
+	}})
+	readResp := handle(cfg, request{ID: json.RawMessage(`1`), Method: "tools/call", Params: readParams})
+	if readResp.Error != nil {
+		t.Fatalf("manual cache-miss response = %#v", readResp)
+	}
+	readResult := readResp.Result.(map[string]any)
+	if notices, ok := readResult["notices"].([]notice); ok && len(notices) != 0 {
+		t.Fatalf("manual cache miss notices = %#v", notices)
+	}
+	if counts := mcpGitOperationCounts(t, countPath); len(counts) != 0 {
+		t.Fatalf("manual MCP cache miss operations = %#v", counts)
+	}
+	if err := os.Remove(countPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	params, _ := json.Marshal(callParams{Name: "check_skill_updates", Arguments: map[string]any{
+		"skill_id": "redis",
+	}})
+	resp := handle(cfg, request{ID: json.RawMessage(`1`), Method: "tools/call", Params: params})
+	if resp.Error != nil {
+		t.Fatalf("tool response = %#v", resp)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok || result["isError"] != false {
+		t.Fatalf("tool result = %#v", resp.Result)
+	}
+	if counts := mcpGitOperationCounts(t, countPath); counts["clone"] != 1 || counts["ls-remote"] != 0 {
+		t.Fatalf("explicit check plus notices operations = %#v", counts)
+	}
+	notices, ok := result["notices"].([]notice)
+	if !ok || len(notices) != 1 || notices[0].Type != "update_available" || notices[0].SkillID != "redis" {
+		t.Fatalf("notices = %#v", result["notices"])
+	}
+	content := result["content"].([]map[string]string)
+	var payload struct {
+		Checks []library.UpdateCheck `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(content[0]["text"]), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Checks) != 1 || !payload.Checks[0].Changed || payload.Checks[0].CheckOrigin != library.UpdateCheckOriginLiveGit {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestMCPRemotePreflightFailureWarnsWithoutBlockingToolResult(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	work := filepath.Join(root, "work")
+	runMCPGit(t, "", "init", "--bare", remote)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runMCPGit(t, work, "init")
+	writeFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld.\n")
+	runMCPGit(t, work, "add", ".")
+	runMCPGit(t, work, "commit", "-m", "old")
+	runMCPGit(t, work, "branch", "-M", "main")
+	runMCPGit(t, work, "remote", "add", "origin", remote)
+	runMCPGit(t, work, "push", "-u", "origin", "main")
+	runMCPGit(t, "", "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	cfg := testConfig(t)
+	cfg.PreflightCheckTTL = 0
+	if _, err := library.InstallSource(cfg, "file://"+remote, library.InstallOptions{
+		Ref:          "main",
+		Subpath:      "skills",
+		SkillFilter:  "redis",
+		UpdatePolicy: config.UpdatePolicyAuto,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	countPath := installMCPGitCounter(t, "exit 1")
+	params, _ := json.Marshal(callParams{Name: "read_skill", Arguments: map[string]any{
+		"skill_id":      "redis",
+		"rendered":      false,
+		"include_files": false,
+	}})
+
+	for iteration := 0; iteration < 2; iteration++ {
+		if err := os.Remove(countPath); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		resp := handle(cfg, request{ID: json.RawMessage(`1`), Method: "tools/call", Params: params})
+		if resp.Error != nil {
+			t.Fatalf("tool response = %#v", resp)
+		}
+		result, ok := resp.Result.(map[string]any)
+		if !ok || result["isError"] != false {
+			t.Fatalf("tool result = %#v", resp.Result)
+		}
+		notices, ok := result["notices"].([]notice)
+		if !ok || len(notices) != 1 ||
+			notices[0].Type != library.UpdateCheckWarningRemoteDeferred ||
+			notices[0].SourceKey == "" ||
+			!notices[0].Stale {
+			t.Fatalf("notices = %#v", result["notices"])
+		}
+		content := result["content"].([]map[string]string)
+		if !strings.Contains(content[0]["text"], "Old.") {
+			t.Fatalf("primary tool result missing: %#v", content)
+		}
+		counts := mcpGitOperationCounts(t, countPath)
+		if iteration == 0 && (counts["ls-remote"] != 1 || counts["clone"] != 0) {
+			t.Fatalf("first deferred operations = %#v", counts)
+		}
+		if iteration == 1 && len(counts) != 0 {
+			t.Fatalf("backoff operations = %#v", counts)
+		}
+	}
+
+	if err := os.Rename(remote, remote+".offline"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(countPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	checkParams, _ := json.Marshal(callParams{Name: "check_skill_updates", Arguments: map[string]any{
+		"skill_id": "redis",
+	}})
+	checkResp := handle(cfg, request{ID: json.RawMessage(`2`), Method: "tools/call", Params: checkParams})
+	if checkResp.Error != nil {
+		t.Fatalf("explicit offline response = %#v", checkResp)
+	}
+	checkResult := checkResp.Result.(map[string]any)
+	content := checkResult["content"].([]map[string]string)
+	var payload struct {
+		FailedCount int                   `json:"failed_count"`
+		Checks      []library.UpdateCheck `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(content[0]["text"]), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.FailedCount != 1 || len(payload.Checks) != 1 || payload.Checks[0].Error == "" {
+		t.Fatalf("explicit offline payload = %#v", payload)
+	}
+	if counts := mcpGitOperationCounts(t, countPath); counts["clone"] != 1 || counts["ls-remote"] != 0 {
+		t.Fatalf("explicit offline operations = %#v", counts)
 	}
 }
 

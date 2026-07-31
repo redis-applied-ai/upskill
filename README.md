@@ -75,8 +75,10 @@ Global option:
 upskill <command> --no-check
 ```
 
-`--no-check` skips source/update preflight for one command. Set
-`UPSKILL_NO_CHECK=1` for the same behavior in the environment.
+`--no-check` skips implicit update notices and automatic updates for one
+command. Set `UPSKILL_NO_CHECK=1` for the same behavior in the environment.
+Explicit update, sync, and source catalog commands still run their requested
+live operation.
 
 Local customizations:
 
@@ -167,6 +169,7 @@ By default, `upskill` uses:
   drafts/           # mutable draft skill bundles
   imports/          # shared MCP-safe import inbox
   rendered/         # generated output, safe to delete
+  cache/             # advisory update-check cache, safe to delete
   config.json       # sources and output directories
   upskill-lock.json # installed skill source metadata
 ```
@@ -184,7 +187,12 @@ UPSKILL_CONFIG
 UPSKILL_LOCK
 UPSKILL_SOURCE_IGNORE
 UPSKILL_NO_CHECK
+UPSKILL_PREFLIGHT_CHECK_TTL
 ```
+
+`UPSKILL_PREFLIGHT_CHECK_TTL` accepts Go duration syntax, defaults to `1h`, and
+controls how long implicit automatic Git checks reuse a successful result. Set
+it to `0` to probe automatic Git remotes on every preflight.
 
 ## Doctor And Status
 
@@ -276,9 +284,15 @@ Upskill treats source catalogs and installed copies as different things:
 - New upstream skills do not produce generic notifications and are not installed
   until you run `upskill add`.
 
-Most commands run a preflight check. If an installed skill has changed upstream
-and its policy is `manual`, Upskill prints a notice to stderr. JSON stdout stays
-machine-readable.
+Most commands run a source-aware preflight check. Local skills are checked live.
+Manual Git skills never contact their remote during ordinary commands; run an
+explicit check to discover Git changes. A successful explicit check can seed a
+cached notice for later ordinary commands. Automatic Git skills reuse a
+successful check for one hour by default, then probe the remote revision and
+clone only when that revision changed.
+
+If a known installed skill change has policy `manual`, Upskill prints a notice
+to stderr. JSON stdout stays machine-readable.
 
 ```text
 notice: updates available for redis; run upskill sync or upskill update --diff redis
@@ -291,6 +305,10 @@ upskill update --check
 upskill update redis --diff
 upskill sync
 ```
+
+`upskill update --check`, `upskill update --diff`, `upskill sync --dry-run`,
+and source catalog commands are always live. They are not suppressed by
+`--no-check`.
 
 Use automatic updates when you want a skill refreshed whenever Upskill runs a
 normal command:
@@ -308,10 +326,27 @@ upskill add Obsidian --skill redis --update-policy manual
 
 Automatic updates refresh installed base skill files, update the lock entry,
 and render/copy configured agent outputs before the command's main behavior.
-Read-only commands such as `upskill update --check`, `upskill update --diff`,
-`upskill source skills`, and `upskill source find` report pending automatic
-updates without applying them. Use `--no-check` or `UPSKILL_NO_CHECK=1` to skip
-preflight entirely for one invocation.
+`upskill update --check`, `upskill update --diff`, and `upskill sync --dry-run`
+inspect installed sources live without applying updates. `upskill source
+skills` and `upskill source find` inspect their requested source catalog live.
+These explicit commands skip implicit automatic-update preflight. Use
+`--no-check` or `UPSKILL_NO_CHECK=1` to skip implicit preflight for other
+commands. Configure the automatic Git freshness window in `config.json` or the
+environment:
+
+```json
+{
+  "preflight_check_ttl": "1h"
+}
+```
+
+```bash
+UPSKILL_PREFLIGHT_CHECK_TTL=30m upskill list
+```
+
+If an implicit automatic Git refresh fails, Upskill warns, reuses a stale
+successful status when available, and continues the primary command. A failure
+while actually applying an automatic update remains fatal.
 
 ## Agent Outputs
 

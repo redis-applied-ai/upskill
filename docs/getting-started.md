@@ -161,13 +161,18 @@ source skills are not installed automatically; install them explicitly with
 
 Installed skills are synced copies. Most commands check whether installed skills
 have changed upstream and print notices to stderr when updates are available.
-Preview and apply manual updates with:
+Local sources are checked live. Ordinary commands do not contact manual Git
+sources, so use an explicit check to discover a manual Git change:
 
 ```bash
 upskill update --check
 upskill update hello-skill --diff
 upskill sync --agent codex
 ```
+
+A successful explicit Git check may seed a cached notice for later ordinary
+commands. Automatic Git sources reuse a successful check for one hour by
+default and probe the remote revision only after that result becomes stale.
 
 Use automatic updates when a skill should refresh whenever Upskill runs a normal
 command:
@@ -200,10 +205,23 @@ policy appears in `upskill source list --json`, `upskill source show`, and MCP
 source results so agents can choose between overlays, drafts, promotion, or
 direct source edits.
 
-Read-only commands such as `upskill update --check`, `upskill update --diff`,
-`upskill source skills`, and `upskill source find` report pending automatic
-updates without applying them. Add `--no-check`, or set `UPSKILL_NO_CHECK=1`,
-when you need to skip preflight checks and notices for one command.
+`upskill update --check`, `upskill update --diff`, and `upskill sync --dry-run`
+inspect installed sources live without applying updates. `upskill source
+skills` and `upskill source find` inspect their requested source catalog live.
+These explicit commands skip implicit automatic-update preflight. Add
+`--no-check`, or set `UPSKILL_NO_CHECK=1`, when you need to skip implicit
+preflight checks and notices for another command.
+
+Set the automatic Git preflight freshness window in `config.json`:
+
+```json
+{
+  "preflight_check_ttl": "1h"
+}
+```
+
+Or override it with `UPSKILL_PREFLIGHT_CHECK_TTL`. The value accepts Go
+duration syntax; `0` probes automatic Git remotes on every implicit preflight.
 
 ## Configure MCP
 

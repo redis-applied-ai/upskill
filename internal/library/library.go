@@ -147,11 +147,52 @@ type UpdateCheck struct {
 	Changed          bool     `json:"changed"`
 	Diff             []string `json:"diff,omitempty"`
 	Error            string   `json:"error,omitempty"`
+	CheckOrigin      string   `json:"check_origin,omitempty"`
+	CheckedAt        string   `json:"checked_at,omitempty"`
+	Stale            bool     `json:"stale,omitempty"`
+}
+
+type UpdateCheckMode string
+
+const (
+	UpdateCheckLive      UpdateCheckMode = "live"
+	UpdateCheckPreflight UpdateCheckMode = "preflight"
+)
+
+const (
+	UpdateCheckOriginLiveLocal    = "live_local"
+	UpdateCheckOriginLiveGit      = "live_git"
+	UpdateCheckOriginCache        = "cache"
+	UpdateCheckOriginLockRevision = "lock_revision"
+)
+
+const (
+	UpdateCheckWarningRemoteDeferred = "remote_check_deferred"
+	UpdateCheckWarningRemoteFailed   = "remote_check_failed"
+	UpdateCheckWarningCacheIgnored   = "cache_ignored"
+)
+
+type UpdateCheckOptions struct {
+	Names       []string
+	IncludeDiff bool
+	Mode        UpdateCheckMode
+}
+
+type UpdateCheckWarning struct {
+	Type      string `json:"type"`
+	SourceKey string `json:"source_key,omitempty"`
+	Message   string `json:"message"`
+}
+
+type UpdateCheckResult struct {
+	Checks   []UpdateCheck
+	Warnings []UpdateCheckWarning
 }
 
 type AutoUpdateResult struct {
-	Updated []InstalledSkill
-	Checks  []UpdateCheck
+	Updated  []InstalledSkill
+	Checks   []UpdateCheck
+	Warnings []UpdateCheckWarning
 }
 
 type SourceSkill struct {
@@ -601,110 +642,42 @@ func InstallSource(cfg config.Config, source string, opts InstallOptions) ([]Ins
 	if err := WriteLock(cfg, lock); err != nil {
 		return nil, err
 	}
+	if parsed.Type == "git" {
+		seedGitCacheFromRoot(cfg, lock, lock.Skills[installed[0].StoreName], resolved.Root, resolved.ResolvedRevision)
+	}
 	return installed, nil
 }
 
 func UpdateSkills(cfg config.Config, names []string) ([]InstalledSkill, error) {
-	lock, err := ReadLock(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if len(lock.Skills) == 0 {
-		return nil, nil
-	}
-	requested := map[string]struct{}{}
-	for _, name := range names {
-		requested[NormalizeName(name)] = struct{}{}
-	}
-	var keys []string
-	for key := range lock.Skills {
-		if len(requested) == 0 {
-			keys = append(keys, key)
-			continue
-		}
-		if _, ok := requested[key]; ok {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-
-	var updated []InstalledSkill
-	for _, key := range keys {
-		entry := lock.Skills[key]
-		oldHash := entry.Hash
-		parsed := ParsedSource{
-			Input:            entry.Source,
-			Type:             entry.SourceType,
-			URL:              entry.SourceURL,
-			LocalPath:        entry.SourceURL,
-			Ref:              entry.Ref,
-			Subpath:          entry.EffectiveSourceSubpath(),
-			SkillFilter:      key,
-			SourceID:         entry.SourceID,
-			UpdatePolicy:     entry.EffectiveUpdatePolicy(),
-			ResolvedRevision: entry.ResolvedRevision,
-		}
-		resolved, err := ResolveMaterializedSource(parsed)
-		if err != nil {
-			return nil, err
-		}
-		parsed.ResolvedRevision = resolved.ResolvedRevision
-		skills, err := DiscoverSkillsWithIgnore(resolved.Root, parsed.Subpath, cfg.SourceIgnore)
-		if err != nil {
-			resolved.Cleanup()
-			return nil, err
-		}
-		skills = filterSkills(skills, key)
-		if len(skills) == 0 {
-			resolved.Cleanup()
-			return nil, fmt.Errorf("locked skill not found in source: %s", key)
-		}
-		result, newEntry, err := installSkill(cfg, rootFromEntry(parsed, resolved.Root), parsed, skills[0])
-		resolved.Cleanup()
-		if err != nil {
-			return nil, err
-		}
-		newEntry.Source = entry.Source
-		if newEntry.SourceID == "" {
-			newEntry.SourceID = entry.SourceID
-		}
-		newEntry.UpdatePolicy = entry.EffectiveUpdatePolicy()
-		lock.Skills[key] = newEntry
-		if newEntry.Hash != oldHash {
-			updated = append(updated, result)
-		}
-	}
-	if err := WriteLock(cfg, lock); err != nil {
-		return nil, err
-	}
-	return updated, nil
+	return updateSkillsGrouped(cfg, names)
 }
 
 func AutoUpdateSkills(cfg config.Config) (AutoUpdateResult, error) {
-	checks, err := CheckSkillUpdates(cfg, nil, false)
+	result, err := CheckSkillUpdatesForPreflight(cfg)
 	if err != nil {
 		return AutoUpdateResult{}, err
 	}
+	checks := result.Checks
 	names := make([]string, 0, len(checks))
 	for _, check := range checks {
 		if check.UpdatePolicy != config.UpdatePolicyAuto {
 			continue
 		}
 		if check.Error != "" {
-			return AutoUpdateResult{Checks: checks}, fmt.Errorf("automatic update check failed for %s: %s", check.StoreName, check.Error)
+			return AutoUpdateResult{Checks: checks, Warnings: result.Warnings}, fmt.Errorf("automatic update check failed for %s: %s", check.StoreName, check.Error)
 		}
 		if check.Changed {
 			names = append(names, check.StoreName)
 		}
 	}
 	if len(names) == 0 {
-		return AutoUpdateResult{Checks: checks}, nil
+		return AutoUpdateResult{Checks: checks, Warnings: result.Warnings}, nil
 	}
 	updated, err := UpdateSkills(cfg, names)
 	if err != nil {
-		return AutoUpdateResult{Checks: checks}, err
+		return AutoUpdateResult{Checks: checks, Warnings: result.Warnings}, err
 	}
-	return AutoUpdateResult{Updated: updated, Checks: checks}, nil
+	return AutoUpdateResult{Updated: updated, Checks: checks, Warnings: result.Warnings}, nil
 }
 
 func PreviewUpdates(cfg config.Config, names []string, includeDiff bool) ([]UpdatePreview, error) {
@@ -733,102 +706,38 @@ func PreviewUpdates(cfg config.Config, names []string, includeDiff bool) ([]Upda
 }
 
 func CheckSkillUpdates(cfg config.Config, names []string, includeDiff bool) ([]UpdateCheck, error) {
-	lock, err := ReadLock(cfg)
+	result, err := CheckSkillUpdatesWithOptions(cfg, UpdateCheckOptions{
+		Names:       names,
+		IncludeDiff: includeDiff,
+		Mode:        UpdateCheckLive,
+	})
 	if err != nil {
 		return nil, err
 	}
-	if len(lock.Skills) == 0 {
-		return nil, nil
-	}
-	requested := map[string]struct{}{}
-	for _, name := range names {
-		requested[NormalizeName(name)] = struct{}{}
-	}
-	var keys []string
-	for key := range lock.Skills {
-		if len(requested) == 0 {
-			keys = append(keys, key)
-			continue
-		}
-		if _, ok := requested[key]; ok {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
+	return result.Checks, nil
+}
 
-	var checks []UpdateCheck
-	for _, key := range keys {
-		entry := lock.Skills[key]
-		check := UpdateCheck{
-			StoreName:       key,
-			Name:            entry.Name,
-			Source:          entry.Source,
-			SourceID:        entry.SourceID,
-			SourceType:      entry.SourceType,
-			SourceURL:       entry.SourceURL,
-			Ref:             entry.Ref,
-			UpdatePolicy:    entry.EffectiveUpdatePolicy(),
-			CurrentRevision: entry.ResolvedRevision,
-			CurrentHash:     entry.Hash,
-		}
-		parsed := ParsedSource{
-			Input:            entry.Source,
-			Type:             entry.SourceType,
-			URL:              entry.SourceURL,
-			LocalPath:        entry.SourceURL,
-			Ref:              entry.Ref,
-			Subpath:          entry.EffectiveSourceSubpath(),
-			SkillFilter:      key,
-			SourceID:         entry.SourceID,
-			UpdatePolicy:     entry.EffectiveUpdatePolicy(),
-			ResolvedRevision: entry.ResolvedRevision,
-		}
-		resolved, err := ResolveMaterializedSource(parsed)
-		if err != nil {
-			check.Error = err.Error()
-			checks = append(checks, check)
-			continue
-		}
-		parsed.ResolvedRevision = resolved.ResolvedRevision
-		check.ResolvedRevision = resolved.ResolvedRevision
-		skills, err := DiscoverSkillsWithIgnore(resolved.Root, parsed.Subpath, cfg.SourceIgnore)
-		if err != nil {
-			resolved.Cleanup()
-			check.Error = err.Error()
-			checks = append(checks, check)
-			continue
-		}
-		skills = filterSkills(skills, key)
-		if len(skills) == 0 {
-			resolved.Cleanup()
-			check.Error = "locked skill not found in source"
-			checks = append(checks, check)
-			continue
-		}
-		check.Name = skills[0].Name
-		newHash, err := hashTree(skills[0].Path)
-		if err != nil {
-			resolved.Cleanup()
-			check.Error = err.Error()
-			checks = append(checks, check)
-			continue
-		}
-		check.NewHash = newHash
-		check.Changed = entry.Hash != newHash
-		if includeDiff && check.Changed {
-			diff, err := diffUpdateDirs(filepath.Join(cfg.StoreDir, key), skills[0].Path)
-			if err != nil {
-				resolved.Cleanup()
-				check.Error = err.Error()
-				checks = append(checks, check)
-				continue
-			}
-			check.Diff = diff
-		}
-		resolved.Cleanup()
-		checks = append(checks, check)
+func CheckSkillUpdatesForPreflight(cfg config.Config) (UpdateCheckResult, error) {
+	return CheckSkillUpdatesWithOptions(cfg, UpdateCheckOptions{Mode: UpdateCheckPreflight})
+}
+
+func CheckSkillUpdatesWithOptions(cfg config.Config, opts UpdateCheckOptions) (UpdateCheckResult, error) {
+	if opts.Mode != UpdateCheckLive && opts.Mode != UpdateCheckPreflight {
+		return UpdateCheckResult{}, fmt.Errorf("unsupported update check mode %q", opts.Mode)
 	}
-	return checks, nil
+	if opts.Mode == UpdateCheckPreflight && opts.IncludeDiff {
+		return UpdateCheckResult{}, fmt.Errorf("preflight update checks cannot include diffs")
+	}
+	if opts.Mode == UpdateCheckPreflight {
+		return checkSkillUpdatesPreflight(cfg, opts.Names)
+	}
+	checks, warnings, err := checkSkillUpdatesLiveGrouped(cfg, opts.Names, opts.IncludeDiff)
+	return UpdateCheckResult{Checks: checks, Warnings: warnings}, err
+}
+
+func checkSkillUpdatesLive(cfg config.Config, names []string, includeDiff bool) ([]UpdateCheck, error) {
+	checks, _, err := checkSkillUpdatesLiveGrouped(cfg, names, includeDiff)
+	return checks, err
 }
 
 func ListInstalled(cfg config.Config) ([]Skill, error) {

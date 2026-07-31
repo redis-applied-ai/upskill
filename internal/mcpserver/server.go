@@ -63,10 +63,12 @@ type syncSkillsResult struct {
 }
 
 type notice struct {
-	Type    string `json:"type"`
-	SkillID string `json:"skill_id,omitempty"`
-	Message string `json:"message"`
-	Error   string `json:"error,omitempty"`
+	Type      string `json:"type"`
+	SkillID   string `json:"skill_id,omitempty"`
+	Message   string `json:"message"`
+	Error     string `json:"error,omitempty"`
+	SourceKey string `json:"source_key,omitempty"`
+	Stale     bool   `json:"stale,omitempty"`
 }
 
 type sourceRow struct {
@@ -188,7 +190,7 @@ func attachNotices(cfg config.Config, result any) any {
 }
 
 func updateNotices(cfg config.Config) []notice {
-	checks, err := library.CheckSkillUpdates(cfg, nil, false)
+	result, err := library.CheckSkillUpdatesForPreflight(cfg)
 	if err != nil {
 		return []notice{{
 			Type:    "update_check_failed",
@@ -197,7 +199,15 @@ func updateNotices(cfg config.Config) []notice {
 		}}
 	}
 	notices := []notice{}
-	for _, check := range checks {
+	for _, warning := range result.Warnings {
+		notices = append(notices, notice{
+			Type:      warning.Type,
+			Message:   warning.Message,
+			SourceKey: warning.SourceKey,
+			Stale:     warning.Type == library.UpdateCheckWarningRemoteDeferred && hasStaleUpdateCheck(result.Checks),
+		})
+	}
+	for _, check := range result.Checks {
 		if check.Error != "" {
 			notices = append(notices, notice{
 				Type:    "update_check_failed",
@@ -216,6 +226,15 @@ func updateNotices(cfg config.Config) []notice {
 		}
 	}
 	return notices
+}
+
+func hasStaleUpdateCheck(checks []library.UpdateCheck) bool {
+	for _, check := range checks {
+		if check.Stale {
+			return true
+		}
+	}
+	return false
 }
 
 func toolList() []map[string]any {

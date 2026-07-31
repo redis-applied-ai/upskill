@@ -9,6 +9,7 @@ Focused feature specs:
 
 - [MCP tool discovery, validation, and safe mutation](docs/mcp-tool-discovery-validation-spec.md)
 - [Source policy workflows](docs/source-policy-workflows-spec.md)
+- [Update preflight performance](docs/update-preflight-performance-spec.md)
 
 ## Purpose
 
@@ -139,8 +140,10 @@ Global options:
 --no-check
 ```
 
-`--no-check` disables source/update preflight for one command. It is equivalent
-to setting `UPSKILL_NO_CHECK=1` for that invocation.
+`--no-check` disables implicit update notices and automatic updates for one
+command. It is equivalent to setting `UPSKILL_NO_CHECK=1` for that invocation.
+It does not suppress explicit live operations such as `update --check`,
+`update --diff`, `sync`, `sync --dry-run`, `source skills`, or `source find`.
 
 ## CLI Help Contract
 
@@ -259,6 +262,7 @@ UPSKILL_CONFIG
 UPSKILL_LOCK
 UPSKILL_SOURCE_IGNORE
 UPSKILL_NO_CHECK
+UPSKILL_PREFLIGHT_CHECK_TTL
 ```
 
 ## Configuration
@@ -288,6 +292,7 @@ Draft and import directories may be configured explicitly:
     "~/.skills/imports",
     "~/Desktop/upskill-imports"
   ],
+  "preflight_check_ttl": "1h",
   "source_ignore": [
     ".obsidian",
     "overlays",
@@ -321,6 +326,11 @@ Rules:
   include `.git`, `node_modules`, `dist`, `build`, `__pycache__`, `.obsidian`,
   `.trash`, `.upskill`, `overlays`, `drafts`, `imports`, and `rendered`.
   `UPSKILL_SOURCE_IGNORE` appends comma-separated names.
+- `preflight_check_ttl` controls how long a successful automatic Git check is
+  reused during implicit preflight. It defaults to `1h`, accepts Go duration
+  syntax, and may be overridden by `UPSKILL_PREFLIGHT_CHECK_TTL`.
+- A preflight TTL of `0` forces automatic Git revision validation on every
+  implicit preflight. Negative and invalid values are configuration errors.
 
 ### Source Records
 
@@ -445,10 +455,22 @@ Source-specific rules:
 - Local sources are inspected from the filesystem path recorded in the source
   record or lock entry. A local source update is detected by hashing the current
   source skill directory and comparing it to the installed lock hash.
-- Git sources are inspected from the upstream remote, ref, and subpath recorded
-  in the source record or lock entry. A persistent cache is allowed only as an
-  implementation detail. Before returning source catalog data or update status,
-  the cache must fetch the remote and check out the requested resolved revision.
+- Explicit Git source catalog reads, update checks, diffs, updates, and sync
+  operations inspect the upstream remote, ref, and subpath recorded in the
+  source record or lock entry.
+- Implicit preflight for a Git skill with `update_policy: "manual"` is
+  cache-only. It performs no network operation. A successful explicit live
+  check may seed a known update notice for later ordinary commands; cache
+  absence means unknown, not unchanged.
+- Implicit preflight for a Git skill with `update_policy: "auto"` reuses a
+  successful cache record for `preflight_check_ttl`. When stale, it probes the
+  remote revision before materializing source contents. An unchanged revision
+  performs no clone.
+- Changed Git skills are checked once per canonical source URL and ref group,
+  even when several installed skills use different subpaths in one checkout.
+- Update-check cache state lives separately under
+  `cache/update-checks/<sha256>.json`. The lock file remains authoritative, and
+  a cache record is ignored when its lock fingerprint no longer matches.
 - If a Git ref is omitted, Upskill uses the remote default branch.
 - If a Git ref names a mutable branch, update checks compare the installed lock
   entry with the latest resolved commit for that branch.
@@ -457,21 +479,25 @@ Source-specific rules:
 - If a Git ref is a full commit SHA, Upskill treats it as pinned. Catalog reads
   still inspect that commit, but update checks should report no newer revision
   unless the skill files at that commit differ from the lock hash.
-- Clone, fetch, checkout, and source-read failures must be surfaced clearly.
-  Failed checks must not be silently treated as "up to date."
+- Clone, fetch, checkout, and source-read failures from explicit operations must
+  be surfaced clearly. A failed implicit automatic Git refresh emits a
+  structured deferred warning, may reuse a stale successful result, and must
+  not block the unrelated primary command.
 
 Check timing:
 
-- Every command that loads Upskill config and works with skills or sources runs
-  a preflight check before its main behavior.
+- Ordinary commands that load Upskill config and work with installed skills run
+  source-aware preflight before their main behavior.
 - `help`, `version`, and pure parse errors do not run checks.
-- Commands with explicit read-only contracts, such as `update --check`,
-  `update --diff`, and source inspection commands, run the check but do not
-  apply automatic updates. They report pending automatic updates instead.
+- Commands with explicit source/update behavior, including `update`,
+  `update --check`, `update --diff`, `sync`, `sync --dry-run`, `source skills`,
+  and `source find|search`, skip implicit preflight and run their requested live
+  operation exactly once.
 - Normal commands apply automatic updates for skills whose lock entry has
   `update_policy: "auto"` before running their main behavior.
 - Users may disable preflight checks with `--no-check` or `UPSKILL_NO_CHECK=1`.
-  Commands that skip checks should not print update notices.
+  Commands that skip implicit checks should not print update notices, but an
+  explicit live operation must still run.
 
 Notice behavior:
 
@@ -1160,16 +1186,17 @@ upsert_source_skill_file(source, skill_id? | skill_name?, path="SKILL.md", conte
 Read semantics:
 
 - Every MCP tool call runs the same preflight check rules as the CLI.
-- MCP tools that are explicitly read-only return pending auto-update notices
-  but do not apply automatic updates.
+- Generic MCP notices use source-aware preflight and do not contact manual Git
+  remotes.
 - `find_skills` returns installed base skills and drafts. It does not search
   every configured source.
 - `list_sources` returns configured sources and their default update policy.
-- `find_source_skills` performs live source inspection and returns current
+- `find_source_skills` performs one live source inspection and returns current
   source catalog entries. It does not install skills, update the lock file, or
   render output.
-- `check_skill_updates` returns installed-skill update status from recorded
-  sources. It is read-only.
+- `check_skill_updates` performs one live installed-skill check from recorded
+  sources. It is read-only; notice attachment must reuse the resulting cache
+  state instead of repeating live Git work.
 - `rendered=true` reads the effective rendered skill and applies overlays first.
 - `rendered=false` reads the synced base skill from `store/`.
 - `read_skill` returns the `SKILL.md` body plus a file manifest.
@@ -1449,7 +1476,15 @@ configuration. It must instruct agents to:
 - Commands with preflight checks print installed-skill update notices without
   printing generic uninstalled-skill notices.
 - `--no-check` and `UPSKILL_NO_CHECK=1` suppress preflight update checks.
+- `--no-check` does not suppress explicit update, sync, or source catalog work.
+- Ordinary `list` and installed `show` perform no Git operation for manual Git
+  sources.
+- Fresh automatic Git cache entries perform no Git operation; stale unchanged
+  entries perform one revision probe and no clone.
+- Failed implicit automatic Git refreshes warn and defer without blocking the
+  primary command, while automatic update application failures remain fatal.
 - Top-level help documents `--no-check` as a global option.
+- Top-level help documents `UPSKILL_PREFLIGHT_CHECK_TTL`.
 - `workon` opens an existing draft in the editor, creates a version draft for
   installed skills, and creates a new-skill draft for unknown names.
 - `draft create/edit/list/path/files/read/add-file/remove` cover the draft

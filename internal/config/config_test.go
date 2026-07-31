@@ -3,10 +3,12 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfigWithAgentOutputsAndEnvOverrides(t *testing.T) {
@@ -73,6 +75,76 @@ func TestLoadConfigWithAgentOutputsAndEnvOverrides(t *testing.T) {
 	}
 	if countString(cfg.SourceIgnore, "drafts") != 1 {
 		t.Fatalf("source ignore did not dedupe defaults/env: %#v", cfg.SourceIgnore)
+	}
+}
+
+func TestPreflightCheckTTLConfiguration(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	t.Setenv("UPSKILL_HOME", filepath.Join(root, "home"))
+	t.Setenv("UPSKILL_CONFIG", configPath)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreflightCheckTTL != time.Hour {
+		t.Fatalf("default TTL = %s", cfg.PreflightCheckTTL)
+	}
+
+	if err := os.WriteFile(configPath, []byte(`{"preflight_check_ttl":"45m"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreflightCheckTTL != 45*time.Minute {
+		t.Fatalf("configured TTL = %s", cfg.PreflightCheckTTL)
+	}
+
+	t.Setenv("UPSKILL_PREFLIGHT_CHECK_TTL", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreflightCheckTTL != 0 {
+		t.Fatalf("zero TTL = %s", cfg.PreflightCheckTTL)
+	}
+
+	t.Setenv("UPSKILL_PREFLIGHT_CHECK_TTL", "30s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreflightCheckTTL != 30*time.Second {
+		t.Fatalf("environment TTL = %s", cfg.PreflightCheckTTL)
+	}
+}
+
+func TestPreflightCheckTTLRejectsInvalidValues(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	t.Setenv("UPSKILL_HOME", filepath.Join(root, "home"))
+	t.Setenv("UPSKILL_CONFIG", configPath)
+
+	for _, value := range []string{"nope", "-1s"} {
+		if err := os.WriteFile(configPath, []byte(fmt.Sprintf(`{"preflight_check_ttl":%q}`, value)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "preflight check TTL") {
+			t.Fatalf("Load(%q) error = %v", value, err)
+		}
+	}
+
+	if err := os.WriteFile(configPath, []byte(`{"preflight_check_ttl":"1h"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("UPSKILL_PREFLIGHT_CHECK_TTL", "bad-env")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "bad-env") {
+		t.Fatalf("invalid environment error = %v", err)
 	}
 }
 

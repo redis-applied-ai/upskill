@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"upskill/internal/config"
 	"upskill/internal/library"
 	"upskill/internal/render"
+	"upskill/internal/updatecache"
 )
 
 func writeTestFile(t *testing.T, path string, text string, perm os.FileMode) {
@@ -100,6 +102,43 @@ func runCLIGit(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return string(output)
+}
+
+func installCLIGitCounter(t *testing.T) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	countPath := filepath.Join(root, "operations.log")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$1\" >> %q\nexec %q \"$@\"\n", countPath, realGit)
+	writeTestFile(t, filepath.Join(root, "git"), script, 0o755)
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return countPath
+}
+
+func cliGitOperationCounts(t *testing.T, path string) map[string]int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return map[string]int{}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, operation := range strings.Fields(string(data)) {
+		counts[operation]++
+	}
+	return counts
+}
+
+func clearCLIGitOperationCounts(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 }
 
 func installFakeEditor(t *testing.T, edited *[]string) {
@@ -281,22 +320,99 @@ func TestCLIGitSourceFreshnessE2E(t *testing.T) {
 	if got := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md")); !strings.Contains(got, "Old from git.") {
 		t.Fatalf("initial render = %s", got)
 	}
+	localSource := filepath.Join(root, "local-source")
+	writeTestFile(t, filepath.Join(localSource, "local", "SKILL.md"), "---\nname: Local\n---\n\nLocal skill.\n", 0o644)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"add", localSource, "--skill", "local", "--no-render"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add local code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
 
 	writeTestFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew from git.\n", 0o644)
 	runCLIGit(t, work, "add", ".")
 	runCLIGit(t, work, "commit", "-m", "new redis")
 	runCLIGit(t, work, "push", "origin", "main")
+	if err := os.RemoveAll(filepath.Join(root, "home", "cache", "update-checks")); err != nil {
+		t.Fatal(err)
+	}
 
 	stdout.Reset()
 	stderr.Reset()
+	countPath := installCLIGitCounter(t)
 	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "notice: updates available for redis") {
-		t.Fatalf("missing update notice: %q", stderr.String())
+	if strings.Contains(stderr.String(), "updates available") {
+		t.Fatalf("manual Git list performed implicit discovery: %q", stderr.String())
+	}
+	if data, err := os.ReadFile(countPath); err == nil && len(bytes.TrimSpace(data)) > 0 {
+		t.Fatalf("manual Git list ran Git: %q", data)
 	}
 	if got := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md")); !strings.Contains(got, "Old from git.") {
 		t.Fatalf("notice-only command mutated render = %s", got)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	clearCLIGitOperationCounts(t, countPath)
+	if code := Run([]string{"show", "local"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("show local code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Local skill.") {
+		t.Fatalf("show local output = %q", stdout.String())
+	}
+	if counts := cliGitOperationCounts(t, countPath); len(counts) != 0 {
+		t.Fatalf("show unrelated local operations = %#v", counts)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"update", "--check", "redis"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("update check code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "redis\tchanged") {
+		t.Fatalf("explicit check did not report update: %q", stdout.String())
+	}
+	if counts := cliGitOperationCounts(t, countPath); counts["clone"] != 1 {
+		t.Fatalf("update --check operations = %#v", counts)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"update-diff", []string{"update", "--diff", "redis"}, "redis\tchanged"},
+		{"sync-preview", []string{"sync", "--dry-run", "--json"}, `"planned_update_count": 1`},
+		{"source-skills", []string{"source", "skills", source, "--ref", "main", "--subpath", "skills"}, "redis"},
+		{"source-find", []string{"source", "find", source, "Redis", "--ref", "main", "--subpath", "skills"}, "redis"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout.Reset()
+			stderr.Reset()
+			clearCLIGitOperationCounts(t, countPath)
+			if code := Run(tc.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("%v code = %d stdout=%s stderr=%s", tc.args, code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.want) {
+				t.Fatalf("%v stdout = %q, want %q", tc.args, stdout.String(), tc.want)
+			}
+			if counts := cliGitOperationCounts(t, countPath); counts["clone"] != 1 {
+				t.Fatalf("%v operations = %#v", tc.args, counts)
+			}
+		})
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	clearCLIGitOperationCounts(t, countPath)
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cached list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "notice: updates available for redis") {
+		t.Fatalf("cached manual notice missing: %q", stderr.String())
+	}
+	if data, err := os.ReadFile(countPath); err == nil && len(bytes.TrimSpace(data)) > 0 {
+		t.Fatalf("cached manual notice ran Git: %q", data)
 	}
 
 	stdout.Reset()
@@ -306,6 +422,117 @@ func TestCLIGitSourceFreshnessE2E(t *testing.T) {
 	}
 	if got := readTestFile(t, filepath.Join(root, "codex-skills", "redis", "SKILL.md")); !strings.Contains(got, "New from git.") {
 		t.Fatalf("sync did not render git update = %s", got)
+	}
+}
+
+func TestCLIAutomaticGitPreflightLifecycle(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root, _ := setupEnv(t)
+	remote := filepath.Join(root, "remote.git")
+	work := filepath.Join(root, "work")
+	runCLIGit(t, "", "init", "--bare", remote)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runCLIGit(t, work, "init")
+	writeTestFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nOld auto Git.\n", 0o644)
+	runCLIGit(t, work, "add", ".")
+	runCLIGit(t, work, "commit", "-m", "old auto Git")
+	runCLIGit(t, work, "branch", "-M", "main")
+	runCLIGit(t, work, "remote", "add", "origin", remote)
+	runCLIGit(t, work, "push", "-u", "origin", "main")
+	runCLIGit(t, "", "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	var stdout, stderr bytes.Buffer
+	source := "file://" + remote
+	if code := Run([]string{
+		"add", source,
+		"--ref", "main",
+		"--subpath", "skills",
+		"--skill", "redis",
+		"--update-policy", "auto",
+		"--agent", "codex",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	countPath := installCLIGitCounter(t)
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("fresh list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if counts := cliGitOperationCounts(t, countPath); len(counts) != 0 {
+		t.Fatalf("fresh cache operations = %#v", counts)
+	}
+
+	expireCache := func() {
+		t.Helper()
+		home := filepath.Join(root, "home")
+		lock, err := library.ReadLock(config.Config{LockPath: filepath.Join(home, "upskill-lock.json")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := lock.Skills["redis"]
+		identity := updatecache.Identity(entry.SourceType, entry.SourceURL, entry.Ref)
+		store := updatecache.New(home)
+		record, found, err := store.Read(identity)
+		if err != nil || !found {
+			t.Fatalf("cache read: found=%t err=%v", found, err)
+		}
+		record.CheckedAt = "2000-01-01T00:00:00Z"
+		if err := store.Write(identity, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	expireCache()
+	clearCLIGitOperationCounts(t, countPath)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("unchanged list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if counts := cliGitOperationCounts(t, countPath); counts["ls-remote"] != 1 || counts["clone"] != 0 {
+		t.Fatalf("unchanged stale operations = %#v", counts)
+	}
+
+	writeTestFile(t, filepath.Join(work, "skills", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nNew auto Git.\n", 0o644)
+	runCLIGit(t, work, "add", ".")
+	runCLIGit(t, work, "commit", "-m", "new auto Git")
+	runCLIGit(t, work, "push", "origin", "main")
+	expireCache()
+	clearCLIGitOperationCounts(t, countPath)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("changed list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "notice: automatically updated redis") {
+		t.Fatalf("changed list notice = %q", stderr.String())
+	}
+	if counts := cliGitOperationCounts(t, countPath); counts["ls-remote"] != 1 || counts["clone"] != 2 {
+		t.Fatalf("changed operations = %#v", counts)
+	}
+	for _, path := range []string{
+		filepath.Join(root, "home", "store", "redis", "SKILL.md"),
+		filepath.Join(root, "codex-skills", "redis", "SKILL.md"),
+	} {
+		if got := readTestFile(t, path); !strings.Contains(got, "New auto Git.") {
+			t.Fatalf("%s = %s", path, got)
+		}
+	}
+
+	clearCLIGitOperationCounts(t, countPath)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("post-update list code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if counts := cliGitOperationCounts(t, countPath); len(counts) != 0 {
+		t.Fatalf("post-update operations = %#v", counts)
 	}
 }
 
@@ -357,7 +584,12 @@ func TestHelpCommands(t *testing.T) {
 	}
 
 	top := runHelp()
-	if !strings.Contains(top, "usage: upskill <command> [args]") || !strings.Contains(top, "commands:") || !strings.Contains(top, "--no-check") {
+	if !strings.Contains(top, "usage: upskill <command> [args]") ||
+		!strings.Contains(top, "commands:") ||
+		!strings.Contains(top, "--no-check") ||
+		!strings.Contains(top, "explicit update, sync, and source catalog operations stay live") ||
+		!strings.Contains(top, "UPSKILL_PREFLIGHT_CHECK_TTL=DURATION") ||
+		!strings.Contains(top, "default 1h; 0 always probes") {
 		t.Fatalf("help output = %q", top)
 	}
 	for _, want := range []string{"add      Install", "find     Search", "migrate  Migrate", "source   Manage", "draft    Manage", "overlay  Manage", "mcp      Run", "version  Print"} {
@@ -2437,6 +2669,35 @@ func TestCLIUpdateNoticeGoesToStderr(t *testing.T) {
 	}
 }
 
+func TestCLIMapsStructuredPreflightWarnings(t *testing.T) {
+	var stderr bytes.Buffer
+	printCLIUpdateWarnings(
+		[]library.UpdateCheckWarning{
+			{
+				Type:      library.UpdateCheckWarningRemoteDeferred,
+				SourceKey: "sha256:remote",
+				Message:   "automatic Git update check deferred",
+			},
+			{
+				Type:      library.UpdateCheckWarningCacheIgnored,
+				SourceKey: "sha256:cache",
+				Message:   "update-check cache ignored",
+			},
+		},
+		[]library.UpdateCheck{{StoreName: "redis", Stale: true}},
+		&stderr,
+	)
+	output := stderr.String()
+	for _, want := range []string{
+		"warning: automatic update check deferred for sha256:remote; using cached status",
+		"warning: update-check cache ignored for sha256:cache",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("warning output missing %q: %s", want, output)
+		}
+	}
+}
+
 func TestCLIPreflightAutoUpdatesNormalCommands(t *testing.T) {
 	root, _ := setupEnv(t)
 	source := filepath.Join(root, "auto-source")
@@ -2495,8 +2756,8 @@ func TestCLIReadOnlyPreflightDoesNotAutoUpdate(t *testing.T) {
 		if code := Run(args, &stdout, &stderr); code != 0 {
 			t.Fatalf("%v code = %d stderr=%s", args, code, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "notice: automatic updates pending for redis") {
-			t.Fatalf("%v missing pending notice: %q", args, stderr.String())
+		if strings.Contains(stderr.String(), "automatically updated") || strings.Contains(stderr.String(), "automatic updates pending") {
+			t.Fatalf("%v ran implicit automatic update preflight: %q", args, stderr.String())
 		}
 		if got := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")); !strings.Contains(got, "Old.") {
 			t.Fatalf("%v changed store during read-only preflight:\n%s", args, got)
@@ -2545,6 +2806,40 @@ func TestCLINoCheckSkipsPreflight(t *testing.T) {
 	}
 	if got := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")); !strings.Contains(got, "Old.") {
 		t.Fatalf("env no-check changed store:\n%s", got)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"update-check", []string{"--no-check", "update", "--check", "redis"}, "redis\tchanged"},
+		{"update-diff", []string{"update", "--diff", "redis", "--no-check"}, "redis\tchanged"},
+		{"sync-preview", []string{"sync", "--dry-run", "--json", "--no-check"}, `"planned_update_count": 1`},
+		{"source-catalog", []string{"source", "skills", source, "--no-check"}, "redis"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout.Reset()
+			stderr.Reset()
+			if code := Run(tc.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("%v code = %d stdout=%s stderr=%s", tc.args, code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.want) {
+				t.Fatalf("%v stdout = %q, want %q", tc.args, stdout.String(), tc.want)
+			}
+			if strings.Contains(stderr.String(), "automatically updated") {
+				t.Fatalf("%v ran implicit preflight: %q", tc.args, stderr.String())
+			}
+		})
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"sync", "--agent", "codex", "--no-check"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("explicit sync code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got := readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")); !strings.Contains(got, "New.") {
+		t.Fatalf("explicit sync was suppressed by --no-check:\n%s", got)
 	}
 }
 

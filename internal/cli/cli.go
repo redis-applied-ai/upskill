@@ -931,15 +931,13 @@ func cliPreflightModeFor(args []string) cliPreflightMode {
 	switch args[0] {
 	case "mcp", "version", "init":
 		return cliPreflightSkip
-	case "update":
-		if hasCLIFlag(args[1:], "--check") || hasCLIFlag(args[1:], "--diff") {
-			return cliPreflightNoticeOnly
-		}
+	case "update", "sync":
+		return cliPreflightSkip
 	case "source":
 		if len(args) > 1 {
 			switch args[1] {
 			case "skills", "find", "search":
-				return cliPreflightNoticeOnly
+				return cliPreflightSkip
 			}
 		}
 	}
@@ -965,18 +963,44 @@ func runCLIPreflight(cfg config.Config, args []string, stderr io.Writer) int {
 				return 1
 			}
 		}
+		printCLIUpdateWarnings(result.Warnings, result.Checks, stderr)
 		printCLIUpdateCheckNotices(result.Checks, result.Updated, stderr)
 		return 0
 	}
 }
 
 func printCLIUpdateNotices(cfg config.Config, stderr io.Writer) {
-	checks, err := library.CheckSkillUpdates(cfg, nil, false)
+	result, err := library.CheckSkillUpdatesForPreflight(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: update check failed: %v\n", err)
 		return
 	}
-	printCLIUpdateCheckNotices(checks, nil, stderr)
+	printCLIUpdateWarnings(result.Warnings, result.Checks, stderr)
+	printCLIUpdateCheckNotices(result.Checks, nil, stderr)
+}
+
+func printCLIUpdateWarnings(warnings []library.UpdateCheckWarning, checks []library.UpdateCheck, stderr io.Writer) {
+	hasStale := false
+	for _, check := range checks {
+		if check.Stale {
+			hasStale = true
+			break
+		}
+	}
+	for _, warning := range warnings {
+		switch warning.Type {
+		case library.UpdateCheckWarningRemoteDeferred:
+			fmt.Fprintf(stderr, "warning: automatic update check deferred for %s", warning.SourceKey)
+			if hasStale {
+				fmt.Fprint(stderr, "; using cached status")
+			}
+			fmt.Fprintln(stderr)
+		case library.UpdateCheckWarningCacheIgnored:
+			fmt.Fprintf(stderr, "warning: update-check cache ignored for %s\n", warning.SourceKey)
+		default:
+			fmt.Fprintf(stderr, "warning: %s\n", warning.Message)
+		}
+	}
 }
 
 func printCLIUpdateCheckNotices(checks []library.UpdateCheck, updated []library.InstalledSkill, stderr io.Writer) {
@@ -4064,7 +4088,14 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "global options:")
 	fmt.Fprintln(w, "  --no-check")
-	fmt.Fprintln(w, "           Skip source/update preflight for this command")
+	fmt.Fprintln(w, "           Skip implicit update notices and automatic updates for this command;")
+	fmt.Fprintln(w, "           explicit update, sync, and source catalog operations stay live")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "preflight environment:")
+	fmt.Fprintln(w, "  UPSKILL_NO_CHECK=1")
+	fmt.Fprintln(w, "           Skip implicit preflight for every command in this environment")
+	fmt.Fprintln(w, "  UPSKILL_PREFLIGHT_CHECK_TTL=DURATION")
+	fmt.Fprintln(w, "           Cache automatic Git checks for this Go duration (default 1h; 0 always probes)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, `Run "upskill <command> --help" for command help.`)
 }
