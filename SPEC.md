@@ -8,6 +8,7 @@ context unless a task explicitly says otherwise.
 Focused feature specs:
 
 - [MCP tool discovery, validation, and safe mutation](docs/mcp-tool-discovery-validation-spec.md)
+- [Skill usage, retrieval, and feedback](docs/skill-usage-feedback-spec.md)
 - [Source policy workflows](docs/source-policy-workflows-spec.md)
 - [Update preflight performance](docs/update-preflight-performance-spec.md)
 
@@ -88,7 +89,7 @@ discovery by `SKILL.md`, and agent-aware installation.
 
 ```bash
 upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--update-policy manual|auto] [--no-render]
-upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
+upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--stats] [--nocontent]
 upskill list|ls [--json] [--agent AGENT]
 upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
@@ -128,6 +129,9 @@ upskill overlay diff <skill-name> [--agent AGENT]
 
 upskill render [skill-name] [--agent AGENT] [--copy=true|false]
 upskill render <skill-name> --print [--file SKILL.md] [--base-only] [--agent AGENT]
+
+upskill stats use <skill-name> [--agent AGENT] [--idempotency-key KEY] [--json]
+upskill stats feedback <skill-name> --sentiment positive|negative --situation TEXT --details TEXT --proposed-change TEXT [--agent AGENT] [--idempotency-key KEY] [--json]
 
 upskill mcp
 upskill status
@@ -247,6 +251,7 @@ Default layout:
   sources/               # persistent clones/cache, if used
   config.json            # sources, output directories, optional settings
   upskill-lock.json      # installed skill source metadata
+  upskill-stats.jsonl    # local retrieval, use, and feedback activity
 ```
 
 Environment overrides:
@@ -260,6 +265,7 @@ UPSKILL_IMPORTS_DIR
 UPSKILL_RENDERED_DIR
 UPSKILL_CONFIG
 UPSKILL_LOCK
+UPSKILL_STATS
 UPSKILL_SOURCE_IGNORE
 UPSKILL_NO_CHECK
 UPSKILL_PREFLIGHT_CHECK_TTL
@@ -288,6 +294,7 @@ Draft and import directories may be configured explicitly:
 {
   "drafts_dir": "~/.skills/drafts",
   "imports_dir": "~/.skills/imports",
+  "stats_path": "~/.skills/upskill-stats.jsonl",
   "import_dirs": [
     "~/.skills/imports",
     "~/Desktop/upskill-imports"
@@ -312,6 +319,10 @@ Rules:
   lock file, rendering creates `rendered/` and configured agent outputs, overlay
   commands create `overlays/`, draft commands create `drafts/`, and import
   commands create `imports/`.
+- Activity commands create the parent directory for `stats_path` on their first
+  successful write. Reading a missing activity file returns zero counts.
+- `stats_path` defaults to `~/.skills/upskill-stats.jsonl` and may be overridden
+  by `UPSKILL_STATS` with the same path expansion rules as other managed paths.
 - `drafts_dir` stores mutable draft bundles.
 - `imports_dir` is the default shared inbox where agents may place archives or
   resource files for local import.
@@ -1161,6 +1172,9 @@ check_skill_updates(skill_id?, include_diff=false)
 read_skill(skill_id, agent?, rendered=true, include_files=true, file_limit=100)
 list_skill_files(skill_id, agent?, rendered=true, path_prefix?, recursive=true, include_hashes=false, limit=500)
 read_skill_file(skill_id, path, agent?, rendered=true, max_bytes=200000)
+get_skill_stats(skill_id, feedback_limit=10)
+record_skill_use(skill_id, agent?, idempotency_key?)
+record_skill_feedback(skill_id, sentiment, situation, details, proposed_change, agent?, idempotency_key?)
 render_skill(skill_id, agent?, copy=false, base_only=false)
 sync_skills(agent?, dry_run=false)
 upsert_skill_overlay_file(skill_id, path, content?, base64_content?, agent?, operation="append", dry_run=false)
@@ -1200,6 +1214,10 @@ Read semantics:
 - `rendered=true` reads the effective rendered skill and applies overlays first.
 - `rendered=false` reads the synced base skill from `store/`.
 - `read_skill` returns the `SKILL.md` body plus a file manifest.
+- Successful installed calls to `read_skill` and `read_skill_file` append one
+  retrieval event after the content read. Discovery, manifests, statistics,
+  source reads, and draft reads do not count as retrievals.
+- `get_skill_stats` is read-only and returns at most 100 recent feedback items.
 - `skill_id` may be the normalized store name or frontmatter name.
 - `skill_id` may be a draft identifier such as `draft:redis`; draft reads use
   draft semantics and do not apply overlays unless the tool explicitly requests
@@ -1209,6 +1227,12 @@ Write semantics:
 
 - MCP does not expose a lock-only update policy write. Change update policy by
   reinstalling a skill through the CLI `add --update-policy` path.
+- `record_skill_use` appends a use only when the caller explicitly reports that
+  it materially applied the skill. Retrieval never implies use.
+- `record_skill_feedback` requires `sentiment`, `situation`, `details`, and
+  `proposed_change`; feedback does not increment use.
+- Activity is local mutable state. It never changes the lock, skill bundles,
+  sources, overlays, drafts, rendered output, agent output, or VCS state.
 - `upsert_skill_overlay_file` writes only under `overlays/`.
 - It never writes under `store/` or `rendered/`.
 - `agent` selects `overlays/<skill>/agents/<agent>/`; absent `agent` selects
@@ -1430,6 +1454,11 @@ configuration. It must instruct agents to:
 - Render or sync after overlay edits when they need final skill output.
 - Avoid built-in skill servers for skill management when `upskill` tools are
   available.
+- Treat skill retrieval and material use as separate events. Record a use only
+  after applying the skill, and use stable idempotency keys for retries.
+- Submit positive or negative feedback only from real use, with the situation,
+  outcome details, and a concrete proposed change. Do not include secrets,
+  credentials, private customer data, or unnecessary personal data.
 
 ## Safety Rules
 

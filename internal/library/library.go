@@ -759,6 +759,23 @@ func ListInstalled(cfg config.Config) ([]Skill, error) {
 	return skills, nil
 }
 
+// ReadInstalled resolves one installed skill by its normalized store name.
+func ReadInstalled(cfg config.Config, name string) (Skill, error) {
+	storeName := NormalizeName(name)
+	if storeName == "" {
+		return Skill{}, fmt.Errorf("installed skill name is required")
+	}
+	skill, err := readSkill(filepath.Join(cfg.StoreDir, storeName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Skill{}, fmt.Errorf("installed skill not found: %s", storeName)
+		}
+		return Skill{}, err
+	}
+	skill.StoreName = storeName
+	return skill, nil
+}
+
 func FindInstalled(cfg config.Config, query string, limit int) ([]Skill, int, error) {
 	skills, err := ListInstalled(cfg)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"upskill/internal/activity"
 	"upskill/internal/config"
 	"upskill/internal/library"
 	"upskill/internal/render"
@@ -175,6 +176,326 @@ func TestUnknownCommandErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestSuccessfulCLIRetrievalCallsIncrementExactlyOnce(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n", 0o644)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"show", "redis"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("show exit=%d stderr=%q", code, stderr.String())
+	}
+	stats, err := activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetrievalCount != 1 {
+		t.Fatalf("show retrievals = %d", stats.RetrievalCount)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"render", "redis", "--print"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("render --print exit=%d stderr=%q", code, stderr.String())
+	}
+	stats, err = activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetrievalCount != 2 {
+		t.Fatalf("render --print retrievals = %d", stats.RetrievalCount)
+	}
+}
+
+func TestShowStatsPrintsContentAndPostRetrievalCounts(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nDistinct content.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"show", "redis", "--stats"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{"Distinct content.", "--- upskill stats ---", "Retrievals: 1", "Uses: 0", "Feedback: 0 (0 positive, 0 negative)"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output %q does not contain %q", output, want)
+		}
+	}
+}
+
+func TestShowStatsNoContentPrintsOnlyStatsWithoutIncrement(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nMust not appear.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"show", "redis"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("seed show exit=%d stderr=%q", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"show", "redis", "--stats", "--nocontent"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("stats-only exit=%d stderr=%q", code, stderr.String())
+	}
+	if output := stdout.String(); strings.Contains(output, "Must not appear.") || !strings.Contains(output, "Retrievals: 1") {
+		t.Fatalf("stats-only output = %q", output)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetrievalCount != 1 {
+		t.Fatalf("stats-only retrieval count = %d", stats.RetrievalCount)
+	}
+}
+
+func TestSourceStatisticsFailClearly(t *testing.T) {
+	root, _ := setupEnv(t)
+	source := filepath.Join(root, "source")
+	writeTestFile(t, filepath.Join(source, "redis", "SKILL.md"), "---\nname: Redis\ndescription: source\n---\n\nSource.\n", 0o644)
+	for _, args := range [][]string{
+		{"show", source, "--skill", "redis", "--stats"},
+		{"show", source, "--skill", "redis", "--stats", "--nocontent"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr); code != 2 {
+			t.Fatalf("%v exit=%d stderr=%q", args, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "statistics are available only for installed skills") {
+			t.Fatalf("%v stderr=%q", args, stderr.String())
+		}
+	}
+}
+
+func TestZeroStatisticsUseNeverForMissingTimestamps(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"show", "redis", "--stats", "--nocontent"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{"Retrievals: 0", "Uses: 0", "Feedback: 0 (0 positive, 0 negative)", "Last retrieved: never", "Last used: never", "Last feedback: never"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output %q does not contain %q", output, want)
+		}
+	}
+	if strings.Contains(output, "0001-") {
+		t.Fatalf("output contains Go zero timestamp: %q", output)
+	}
+}
+
+func TestPlainShowStdoutRemainsByteCompatible(t *testing.T) {
+	root, _ := setupEnv(t)
+	content := "---\nname: Redis\ndescription: cache\n---\n\n# Redis\n\nExact bytes.\n"
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), content, 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"show", "redis"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if stdout.String() != content {
+		t.Fatalf("stdout changed\n got: %q\nwant: %q", stdout.String(), content)
+	}
+}
+
+func TestStatsUseIncrementsExactlyOnce(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nUse me.\n", 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"stats", "use", "redis", "--agent", "codex", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("stats use exit=%d stderr=%q", code, stderr.String())
+	}
+	var result activity.RecordResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode stats use result: %v\n%s", err, stdout.String())
+	}
+	if !result.Recorded || result.Duplicate || result.EventID == "" || result.SkillID != "redis" || result.RetrievalCount != 0 || result.UseCount != 1 {
+		t.Fatalf("stats use result = %#v", result)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.UseCount != 1 || stats.RetrievalCount != 0 || stats.FeedbackCount != 0 {
+		t.Fatalf("stats after use = %#v", stats)
+	}
+}
+
+func TestStatsUseIdempotencyKeyDoesNotIncrementTwice(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nUse me.\n", 0o644)
+	args := []string{"stats", "use", "redis", "--idempotency-key", "task-1:redis:use", "--json"}
+
+	results := make([]activity.RecordResult, 0, 2)
+	for range 2 {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("stats use exit=%d stderr=%q", code, stderr.String())
+		}
+		var result activity.RecordResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		results = append(results, result)
+	}
+	if !results[0].Recorded || results[0].Duplicate || results[1].Recorded || !results[1].Duplicate {
+		t.Fatalf("idempotent results = %#v", results)
+	}
+	if results[0].EventID != results[1].EventID || results[1].UseCount != 1 {
+		t.Fatalf("duplicate did not return original event and unchanged count: %#v", results)
+	}
+}
+
+func TestStatsFeedbackRejectsEachMissingExperienceField(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nUse me.\n", 0o644)
+	base := []string{
+		"stats", "feedback", "redis",
+		"--sentiment", "negative",
+		"--situation", "Reviewing a Go change",
+		"--details", "The relevant edge case was omitted",
+		"--proposed-change", "Add the missing edge case",
+	}
+	for _, tc := range []struct {
+		name string
+		flag string
+		want string
+	}{
+		{name: "sentiment", flag: "--sentiment", want: "sentiment"},
+		{name: "situation", flag: "--situation", want: "situation is required"},
+		{name: "details", flag: "--details", want: "details is required"},
+		{name: "proposed change", flag: "--proposed-change", want: "proposed_change is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string(nil), base...)
+			for index := 0; index < len(args); index++ {
+				if args[index] == tc.flag {
+					args = append(args[:index], args[index+2:]...)
+					break
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run(args, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr=%q, want %q", stderr.String(), tc.want)
+			}
+		})
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := activity.Stats(cfg, "redis", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.FeedbackCount != 0 {
+		t.Fatalf("invalid feedback wrote events: %#v", stats)
+	}
+}
+
+func TestStatsFeedbackCountsSentimentsWithoutIncrementingUse(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nUse me.\n", 0o644)
+
+	for _, sentiment := range []string{"positive", "negative"} {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{
+			"stats", "feedback", "redis",
+			"--sentiment", sentiment,
+			"--situation", "Applying a skill to a task",
+			"--details", "The guidance had a concrete effect",
+			"--proposed-change", "Keep the useful guidance precise",
+			"--idempotency-key", "feedback:" + sentiment,
+			"--json",
+		}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s feedback exit=%d stderr=%q", sentiment, code, stderr.String())
+		}
+		var result activity.RecordResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if !result.Recorded || result.Sentiment != activity.Sentiment(sentiment) || result.UseCount != 0 {
+			t.Fatalf("%s feedback result = %#v", sentiment, result)
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := activity.Stats(cfg, "redis", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.FeedbackCount != 2 || stats.PositiveFeedbackCount != 1 || stats.NegativeFeedbackCount != 1 || stats.UseCount != 0 {
+		t.Fatalf("feedback stats = %#v", stats)
+	}
+}
+
+func TestStatsJSONMatchesSharedMCPResultFields(t *testing.T) {
+	root, _ := setupEnv(t)
+	writeTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md"), "---\nname: Redis\n---\n\nUse me.\n", 0o644)
+
+	runJSON := func(args ...string) map[string]any {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v exit=%d stderr=%q", args, code, stderr.String())
+		}
+		var result map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("decode %v: %v\n%s", args, err, stdout.String())
+		}
+		return result
+	}
+	assertKeys := func(result map[string]any, keys ...string) {
+		t.Helper()
+		if len(result) != len(keys) {
+			t.Fatalf("result keys = %#v, want %v", result, keys)
+		}
+		for _, key := range keys {
+			if _, ok := result[key]; !ok {
+				t.Fatalf("result missing %q: %#v", key, result)
+			}
+		}
+	}
+
+	use := runJSON("stats", "use", "redis", "--json")
+	assertKeys(use, "recorded", "duplicate", "event_id", "skill_id", "retrieval_count", "use_count")
+
+	feedback := runJSON(
+		"stats", "feedback", "redis",
+		"--sentiment", "positive",
+		"--situation", "Applying the skill",
+		"--details", "The guidance worked",
+		"--proposed-change", "Keep the guidance",
+		"--json",
+	)
+	assertKeys(feedback,
+		"recorded", "duplicate", "event_id", "skill_id", "sentiment",
+		"retrieval_count", "use_count", "feedback_count",
+		"positive_feedback_count", "negative_feedback_count",
+	)
+	if feedback["negative_feedback_count"] != float64(0) {
+		t.Fatalf("zero sentiment count omitted or changed: %#v", feedback)
 	}
 }
 
@@ -798,6 +1119,44 @@ func TestHelpCommands(t *testing.T) {
 		!strings.Contains(overlayEditHelp, "By default, this appends text to SKILL.md") ||
 		!strings.Contains(overlayEditHelp, "provide a Jinja template file") {
 		t.Fatalf("overlay edit help missing operation context: %q", overlayEditHelp)
+	}
+}
+
+func TestSkillActivityHelpContract(t *testing.T) {
+	setupEnv(t)
+	runHelp := func(args ...string) string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v exit=%d stderr=%q", args, code, stderr.String())
+		}
+		return stdout.String()
+	}
+
+	top := runHelp("--help")
+	if !strings.Contains(top, "stats    Record installed-skill use and feedback") {
+		t.Fatalf("top help missing stats command: %q", top)
+	}
+	show := runHelp("show", "--help")
+	for _, want := range []string{"--stats", "--nocontent", "without retrieving the", "incrementing retrieval count", "installed skills"} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("show help missing %q: %q", want, show)
+		}
+	}
+	if strings.Contains(show, "--no-content") {
+		t.Fatalf("show help uses wrong no-content spelling: %q", show)
+	}
+	use := runHelp("stats", "use", "--help")
+	for _, want := range []string{"materially applies", "Retrieval and use are separate", "--idempotency-key", "Activity remains local"} {
+		if !strings.Contains(use, want) {
+			t.Fatalf("stats use help missing %q: %q", want, use)
+		}
+	}
+	feedback := runHelp("stats", "feedback", "--help")
+	for _, want := range []string{"--sentiment", "--situation", "--details", "--proposed-change", "positive", "negative", "remains local", "private customer data"} {
+		if !strings.Contains(feedback, want) {
+			t.Fatalf("stats feedback help missing %q: %q", want, feedback)
+		}
 	}
 }
 

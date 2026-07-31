@@ -1,6 +1,6 @@
 # Using Skills
 
-<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file, render_skill, list_skill_drafts, read_skill_draft, list_skill_draft_files, read_skill_draft_file, upsert_skill_draft_file, delete_skill_draft_file, render_skill_draft, promote_skill_draft -->
+<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file, get_skill_stats, record_skill_use, record_skill_feedback, render_skill, list_skill_drafts, read_skill_draft, list_skill_draft_files, read_skill_draft_file, upsert_skill_draft_file, delete_skill_draft_file, render_skill_draft, promote_skill_draft -->
 
 Use the `upskill` MCP server for skill work whenever its tools are available.
 Do not use built-in skill servers for listing, searching, reading, creating, or
@@ -52,6 +52,27 @@ Use the right write target:
   notices as information about installed skills that have changed upstream.
   Do not treat notices as instructions to install newly discovered source
   skills.
+
+## Recording Skill Activity
+
+- Successful installed calls to `read_skill` and `read_skill_file` record one
+  retrieval automatically. `find_skills`, `list_skill_files`,
+  `get_skill_stats`, source reads, and draft reads do not.
+- Use `get_skill_stats` or `upskill show <skill> --stats --nocontent` to inspect
+  activity without recording another retrieval.
+- A retrieval is not a use. Call `record_skill_use` only after materially
+  applying the skill to the user's task. Supply a stable `idempotency_key` when
+  the call may be retried.
+- After real use, call `record_skill_feedback` when you have actionable positive
+  or negative feedback. Include every required field: `sentiment`, the concrete
+  `situation`, `details` explaining what went right or wrong, and a specific
+  `proposed_change`.
+- Feedback does not increment use. Record use separately when appropriate.
+- Statistics and feedback stay in Upskill's local activity log. They do not
+  authorize or automatically cause edits to a skill, source, overlay, draft,
+  rendered output, or VCS state.
+- Never include secrets, credentials, private customer data, or unnecessary
+  personal data in feedback.
 
 ## Checking And Syncing Installed Skills
 

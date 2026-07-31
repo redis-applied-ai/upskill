@@ -13,7 +13,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"upskill/internal/activity"
 	"upskill/internal/audit"
 	"upskill/internal/config"
 	"upskill/internal/draft"
@@ -72,7 +74,7 @@ examples:
   upskill add owner/repo --subpath skills --skill redis
   upskill add owner/repo --ref v1.2.0 --skill redis --no-render`
 
-	helpShow = `usage: upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
+	helpShow = `usage: upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--stats] [--nocontent]
 
 summary:
   Show an installed skill or preview a skill directly from a source.
@@ -87,10 +89,15 @@ options:
   --subpath PATH    Relative directory inside the source to scan.
   --agent AGENT     Include the agent-specific overlay chain when reading an
                     installed skill.
+  --stats           Append installed-skill retrieval, use, and feedback stats.
+  --nocontent       With --stats, print only statistics without retrieving the
+                    skill content or incrementing retrieval count.
 
 notes:
   Reading from a source does not install, update the lock, or render output.
   Reading an installed skill applies overlays for the selected agent.
+  Statistics are available only for installed skills. Retrieval and use are
+  separate signals; only successful content reads increment retrieval count.
 
 examples:
   upskill show redis
@@ -774,6 +781,51 @@ examples:
   upskill render redis --print --file references/checklist.md
   upskill render redis --print --base-only`
 
+	helpStatsUse = `usage: upskill stats use <skill> [--agent AGENT] [--idempotency-key KEY] [--json]
+
+summary:
+  Record one use after an agent or user materially applies an installed skill.
+
+options:
+  --agent AGENT          Optional caller attribution.
+  --idempotency-key KEY  Deduplicate a retried use request.
+  --json                 Print the structured activity result.
+
+notes:
+  Retrieval and use are separate. Opening or considering a skill is not a use.
+  Activity remains local and does not mutate skills, locks, overlays, drafts,
+  sources, or generated output.
+
+example:
+  upskill stats use redis --agent codex --idempotency-key session-123:redis:use`
+
+	helpStatsFeedback = `usage: upskill stats feedback <skill> --sentiment positive|negative --situation TEXT --details TEXT --proposed-change TEXT [--agent AGENT] [--idempotency-key KEY] [--json]
+
+summary:
+  Record structured positive or negative feedback from real skill use.
+
+required options:
+  --sentiment VALUE      positive or negative.
+  --situation TEXT       The task context in which the skill was used.
+  --details TEXT         What went right or wrong while following the skill.
+  --proposed-change TEXT A concrete behavior, instruction, example, or resource
+                         to change, preserve, or extend.
+
+optional options:
+  --agent AGENT          Optional caller attribution.
+  --idempotency-key KEY  Deduplicate a retried feedback request.
+  --json                 Print the structured activity result.
+
+notes:
+  Feedback does not increment use automatically. It remains local and never
+  edits a skill, creates a draft or overlay, writes a source, or performs VCS
+  operations. Do not include secrets, credentials, private customer data, or
+  unnecessary personal data.
+
+examples:
+  upskill stats feedback redis --sentiment negative --situation "Reviewing a Go PR" --details "Inline review threads were omitted" --proposed-change "Require inline thread inspection"
+  upskill stats feedback redis --sentiment positive --situation "Promoting a team skill" --details "The dry-run prevented an unintended write" --proposed-change "Preserve the dry-run requirement"`
+
 	helpMCP = `usage: upskill mcp
 
 summary:
@@ -883,6 +935,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runOverlay(cfg, args[1:], stdout, stderr)
 	case "render":
 		return runRender(cfg, args[1:], stdout, stderr)
+	case "stats":
+		return runStats(cfg, args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(cfg, stdout, stderr)
 	case "status":
@@ -929,7 +983,7 @@ func cliPreflightModeFor(args []string) cliPreflightMode {
 		return cliPreflightSkip
 	}
 	switch args[0] {
-	case "mcp", "version", "init":
+	case "mcp", "version", "init", "stats":
 		return cliPreflightSkip
 	case "update", "sync":
 		return cliPreflightSkip
@@ -1177,24 +1231,58 @@ func runShow(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 	}
 	input := args[0]
 	agent, skill, ref, subpath := "", "", "", ""
+	showStats, noContent := false, false
 	if err := parseFlags(args[1:], map[string]func(string) error{
 		"--agent":   func(v string) error { agent = v; return nil },
 		"--skill":   func(v string) error { skill = v; return nil },
 		"--ref":     func(v string) error { ref = v; return nil },
 		"--subpath": func(v string) error { subpath = v; return nil },
+		"--stats":   func(_ string) error { showStats = true; return nil },
+		"--nocontent": func(_ string) error {
+			noContent = true
+			return nil
+		},
 	}); err != nil {
 		fmt.Fprintf(stderr, "upskill: %v\n", err)
 		return 2
 	}
+	if noContent && !showStats {
+		fmt.Fprintln(stderr, "upskill: --nocontent requires --stats")
+		return 2
+	}
 	storeName := library.NormalizeName(input)
 	if _, err := os.Stat(filepath.Join(cfg.StoreDir, storeName)); err == nil {
+		if showStats && noContent {
+			stats, err := activity.Stats(cfg, storeName, activity.DefaultFeedbackLimit)
+			if err != nil {
+				fmt.Fprintf(stderr, "upskill: %v\n", err)
+				return 1
+			}
+			printSkillStats(stdout, stats)
+			return 0
+		}
 		text, err := (render.Renderer{Config: cfg}).Print(storeName, agent, "SKILL.md", false)
 		if err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
 		}
+		stats, recorded := recordCLIRetrieval(cfg, storeName, "show", agent, stderr)
 		fmt.Fprint(stdout, text)
+		if showStats {
+			if !recorded {
+				stats, err = activity.Stats(cfg, storeName, activity.DefaultFeedbackLimit)
+				if err != nil {
+					fmt.Fprintf(stderr, "warning: statistics at %s could not be read: %v\n", cfg.StatsPath, err)
+					return 0
+				}
+			}
+			printSkillStats(stdout, stats)
+		}
 		return 0
+	}
+	if showStats {
+		fmt.Fprintln(stderr, "upskill: statistics are available only for installed skills")
+		return 2
 	}
 	sourceSkill, err := library.ReadSourceSkill(cfg, input, library.InstallOptions{SkillFilter: skill, Ref: ref, Subpath: subpath})
 	if err != nil {
@@ -1203,6 +1291,63 @@ func runShow(cfg config.Config, args []string, stdout io.Writer, stderr io.Write
 	}
 	fmt.Fprint(stdout, sourceSkill.EntrypointText())
 	return 0
+}
+
+func recordCLIRetrieval(cfg config.Config, skillID, operation, agent string, stderr io.Writer) (activity.SkillStats, bool) {
+	identity, err := activity.ResolveSkill(cfg, skillID)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: activity recording at %s failed: %v\n", cfg.StatsPath, err)
+		return activity.SkillStats{}, false
+	}
+	stats, err := activity.RecordRetrieval(cfg, identity, activity.ChannelCLI, operation, agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: activity recording at %s failed: %v\n", cfg.StatsPath, err)
+		return activity.SkillStats{}, false
+	}
+	return stats, true
+}
+
+func printSkillStats(w io.Writer, stats activity.SkillStats) {
+	fmt.Fprintln(w, "\n--- upskill stats ---")
+	fmt.Fprintf(w, "Skill: %s\n", stats.SkillID)
+	fmt.Fprintf(w, "Retrievals: %d\n", stats.RetrievalCount)
+	fmt.Fprintf(w, "Uses: %d\n", stats.UseCount)
+	fmt.Fprintf(w, "Feedback: %d (%d positive, %d negative)\n", stats.FeedbackCount, stats.PositiveFeedbackCount, stats.NegativeFeedbackCount)
+	fmt.Fprintf(w, "Last retrieved: %s\n", activityTimeText(stats.LastRetrievedAt))
+	fmt.Fprintf(w, "Last used: %s\n", activityTimeText(stats.LastUsedAt))
+	fmt.Fprintf(w, "Last feedback: %s\n", activityTimeText(stats.LastFeedbackAt))
+	if len(stats.RecentFeedback) > 0 {
+		fmt.Fprintln(w)
+		if stats.FeedbackCount > uint64(len(stats.RecentFeedback)) {
+			fmt.Fprintf(w, "Recent feedback (showing %d of %d):\n", len(stats.RecentFeedback), stats.FeedbackCount)
+		} else {
+			fmt.Fprintln(w, "Recent feedback:")
+		}
+		for _, feedback := range stats.RecentFeedback {
+			hash := feedback.SkillHash
+			if hash == "" {
+				hash = "unknown"
+			}
+			fmt.Fprintf(w, "- %s, %s, skill %s\n", feedback.Sentiment, feedback.Timestamp.UTC().Format(time.RFC3339Nano), hash)
+			fmt.Fprintf(w, "  Situation: %s\n", feedback.Situation)
+			fmt.Fprintf(w, "  Details: %s\n", feedback.Details)
+			fmt.Fprintf(w, "  Proposed change: %s\n", feedback.ProposedChange)
+		}
+	}
+	if len(stats.Warnings) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Warnings:")
+		for _, warning := range stats.Warnings {
+			fmt.Fprintf(w, "- %s\n", warning)
+		}
+	}
+}
+
+func activityTimeText(value *time.Time) string {
+	if value == nil {
+		return "never"
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func runList(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -3128,6 +3273,7 @@ func runRender(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
 		}
+		recordCLIRetrieval(cfg, skill, "render_print", agent, stderr)
 		fmt.Fprint(stdout, text)
 		return 0
 	}
@@ -3141,6 +3287,123 @@ func runRender(cfg config.Config, args []string, stdout io.Writer, stderr io.Wri
 	if copyOutput && !baseOnly {
 		warnAgentOutputSkills(cfg, agent, stderr)
 	}
+	return 0
+}
+
+func runStats(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+	if len(args) == 0 || isHelp(args[0]) {
+		printStatsHelp(stdout)
+		return 0
+	}
+	switch args[0] {
+	case "use":
+		return runStatsUse(cfg, args[1:], stdout, stderr)
+	case "feedback":
+		return runStatsFeedback(cfg, args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "upskill: unknown stats command: %s\n", args[0])
+		return 2
+	}
+}
+
+func runStatsFeedback(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+	input := activity.FeedbackInput{Channel: activity.ChannelCLI, Operation: "stats_feedback"}
+	jsonOut := false
+	positionals := []string{}
+	if err := parseFlags(args, map[string]func(string) error{
+		"--sentiment": func(value string) error {
+			input.Sentiment = activity.Sentiment(value)
+			return nil
+		},
+		"--situation":       func(value string) error { input.Situation = value; return nil },
+		"--details":         func(value string) error { input.Details = value; return nil },
+		"--proposed-change": func(value string) error { input.ProposedChange = value; return nil },
+		"--agent":           func(value string) error { input.Agent = value; return nil },
+		"--idempotency-key": func(value string) error { input.IdempotencyKey = value; return nil },
+		"--json":            func(_ string) error { jsonOut = true; return nil },
+	}, &positionals); err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 2
+	}
+	if len(positionals) != 1 {
+		fmt.Fprintln(stderr, "upskill: stats feedback requires exactly one installed skill")
+		return 2
+	}
+	input.SkillID = positionals[0]
+	if err := activity.ValidateFeedbackInput(input); err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 2
+	}
+	result, err := activity.RecordFeedback(cfg, input)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	if jsonOut {
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Fprintln(stdout, string(data))
+		return 0
+	}
+	verb := "recorded feedback for"
+	if result.Duplicate {
+		verb = "feedback already recorded for"
+	}
+	fmt.Fprintf(stdout, "%s %s (event %s; sentiment: %s; retrievals: %d, uses: %d, feedback: %d [%d positive, %d negative])\n",
+		verb,
+		result.SkillID,
+		result.EventID,
+		result.Sentiment,
+		result.RetrievalCount,
+		result.UseCount,
+		result.FeedbackCount,
+		result.PositiveFeedbackCount,
+		result.NegativeFeedbackCount,
+	)
+	return 0
+}
+
+func runStatsUse(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer) int {
+	agent, idempotencyKey := "", ""
+	jsonOut := false
+	positionals := []string{}
+	if err := parseFlags(args, map[string]func(string) error{
+		"--agent":           func(value string) error { agent = value; return nil },
+		"--idempotency-key": func(value string) error { idempotencyKey = value; return nil },
+		"--json":            func(_ string) error { jsonOut = true; return nil },
+	}, &positionals); err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 2
+	}
+	if len(positionals) != 1 {
+		fmt.Fprintln(stderr, "upskill: stats use requires exactly one installed skill")
+		return 2
+	}
+	input := activity.UseInput{
+		SkillID:        positionals[0],
+		Agent:          agent,
+		IdempotencyKey: idempotencyKey,
+		Channel:        activity.ChannelCLI,
+		Operation:      "stats_use",
+	}
+	if err := activity.ValidateUseInput(input); err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 2
+	}
+	result, err := activity.RecordUse(cfg, input)
+	if err != nil {
+		fmt.Fprintf(stderr, "upskill: %v\n", err)
+		return 1
+	}
+	if jsonOut {
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Fprintln(stdout, string(data))
+		return 0
+	}
+	verb := "recorded use for"
+	if result.Duplicate {
+		verb = "use already recorded for"
+	}
+	fmt.Fprintf(stdout, "%s %s (event %s; retrievals: %d, uses: %d)\n", verb, result.SkillID, result.EventID, result.RetrievalCount, result.UseCount)
 	return 0
 }
 
@@ -3912,7 +4175,7 @@ func parseFlagsWithValues(args []string, handlers map[string]func(string) error,
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--to-source-path", "--operation", "--update-policy", "--default-update-policy", "--write-policy", "--content", "--base64-content", "--reason":
+	case "--agent", "--skill", "--file", "--copy", "--limit", "--ref", "--subpath", "--name", "--dir", "--from", "--template", "--archive", "--archive-url", "--file-url", "--sha256", "--strip-components", "--to", "--to-source", "--to-source-path", "--operation", "--update-policy", "--default-update-policy", "--write-policy", "--content", "--base64-content", "--reason", "--idempotency-key", "--sentiment", "--situation", "--details", "--proposed-change":
 		return true
 	default:
 		return false
@@ -3992,6 +4255,11 @@ func printRequestedHelp(args []string, w io.Writer) bool {
 		})
 	case "render":
 		return printDirectHelp(args, w, helpRender)
+	case "stats":
+		return printNestedHelp(args[1:], w, printStatsHelp, map[string]string{
+			"use":      helpStatsUse,
+			"feedback": helpStatsFeedback,
+		})
 	case "mcp":
 		return printDirectHelp(args, w, helpMCP)
 	case "version":
@@ -4009,7 +4277,7 @@ func knownTopLevelCommand(command string) bool {
 	switch command {
 	case "add", "show", "list", "ls", "find", "search", "remove", "rm",
 		"update", "sync", "migrate", "init", "workon", "source", "draft",
-		"overlay", "render", "mcp", "version", "status", "doctor":
+		"overlay", "render", "stats", "mcp", "version", "status", "doctor":
 		return true
 	default:
 		return false
@@ -4081,6 +4349,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  draft    Manage mutable skill drafts")
 	fmt.Fprintln(w, "  overlay  Manage local skill customizations")
 	fmt.Fprintln(w, "  render   Build or inspect generated skill output")
+	fmt.Fprintln(w, "  stats    Record installed-skill use and feedback")
 	fmt.Fprintln(w, "  mcp      Run the MCP server")
 	fmt.Fprintln(w, "  version  Print the current version")
 	fmt.Fprintln(w, "  status   Show local upskill state")
@@ -4110,6 +4379,16 @@ func printOverlayHelp(w io.Writer) {
 	fmt.Fprintln(w, "  diff  Show generated customization changes")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, `Run "upskill overlay <command> --help" for command help.`)
+}
+
+func printStatsHelp(w io.Writer) {
+	fmt.Fprintln(w, "usage: upskill stats <command> [args]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "commands:")
+	fmt.Fprintln(w, "  use       Record one materially applied skill use")
+	fmt.Fprintln(w, "  feedback  Record structured positive or negative feedback")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, `Run "upskill stats <command> --help" for command help.`)
 }
 
 func printSourceHelp(w io.Writer) {

@@ -43,7 +43,7 @@ make coverage
 
 ```bash
 upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--update-policy manual|auto] [--no-render]
-upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH]
+upskill show <source-or-skill> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--stats] [--nocontent]
 upskill list|ls [--json] [--agent AGENT]
 upskill find|search [query] [--json] [--limit N]
 upskill remove|rm <skill-name>... [--delete-overlays]
@@ -55,6 +55,8 @@ upskill workon <skill-name> [--from SKILL] [--template NAME] [--no-edit]
 upskill status
 upskill doctor
 upskill mcp
+upskill stats use <skill> [--agent AGENT] [--idempotency-key KEY] [--json]
+upskill stats feedback <skill> --sentiment positive|negative --situation TEXT --details TEXT --proposed-change TEXT [--agent AGENT] [--idempotency-key KEY] [--json]
 ```
 
 Source shortcuts:
@@ -172,6 +174,7 @@ By default, `upskill` uses:
   cache/             # advisory update-check cache, safe to delete
   config.json       # sources and output directories
   upskill-lock.json # installed skill source metadata
+  upskill-stats.jsonl # local retrieval, use, and feedback activity
 ```
 
 Environment overrides:
@@ -185,6 +188,7 @@ UPSKILL_IMPORTS_DIR
 UPSKILL_RENDERED_DIR
 UPSKILL_CONFIG
 UPSKILL_LOCK
+UPSKILL_STATS
 UPSKILL_SOURCE_IGNORE
 UPSKILL_NO_CHECK
 UPSKILL_PREFLIGHT_CHECK_TTL
@@ -193,6 +197,42 @@ UPSKILL_PREFLIGHT_CHECK_TTL
 `UPSKILL_PREFLIGHT_CHECK_TTL` accepts Go duration syntax, defaults to `1h`, and
 controls how long implicit automatic Git checks reuse a successful result. Set
 it to `0` to probe automatic Git remotes on every preflight.
+
+## Skill Activity
+
+Upskill records one retrieval after a command or MCP tool successfully returns
+installed skill content. A retrieval is not a use: record a use only after an
+agent materially applies the skill to a task.
+
+```bash
+upskill show hello-skill --stats
+upskill show hello-skill --stats --nocontent
+upskill stats use hello-skill --agent codex --idempotency-key task-123:hello:use
+```
+
+The first `show` command returns content, records its retrieval, and prints the
+updated counts. The `--nocontent` form prints only statistics and does not
+record a retrieval.
+
+Agents can leave structured feedback from real use:
+
+```bash
+upskill stats feedback hello-skill \
+  --sentiment negative \
+  --situation "Reviewing unresolved comments on a Go pull request" \
+  --details "The skill did not direct the agent to inspect inline review threads" \
+  --proposed-change "Require inline review-thread inspection before completion"
+
+upskill stats feedback hello-skill \
+  --sentiment positive \
+  --situation "Promoting a local skill revision into a team source" \
+  --details "The dry-run made the write target clear and prevented an unintended change" \
+  --proposed-change "Keep the dry-run requirement and show the same target summary in CLI examples"
+```
+
+Feedback stays in the local `upskill-stats.jsonl` activity log. It never edits
+a skill, source, overlay, draft, rendered output, or VCS state. Do not include
+secrets, credentials, private customer data, or unnecessary personal data.
 
 ## Doctor And Status
 
@@ -487,7 +527,7 @@ templates/SKILL.md.j2 -> SKILL.md
 
 ## MCP Server
 
-<!-- upskill-callable-tools: describe_tool, promote_skill_draft -->
+<!-- upskill-callable-tools: describe_tool, promote_skill_draft, get_skill_stats, record_skill_use, record_skill_feedback -->
 
 Run:
 
@@ -501,6 +541,12 @@ MCP initialization. Use `tools/list` for the complete registry and call
 accepted parameter names. Tool errors include the same schema and accepted
 parameter list, so client-visible guidance cannot drift from the registered
 surface.
+
+The activity tools are `get_skill_stats`, `record_skill_use`, and
+`record_skill_feedback`. Successful installed calls to `read_skill` and
+`read_skill_file` record retrievals; discovery, file manifests, statistics,
+source reads, and draft reads do not. `record_skill_use` is only for material
+use, and structured feedback never increments use or changes a skill.
 
 Use the same discover, describe, preview, apply, and read-back lifecycle for
 mutations:

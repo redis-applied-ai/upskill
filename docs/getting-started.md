@@ -1,6 +1,6 @@
 # Getting Started
 
-<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file -->
+<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file, get_skill_stats, record_skill_use, record_skill_feedback -->
 
 This guide takes a new checkout from build to a rendered skill and optional MCP
 setup. It uses the local example skill in this repository so you can verify the
@@ -119,6 +119,25 @@ upskill list
 upskill show hello-skill --agent codex
 upskill status
 ```
+
+Installed content reads record retrievals automatically. Retrieval does not
+mean the skill was used. After materially applying the skill, record one use:
+
+```bash
+upskill stats use hello-skill --agent codex --idempotency-key getting-started:hello:use
+```
+
+Inspect content and updated counts together, or inspect counts without another
+retrieval:
+
+```bash
+upskill show hello-skill --stats
+upskill show hello-skill --stats --nocontent
+```
+
+Use `upskill stats feedback` after real use when you can provide a positive or
+negative sentiment, the concrete situation, what went right or wrong, and a
+proposed change. Activity stays local and never changes a skill automatically.
 
 ## Use A Local Directory As A Source
 

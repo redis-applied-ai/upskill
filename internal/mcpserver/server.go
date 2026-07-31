@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"upskill/internal/activity"
 	"upskill/internal/audit"
 	"upskill/internal/config"
 	"upskill/internal/library"
@@ -140,7 +141,10 @@ func handle(cfg config.Config, req request) response {
 			return resp
 		}
 		result, err := callTool(cfg, params.Name, params.Arguments)
-		notices := updateNotices(cfg)
+		notices := []notice(nil)
+		if !isActivityOnlyTool(params.Name) {
+			notices = updateNotices(cfg)
+		}
 		if err != nil {
 			payload := toolCallErrorPayload(params.Name, params.Arguments, err)
 			if partial, ok := err.(partialResultProvider); ok {
@@ -160,6 +164,15 @@ func handle(cfg config.Config, req request) response {
 		resp.Error = &rpcError{Code: -32601, Message: "method not found"}
 	}
 	return resp
+}
+
+func isActivityOnlyTool(name string) bool {
+	switch name {
+	case "get_skill_stats", "record_skill_use", "record_skill_feedback":
+		return true
+	default:
+		return false
+	}
 }
 
 func attachNotices(cfg config.Config, result any) any {
@@ -242,7 +255,7 @@ func toolList() []map[string]any {
 		tool("describe_tool", "Return one tool's authoritative description and full input schema from the live registry.", map[string]any{
 			"name": stringProp("Exact tool name to describe."),
 		}, []string{"name"}),
-		tool("find_skills", "Find or list installed skills.", map[string]any{
+		tool("find_skills", "Find or list installed skills without recording a retrieval.", map[string]any{
 			"query": stringProp("Optional search text."),
 			"limit": intProp("Maximum number of skills to return."),
 		}, []string{}),
@@ -271,7 +284,7 @@ func toolList() []map[string]any {
 			"skill_ids":    arrayProp("Optional installed skill identifiers."),
 			"include_diff": boolProp("Include file-level diff entries for changed skills."),
 		}, []string{}),
-		tool("read_skill", "Read a base or generated skill entrypoint and optional file manifest.", map[string]any{
+		tool("read_skill", "Read a base or generated skill entrypoint and optional file manifest. A successful installed-skill read records one retrieval; a draft read does not.", map[string]any{
 			"skill_id":      stringProp("Skill identifier."),
 			"agent":         stringProp("Optional agent name for generated output customizations."),
 			"rendered":      boolProp("Read generated output when true; read base skill when false."),
@@ -279,7 +292,7 @@ func toolList() []map[string]any {
 			"include_files": boolProp("Include a file manifest."),
 			"file_limit":    intProp("Maximum number of files to include in the manifest."),
 		}, []string{"skill_id"}),
-		tool("list_skill_files", "List files in a base or generated skill bundle.", map[string]any{
+		tool("list_skill_files", "List files in a base or generated skill bundle without recording a retrieval.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),
 			"agent":          stringProp("Optional agent name for generated output customizations."),
 			"rendered":       boolProp("List generated output when true; list base skill when false."),
@@ -289,7 +302,7 @@ func toolList() []map[string]any {
 			"include_hashes": boolProp("Include SHA-256 hashes for files."),
 			"limit":          intProp("Maximum number of entries to return."),
 		}, []string{"skill_id"}),
-		tool("read_skill_file", "Read one text file from a base or generated skill bundle.", map[string]any{
+		tool("read_skill_file", "Read one text file from a base or generated skill bundle. A successful installed-skill read records one retrieval; a draft read does not.", map[string]any{
 			"skill_id":  stringProp("Skill identifier."),
 			"path":      stringProp("Relative file path."),
 			"agent":     stringProp("Optional agent name for generated output customizations."),
@@ -297,6 +310,54 @@ func toolList() []map[string]any {
 			"base_only": boolProp("Build without customizations."),
 			"max_bytes": intProp("Maximum bytes to return."),
 		}, []string{"skill_id", "path"}),
+		tool("get_skill_stats", "Return local retrieval, explicit use, and structured feedback statistics for an installed skill without recording a retrieval.", map[string]any{
+			"skill_id": stringProp("Installed skill identifier."),
+			"feedback_limit": map[string]any{
+				"type":        "integer",
+				"description": "Maximum recent feedback records to return. Defaults to 10 and is capped at 100.",
+				"default":     activity.DefaultFeedbackLimit,
+				"minimum":     0,
+				"maximum":     activity.MaxFeedbackLimit,
+			},
+		}, []string{"skill_id"}),
+		tool("record_skill_use", "Record one explicit use only after an agent materially applied an installed skill to a task. An idempotency key safely deduplicates retries.", map[string]any{
+			"skill_id": stringProp("Installed skill identifier that was materially applied."),
+			"agent": map[string]any{
+				"type":        "string",
+				"description": "Optional agent name associated with the use.",
+				"maxLength":   activity.MaxAgentBytes,
+			},
+			"idempotency_key": stringProp("Optional caller-generated key. Reusing it for the same skill and event type returns the original event; conflicting reuse fails."),
+		}, []string{"skill_id"}),
+		tool("record_skill_feedback", "Record local positive or negative feedback from real skill use. Describe the situation, what went right or wrong, and a concrete proposed change. Feedback does not increment use. Do not include secrets, credentials, private customer data, or unnecessary personal data.", map[string]any{
+			"skill_id": stringProp("Installed skill identifier the feedback concerns."),
+			"sentiment": map[string]any{
+				"type":        "string",
+				"description": "Whether the use experience was positive or negative.",
+				"enum":        []string{string(activity.SentimentPositive), string(activity.SentimentNegative)},
+			},
+			"situation": map[string]any{
+				"type":        "string",
+				"description": "The concrete task situation in which the skill was applied.",
+				"maxLength":   activity.MaxFeedbackTextBytes,
+			},
+			"details": map[string]any{
+				"type":        "string",
+				"description": "What went wrong or right while following the skill.",
+				"maxLength":   activity.MaxFeedbackTextBytes,
+			},
+			"proposed_change": map[string]any{
+				"type":        "string",
+				"description": "A concrete change that would improve or preserve the skill behavior.",
+				"maxLength":   activity.MaxFeedbackTextBytes,
+			},
+			"agent": map[string]any{
+				"type":        "string",
+				"description": "Optional agent name associated with the feedback.",
+				"maxLength":   activity.MaxAgentBytes,
+			},
+			"idempotency_key": stringProp("Optional caller-generated key. Reusing it for the same skill and event type returns the original event; conflicting reuse fails."),
+		}, []string{"skill_id", "sentiment", "situation", "details", "proposed_change"}),
 		tool("render_skill", "Build one skill's generated output without mutating base skills.", map[string]any{
 			"skill_id":       stringProp("Skill identifier."),
 			"agent":          stringProp("Optional agent name for customizations and configured output selection."),
@@ -434,6 +495,28 @@ func callTool(cfg config.Config, name string, args map[string]any) (any, error) 
 		return fileManifest(root, strArg(args, "path_prefix"), boolArg(args, "recursive", true), boolArg(args, "include_hashes", false), intArg(args, "limit", 500))
 	case "read_skill_file":
 		return readSkillFile(cfg, args)
+	case "get_skill_stats":
+		return activity.Stats(cfg, strArg(args, "skill_id"), intArg(args, "feedback_limit", activity.DefaultFeedbackLimit))
+	case "record_skill_use":
+		return activity.RecordUse(cfg, activity.UseInput{
+			SkillID:        strArg(args, "skill_id"),
+			Agent:          strArg(args, "agent"),
+			IdempotencyKey: strArg(args, "idempotency_key"),
+			Channel:        activity.ChannelMCP,
+			Operation:      "record_skill_use",
+		})
+	case "record_skill_feedback":
+		return activity.RecordFeedback(cfg, activity.FeedbackInput{
+			SkillID:        strArg(args, "skill_id"),
+			Sentiment:      activity.Sentiment(strArg(args, "sentiment")),
+			Situation:      strArg(args, "situation"),
+			Details:        strArg(args, "details"),
+			ProposedChange: strArg(args, "proposed_change"),
+			Agent:          strArg(args, "agent"),
+			IdempotencyKey: strArg(args, "idempotency_key"),
+			Channel:        activity.ChannelMCP,
+			Operation:      "record_skill_feedback",
+		})
 	case "render_skill":
 		if isDraftID(strArg(args, "skill_id")) {
 			return renderDraftTool(cfg, args)
@@ -645,15 +728,47 @@ func readSkill(cfg config.Config, args map[string]any) (any, error) {
 		}
 		result["files"] = files
 	}
+	if !isDraftID(rawID) {
+		addMCPRetrievalResult(cfg, result, rawID, "read_skill", strArg(args, "agent"))
+	}
 	return result, nil
 }
 
+func addMCPRetrievalResult(cfg config.Config, result map[string]any, skillID, operation, agent string) {
+	identity, err := activity.ResolveSkill(cfg, skillID)
+	if err == nil {
+		var stats activity.SkillStats
+		stats, err = activity.RecordRetrieval(cfg, identity, activity.ChannelMCP, operation, agent)
+		if err == nil {
+			result["retrieval_recorded"] = true
+			result["stats"] = map[string]any{
+				"retrieval_count": stats.RetrievalCount,
+				"use_count":       stats.UseCount,
+				"feedback_count":  stats.FeedbackCount,
+			}
+			return
+		}
+	}
+	result["retrieval_recorded"] = false
+	result["activity_warnings"] = []string{fmt.Sprintf("activity recording at %s failed: %v", cfg.StatsPath, err)}
+}
+
 func readSkillFile(cfg config.Config, args map[string]any) (any, error) {
+	rawID := strArg(args, "skill_id")
 	root, err := skillRoot(cfg, args)
 	if err != nil {
 		return nil, err
 	}
-	return readFileFromRoot(root, args)
+	value, err := readFileFromRoot(root, args)
+	if err != nil {
+		return nil, err
+	}
+	if !isDraftID(rawID) {
+		if result, ok := value.(map[string]any); ok {
+			addMCPRetrievalResult(cfg, result, rawID, "read_skill_file", strArg(args, "agent"))
+		}
+	}
+	return value, nil
 }
 
 func syncSkillsTool(cfg config.Config, args map[string]any) (syncSkillsResult, error) {

@@ -122,6 +122,46 @@ func TestPreflightCheckTTLConfiguration(t *testing.T) {
 	}
 }
 
+func TestStatsPathDefaultsConfigAndEnvironmentPrecedence(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, ".skills")
+	configPath := filepath.Join(home, "config.json")
+	t.Setenv("HOME", root)
+	t.Setenv("UPSKILL_HOME", home)
+	t.Setenv("UPSKILL_CONFIG", configPath)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, "upskill-stats.jsonl"); cfg.StatsPath != want {
+		t.Fatalf("default stats path = %q, want %q", cfg.StatsPath, want)
+	}
+
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"stats_path":"~/configured/stats.jsonl"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "configured", "stats.jsonl"); cfg.StatsPath != want {
+		t.Fatalf("configured stats path = %q, want %q", cfg.StatsPath, want)
+	}
+
+	t.Setenv("UPSKILL_STATS", "~/environment/stats.jsonl")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "environment", "stats.jsonl"); cfg.StatsPath != want {
+		t.Fatalf("environment stats path = %q, want %q", cfg.StatsPath, want)
+	}
+}
+
 func TestPreflightCheckTTLRejectsInvalidValues(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.json")

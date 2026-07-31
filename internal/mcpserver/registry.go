@@ -168,6 +168,11 @@ func toolCallErrorPayload(name string, args map[string]any, callErr error) map[s
 
 func serverInstructions() string {
 	definitions := toolList()
+	registered := make(map[string]bool, len(definitions))
+	for _, definition := range definitions {
+		name, _ := definition["name"].(string)
+		registered[name] = true
+	}
 	var out strings.Builder
 	out.WriteString("# Upskill MCP tools\n\n")
 	out.WriteString("This reference is generated from the live tool registry. The schemas returned by `tools/list` and `describe_tool` are authoritative.\n\n")
@@ -187,6 +192,13 @@ func serverInstructions() string {
 			fmt.Fprintf(&out, "`%s`", name)
 		}
 		out.WriteString(".\n\n")
+	}
+	if registered["read_skill"] && registered["read_skill_file"] && registered["get_skill_stats"] && registered["record_skill_use"] && registered["record_skill_feedback"] {
+		out.WriteString("## Skill activity\n\n")
+		out.WriteString("Successful installed-skill calls to `read_skill` and `read_skill_file` each record one retrieval after content is read. Discovery and metadata operations such as `find_skills`, `list_skill_files`, and `get_skill_stats` do not record retrievals. Draft and source reads do not count.\n\n")
+		out.WriteString("Retrieval is not use. Call `record_skill_use` only after materially applying the skill to a task; use an `idempotency_key` when a retry is possible.\n\n")
+		out.WriteString("Call `record_skill_feedback` after real use when there is actionable positive or negative feedback. Every feedback call requires `sentiment`, `situation`, `details` describing what went right or wrong, and a concrete `proposed_change`. Feedback does not increment use.\n\n")
+		out.WriteString("Statistics and feedback remain in Upskill's local activity log. They never change skills, sources, overlays, drafts, rendered output, or VCS state unless a user or agent explicitly performs a separate action. Automatic retrieval-accounting failures return valid content with `retrieval_recorded: false` and `activity_warnings`; explicit use and feedback calls fail if their event cannot be stored.\n\n")
 	}
 	out.WriteString("## Registry\n\n")
 	for _, definition := range definitions {

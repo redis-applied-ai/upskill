@@ -53,6 +53,7 @@ type Config struct {
 	SourceIgnore      []string
 	ConfigPath        string
 	LockPath          string
+	StatsPath         string
 	SkillsBin         string
 	PreflightCheckTTL time.Duration
 	AgentOutputs      []AgentOutput
@@ -68,6 +69,7 @@ type rawConfig struct {
 	RenderedDir       string          `json:"rendered_dir"`
 	SourceIgnore      json.RawMessage `json:"source_ignore"`
 	LockPath          string          `json:"lock_path"`
+	StatsPath         string          `json:"stats_path"`
 	SkillsBin         string          `json:"skills_bin"`
 	PreflightCheckTTL string          `json:"preflight_check_ttl,omitempty"`
 	Agents            json.RawMessage `json:"agents"`
@@ -142,6 +144,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	statsPath, err := expandPath(envDefault("UPSKILL_STATS", defaultString(raw.StatsPath, filepath.Join(home, "upskill-stats.jsonl"))))
+	if err != nil {
+		return Config{}, err
+	}
 	preflightCheckTTL, err := parsePreflightCheckTTL(raw.PreflightCheckTTL)
 	if err != nil {
 		return Config{}, err
@@ -170,6 +176,7 @@ func Load() (Config, error) {
 		SourceIgnore:      sourceIgnore,
 		ConfigPath:        configPath,
 		LockPath:          lockPath,
+		StatsPath:         statsPath,
 		SkillsBin:         envDefault("UPSKILL_SKILLS_BIN", defaultString(raw.SkillsBin, "skills")),
 		PreflightCheckTTL: preflightCheckTTL,
 		AgentOutputs:      agentOutputs,
@@ -277,6 +284,7 @@ func SaveConfig(cfg Config) error {
 	raw.ImportsDir = cfg.ImportsDir
 	raw.RenderedDir = cfg.RenderedDir
 	raw.LockPath = cfg.LockPath
+	raw.StatsPath = cfg.StatsPath
 	raw.SkillsBin = cfg.SkillsBin
 	raw.ImportDirs = mustMarshal(cfg.ImportDirs)
 	raw.SourceIgnore = mustMarshal(cfg.SourceIgnore)

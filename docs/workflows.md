@@ -1,6 +1,6 @@
 # upskill Workflows
 
-<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file, render_skill, upsert_skill_draft_file, render_skill_draft, promote_skill_draft -->
+<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file, get_skill_stats, record_skill_use, record_skill_feedback, render_skill, upsert_skill_draft_file, render_skill_draft, promote_skill_draft -->
 
 This guide shows the common workflows for using `upskill` as a local skill
 manager and MCP skill server. The examples use GitHub-style sources, but every
@@ -206,6 +206,62 @@ Use source policy to choose the write target:
 `upskill source show <source>` displays the effective source policy and any
 `upskill.toml` manifest metadata. MCP results expose the same policy fields to
 agents.
+
+## Track Retrieval, Use, And Feedback
+
+Upskill records retrievals automatically when CLI or MCP reads return installed
+skill content. Finding a skill, listing its files, or checking statistics does
+not count. A retrieval also does not mean an agent used the skill.
+
+After an agent materially applies a skill, record one use. A stable idempotency
+key makes retries safe:
+
+```bash
+upskill stats use redis --agent codex --idempotency-key task-123:redis:use
+```
+
+MCP clients call `record_skill_use` with the same skill ID, agent, and optional
+idempotency key. They can read counts and recent feedback through
+`get_skill_stats`; that call does not record a retrieval.
+
+To inspect content and post-read counts together:
+
+```bash
+upskill show redis --stats
+```
+
+To inspect only counts and recent feedback without reading content:
+
+```bash
+upskill show redis --stats --nocontent
+```
+
+Feedback must come from a concrete use experience. Negative feedback example:
+
+```bash
+upskill stats feedback redis \
+  --sentiment negative \
+  --situation "Addressing unresolved review threads on a Go pull request" \
+  --details "The skill did not direct the agent to inspect inline comments" \
+  --proposed-change "Require inline review-thread inspection before completion" \
+  --idempotency-key task-123:redis:feedback:inline-comments
+```
+
+Positive feedback example:
+
+```bash
+upskill stats feedback redis \
+  --sentiment positive \
+  --situation "Promoting a local skill revision into a team source" \
+  --details "The dry-run and source-policy checks prevented an unintended write" \
+  --proposed-change "Keep the dry-run requirement and add its target summary to CLI examples" \
+  --idempotency-key task-124:redis:feedback:dry-run
+```
+
+Feedback does not increment use. It stays in the local activity log and never
+edits skills, sources, overlays, drafts, rendered output, or VCS state. Do not
+include secrets, credentials, private customer data, or unnecessary personal
+data in feedback.
 
 ## Customize An Installed Skill With An Agent
 

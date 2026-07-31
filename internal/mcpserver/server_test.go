@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"upskill/internal/activity"
 	"upskill/internal/config"
 	"upskill/internal/draft"
 	"upskill/internal/library"
@@ -40,12 +41,517 @@ func testConfig(t *testing.T) config.Config {
 		ImportDirs:   []string{filepath.Join(root, "home", "imports")},
 		ConfigPath:   filepath.Join(root, "home", "config.json"),
 		LockPath:     filepath.Join(root, "home", "upskill-lock.json"),
+		StatsPath:    filepath.Join(root, "home", "upskill-stats.jsonl"),
 		AgentOutputs: []config.AgentOutput{{Name: "codex", Path: filepath.Join(root, "codex-skills")}},
 		Sources:      map[string]config.Source{},
 	}
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"), "---\nname: Redis\ndescription: cache\n---\n\nBase.\n")
 	writeFile(t, filepath.Join(cfg.StoreDir, "redis", "references", "guide.md"), "Guide.\n")
 	return cfg
+}
+
+func TestRetrievalCountingBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		wantDelta uint64
+		setup     func(*testing.T, config.Config) map[string]any
+		tool      string
+		args      map[string]any
+	}{
+		{name: "find installed", tool: "find_skills", args: map[string]any{"query": "redis"}},
+		{name: "list files", tool: "list_skill_files", args: map[string]any{"skill_id": "redis", "rendered": false}},
+		{name: "read skill", wantDelta: 1, tool: "read_skill", args: map[string]any{"skill_id": "redis", "rendered": false, "include_files": false}},
+		{name: "read support file", wantDelta: 1, tool: "read_skill_file", args: map[string]any{"skill_id": "redis", "path": "references/guide.md", "rendered": false}},
+		{name: "render only", tool: "render_skill", args: map[string]any{"skill_id": "redis", "copy": false, "base_only": true}},
+		{name: "check updates", tool: "check_skill_updates", args: map[string]any{}},
+		{name: "sync preview", tool: "sync_skills", args: map[string]any{"dry_run": true}},
+		{
+			name: "source inspection",
+			tool: "find_source_skills",
+			setup: func(t *testing.T, cfg config.Config) map[string]any {
+				source := filepath.Join(cfg.Home, "source")
+				writeFile(t, filepath.Join(source, "source-skill", "SKILL.md"), "---\nname: Source Skill\ndescription: source\n---\n\nSource.\n")
+				return map[string]any{"source": source}
+			},
+		},
+		{
+			name: "draft read",
+			tool: "read_skill_draft",
+			setup: func(t *testing.T, cfg config.Config) map[string]any {
+				if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis", "from_skill": "redis"}); err != nil {
+					t.Fatal(err)
+				}
+				return map[string]any{"draft_id": "draft:redis"}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			args := test.args
+			if test.setup != nil {
+				args = test.setup(t, cfg)
+			}
+			before, err := activity.Stats(cfg, "redis", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := callTool(cfg, test.tool, args); err != nil {
+				t.Fatalf("%s: %v", test.tool, err)
+			}
+			after, err := activity.Stats(cfg, "redis", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if delta := after.RetrievalCount - before.RetrievalCount; delta != test.wantDelta {
+				t.Fatalf("retrieval delta = %d, want %d", delta, test.wantDelta)
+			}
+		})
+	}
+}
+
+func TestFailedContentReadDoesNotIncrementRetrieval(t *testing.T) {
+	cfg := testConfig(t)
+	if _, err := callTool(cfg, "read_skill_file", map[string]any{
+		"skill_id": "redis",
+		"path":     "references/missing.md",
+		"rendered": false,
+	}); err == nil {
+		t.Fatal("missing support file unexpectedly read")
+	}
+	stats, err := activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetrievalCount != 0 {
+		t.Fatalf("failed read recorded %d retrievals", stats.RetrievalCount)
+	}
+}
+
+func TestReadSkillWithManifestIncrementsRetrievalOnce(t *testing.T) {
+	cfg := testConfig(t)
+	value, err := callTool(cfg, "read_skill", map[string]any{
+		"skill_id":      "redis",
+		"rendered":      false,
+		"include_files": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := value.(map[string]any)
+	if _, ok := result["files"]; !ok || result["retrieval_recorded"] != true {
+		t.Fatalf("read result = %#v", result)
+	}
+	stats, err := activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetrievalCount != 1 {
+		t.Fatalf("retrieval count = %d", stats.RetrievalCount)
+	}
+}
+
+func TestSupportFileReadsCountOncePerCall(t *testing.T) {
+	cfg := testConfig(t)
+	for call := uint64(1); call <= 3; call++ {
+		value, err := callTool(cfg, "read_skill_file", map[string]any{
+			"skill_id": "redis",
+			"path":     "references/guide.md",
+			"rendered": false,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := value.(map[string]any)
+		counts := result["stats"].(map[string]any)
+		if result["retrieval_recorded"] != true || counts["retrieval_count"] != call {
+			t.Fatalf("call %d result = %#v", call, result)
+		}
+	}
+	stats, err := activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetrievalCount != 3 {
+		t.Fatalf("retrieval count = %d", stats.RetrievalCount)
+	}
+}
+
+func TestDraftReadsAndRenderingDoNotIncrementInstalledRetrievals(t *testing.T) {
+	cfg := testConfig(t)
+	if _, err := callTool(cfg, "create_skill_draft", map[string]any{"skill_name": "redis", "from_skill": "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{tool: "read_skill", args: map[string]any{"skill_id": "draft:redis", "include_files": true}},
+		{tool: "read_skill_file", args: map[string]any{"skill_id": "draft:redis", "path": "SKILL.md"}},
+		{tool: "render_skill_draft", args: map[string]any{"draft_id": "draft:redis", "copy": false}},
+	} {
+		if _, err := callTool(cfg, call.tool, call.args); err != nil {
+			t.Fatalf("%s: %v", call.tool, err)
+		}
+	}
+	stats, err := activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RetrievalCount != 0 {
+		t.Fatalf("draft operations recorded %d installed retrievals", stats.RetrievalCount)
+	}
+}
+
+func TestAutomaticRecordingFailureStillReturnsContent(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.StatsPath = cfg.Home
+	value, err := callTool(cfg, "read_skill", map[string]any{
+		"skill_id":      "redis",
+		"rendered":      false,
+		"include_files": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := value.(map[string]any)
+	if result["content"] == "" || result["retrieval_recorded"] != false {
+		t.Fatalf("read result = %#v", result)
+	}
+	warnings, ok := result["activity_warnings"].([]string)
+	if !ok || len(warnings) != 1 || !strings.Contains(warnings[0], cfg.StatsPath) {
+		t.Fatalf("activity warnings = %#v", result["activity_warnings"])
+	}
+}
+
+func TestSkillActivityToolsAreRegisteredWithAuthoritativeSchemas(t *testing.T) {
+	for _, name := range []string{"get_skill_stats", "record_skill_use", "record_skill_feedback"} {
+		definition, ok := findToolDefinition(name)
+		if !ok {
+			t.Fatalf("tool %s is not registered", name)
+		}
+		described, err := callTool(testConfig(t), "describe_tool", map[string]any{"name": name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mustJSON(described.(map[string]any)["inputSchema"]) != mustJSON(definition["inputSchema"]) {
+			t.Fatalf("describe_tool schema drift for %s", name)
+		}
+	}
+
+	feedback, _ := findToolDefinition("record_skill_feedback")
+	schema := feedback["inputSchema"].(map[string]any)
+	if got, want := mustJSON(schema["required"]), mustJSON([]string{"skill_id", "sentiment", "situation", "details", "proposed_change"}); got != want {
+		t.Fatalf("feedback required fields = %s, want %s", got, want)
+	}
+	properties := schema["properties"].(map[string]any)
+	if mustJSON(properties["sentiment"].(map[string]any)["enum"]) != mustJSON([]string{"positive", "negative"}) {
+		t.Fatalf("feedback sentiment schema = %#v", properties["sentiment"])
+	}
+	for _, field := range []string{"situation", "details", "proposed_change"} {
+		if properties[field].(map[string]any)["maxLength"] != activity.MaxFeedbackTextBytes {
+			t.Fatalf("%s schema = %#v", field, properties[field])
+		}
+	}
+
+	stats, _ := findToolDefinition("get_skill_stats")
+	limit := stats["inputSchema"].(map[string]any)["properties"].(map[string]any)["feedback_limit"].(map[string]any)
+	if limit["default"] != activity.DefaultFeedbackLimit || limit["minimum"] != 0 || limit["maximum"] != activity.MaxFeedbackLimit {
+		t.Fatalf("feedback_limit schema = %#v", limit)
+	}
+}
+
+func TestMCPActivityArgumentValidationContract(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		args    map[string]any
+		wantErr string
+	}{
+		{name: "stats missing skill", tool: "get_skill_stats", args: map[string]any{}, wantErr: `parameter "skill_id" is required`},
+		{name: "stats wrong limit type", tool: "get_skill_stats", args: map[string]any{"skill_id": "redis", "feedback_limit": "ten"}, wantErr: `parameter "feedback_limit" must be integer`},
+		{name: "use unknown field", tool: "record_skill_use", args: map[string]any{"skill_id": "redis", "used": true}, wantErr: `unknown parameter "used"`},
+		{name: "feedback missing details", tool: "record_skill_feedback", args: map[string]any{"skill_id": "redis", "sentiment": "positive", "situation": "task", "proposed_change": "keep it"}, wantErr: `parameter "details" is required`},
+		{name: "feedback wrong sentiment type", tool: "record_skill_feedback", args: map[string]any{"skill_id": "redis", "sentiment": true, "situation": "task", "details": "worked", "proposed_change": "keep it"}, wantErr: `parameter "sentiment" must be string`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateToolArguments(tc.tool, tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validation error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestGetSkillStatsDoesNotRecordRetrieval(t *testing.T) {
+	cfg := testConfig(t)
+	if _, err := callTool(cfg, "read_skill", map[string]any{"skill_id": "redis", "include_files": false}); err != nil {
+		t.Fatal(err)
+	}
+	value, err := callTool(cfg, "get_skill_stats", map[string]any{"skill_id": "redis", "feedback_limit": 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := value.(activity.SkillStats)
+	if stats.RetrievalCount != 1 || stats.UseCount != 0 || len(stats.RecentFeedback) != 0 {
+		t.Fatalf("stats result = %#v", stats)
+	}
+	after, err := activity.Stats(cfg, "redis", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.RetrievalCount != 1 {
+		t.Fatalf("get_skill_stats changed retrieval count to %d", after.RetrievalCount)
+	}
+}
+
+func TestMCPUseAndFeedbackReturnUpdatedCounts(t *testing.T) {
+	cfg := testConfig(t)
+	useValue, err := callTool(cfg, "record_skill_use", map[string]any{
+		"skill_id":        "redis",
+		"agent":           "codex",
+		"idempotency_key": "task-1:use",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	use := useValue.(activity.RecordResult)
+	if !use.Recorded || use.Duplicate || use.EventID == "" || use.SkillID != "redis" || use.RetrievalCount != 0 || use.UseCount != 1 {
+		t.Fatalf("use result = %#v", use)
+	}
+
+	feedbackValue, err := callTool(cfg, "record_skill_feedback", map[string]any{
+		"skill_id":        "redis",
+		"sentiment":       "positive",
+		"situation":       "Applying the skill during a review",
+		"details":         "The checklist caught a missing validation",
+		"proposed_change": "Keep the validation checklist",
+		"agent":           "codex",
+		"idempotency_key": "task-1:feedback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback := feedbackValue.(activity.RecordResult)
+	if !feedback.Recorded || feedback.Duplicate || feedback.EventID == "" || feedback.Sentiment != activity.SentimentPositive || feedback.UseCount != 1 || feedback.FeedbackCount != 1 || feedback.PositiveFeedbackCount != 1 || feedback.NegativeFeedbackCount != 0 {
+		t.Fatalf("feedback result = %#v", feedback)
+	}
+}
+
+func TestMCPActivityIdempotencyMatchesSharedCLIContract(t *testing.T) {
+	cfg := testConfig(t)
+	useArgs := map[string]any{"skill_id": "redis", "idempotency_key": "same-use"}
+	firstValue, err := callTool(cfg, "record_skill_use", useArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondValue, err := callTool(cfg, "record_skill_use", useArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstValue.(activity.RecordResult)
+	second := secondValue.(activity.RecordResult)
+	if !first.Recorded || first.Duplicate || second.Recorded || !second.Duplicate || first.EventID != second.EventID || second.UseCount != 1 {
+		t.Fatalf("use idempotency results = %#v %#v", first, second)
+	}
+
+	feedbackArgs := map[string]any{
+		"skill_id":        "redis",
+		"sentiment":       "negative",
+		"situation":       "Applying the skill",
+		"details":         "A needed step was absent",
+		"proposed_change": "Add the missing step",
+		"idempotency_key": "same-feedback",
+	}
+	firstFeedbackValue, err := callTool(cfg, "record_skill_feedback", feedbackArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFeedbackValue, err := callTool(cfg, "record_skill_feedback", feedbackArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFeedback := firstFeedbackValue.(activity.RecordResult)
+	secondFeedback := secondFeedbackValue.(activity.RecordResult)
+	if !firstFeedback.Recorded || secondFeedback.Recorded || !secondFeedback.Duplicate || firstFeedback.EventID != secondFeedback.EventID || secondFeedback.FeedbackCount != 1 {
+		t.Fatalf("feedback idempotency results = %#v %#v", firstFeedback, secondFeedback)
+	}
+
+	if _, err := callTool(cfg, "record_skill_feedback", map[string]any{
+		"skill_id":        "redis",
+		"sentiment":       "positive",
+		"situation":       "Different event type",
+		"details":         "Conflicting idempotency key",
+		"proposed_change": "Use distinct keys",
+		"idempotency_key": "same-use",
+	}); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("idempotency conflict error = %v", err)
+	}
+}
+
+func TestRetrievedAndUsedScenarioE2E(t *testing.T) {
+	cfg := testConfig(t)
+	if _, err := callTool(cfg, "read_skill", map[string]any{"skill_id": "redis", "include_files": false}); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"skill_id": "redis", "agent": "codex", "idempotency_key": "scenario:redis:use"}
+	firstValue, err := callTool(cfg, "record_skill_use", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondValue, err := callTool(cfg, "record_skill_use", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstValue.(activity.RecordResult)
+	second := secondValue.(activity.RecordResult)
+	if !first.Recorded || !second.Duplicate || first.EventID != second.EventID {
+		t.Fatalf("use results = %#v %#v", first, second)
+	}
+	value, err := callTool(cfg, "get_skill_stats", map[string]any{"skill_id": "redis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := value.(activity.SkillStats)
+	if stats.RetrievalCount != 1 || stats.UseCount != 1 || stats.FeedbackCount != 0 {
+		t.Fatalf("scenario stats = %#v", stats)
+	}
+}
+
+func TestPositiveAndNegativeFeedbackScenariosPreserveRevisionAndManagedState(t *testing.T) {
+	cfg := testConfig(t)
+	identity, err := activity.ResolveSkill(cfg, "redis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(cfg.StoreDir, "redis", "SKILL.md")
+	storeBefore := readFile(t, storePath)
+
+	for _, tc := range []struct {
+		sentiment activity.Sentiment
+		details   string
+		change    string
+	}{
+		{sentiment: activity.SentimentNegative, details: "The skill omitted inline review threads", change: "Require inline thread inspection"},
+		{sentiment: activity.SentimentPositive, details: "The dry-run prevented an unintended write", change: "Keep the dry-run requirement"},
+	} {
+		if _, err := callTool(cfg, "record_skill_feedback", map[string]any{
+			"skill_id":        "redis",
+			"sentiment":       string(tc.sentiment),
+			"situation":       "Applying the skill to a real task",
+			"details":         tc.details,
+			"proposed_change": tc.change,
+			"idempotency_key": "scenario:feedback:" + string(tc.sentiment),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	value, err := callTool(cfg, "get_skill_stats", map[string]any{"skill_id": "redis", "feedback_limit": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := value.(activity.SkillStats)
+	if stats.FeedbackCount != 2 || stats.PositiveFeedbackCount != 1 || stats.NegativeFeedbackCount != 1 || stats.UseCount != 0 {
+		t.Fatalf("feedback scenario stats = %#v", stats)
+	}
+	for _, feedback := range stats.RecentFeedback {
+		if feedback.SkillHash == "" || feedback.SkillHash != identity.SkillHash {
+			t.Fatalf("feedback revision = %q, want %q", feedback.SkillHash, identity.SkillHash)
+		}
+	}
+	if got := readFile(t, storePath); got != storeBefore {
+		t.Fatalf("feedback changed installed skill:\n%s", got)
+	}
+	for _, path := range []string{cfg.OverlaysDir, cfg.DraftsDir, cfg.RenderedDir, cfg.LockPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("feedback unexpectedly created or changed %s: %v", path, err)
+		}
+	}
+}
+
+func TestActivityWriteFailureIsNonBlockingOnlyForAutomaticRetrieval(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.StatsPath = cfg.Home
+	value, err := callTool(cfg, "read_skill", map[string]any{"skill_id": "redis", "include_files": false})
+	if err != nil {
+		t.Fatalf("automatic read failed: %v", err)
+	}
+	read := value.(map[string]any)
+	if read["content"] == "" || read["retrieval_recorded"] != false || len(read["activity_warnings"].([]string)) == 0 {
+		t.Fatalf("automatic failure result = %#v", read)
+	}
+	if _, err := callTool(cfg, "record_skill_use", map[string]any{"skill_id": "redis"}); err == nil {
+		t.Fatal("explicit use unexpectedly succeeded without persistence")
+	}
+	if _, err := callTool(cfg, "record_skill_feedback", map[string]any{
+		"skill_id":        "redis",
+		"sentiment":       "negative",
+		"situation":       "Testing unavailable storage",
+		"details":         "The event could not be persisted",
+		"proposed_change": "Restore writable activity storage",
+	}); err == nil {
+		t.Fatal("explicit feedback unexpectedly succeeded without persistence")
+	}
+}
+
+func TestActivityWritesDoNotMutateOtherManagedState(t *testing.T) {
+	cfg := testConfig(t)
+	sourceRoot := filepath.Join(cfg.Home, "team-source")
+	cfg.Sources["team"] = config.Source{ID: "src_team", Name: "team", Source: sourceRoot}
+	files := map[string]string{
+		cfg.ConfigPath: `{"stats_path":"custom"}`,
+		filepath.Join(sourceRoot, "redis", "SKILL.md"):               "Source skill.\n",
+		filepath.Join(cfg.OverlaysDir, "redis", "note.md"):           "Overlay state.\n",
+		filepath.Join(cfg.DraftsDir, "redis", "SKILL.md"):            "Draft state.\n",
+		filepath.Join(cfg.RenderedDir, "redis", "SKILL.md"):          "Rendered state.\n",
+		filepath.Join(cfg.AgentOutputs[0].Path, "redis", "SKILL.md"): "Agent output state.\n",
+	}
+	for path, content := range files {
+		writeFile(t, path, content)
+	}
+	if err := library.WriteLock(cfg, library.Lock{Skills: map[string]library.LockEntry{
+		"redis": {
+			Name:         "Redis",
+			Source:       "team",
+			SourceID:     "src_team",
+			SourceType:   "local",
+			SourceURL:    sourceRoot,
+			SkillSubpath: "redis",
+			Hash:         "sha256:locked-revision",
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	files[cfg.LockPath] = readFile(t, cfg.LockPath)
+	files[filepath.Join(cfg.StoreDir, "redis", "SKILL.md")] = readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md"))
+
+	identity, err := activity.ResolveSkill(cfg, "redis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := activity.RecordRetrieval(cfg, identity, activity.ChannelCLI, "show", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callTool(cfg, "record_skill_use", map[string]any{"skill_id": "redis"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callTool(cfg, "record_skill_feedback", map[string]any{
+		"skill_id":        "redis",
+		"sentiment":       "positive",
+		"situation":       "Verifying local activity isolation",
+		"details":         "The activity write stayed isolated",
+		"proposed_change": "Keep activity storage separate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for path, before := range files {
+		if after := readFile(t, path); after != before {
+			t.Fatalf("activity changed %s\nbefore: %q\n after: %q", path, before, after)
+		}
+	}
 }
 
 func writeFile(t *testing.T, path string, text string) {
@@ -238,7 +744,13 @@ func TestMCPRegistryDescriptionAndGeneratedInstructions(t *testing.T) {
 	if strings.Contains(instructions, "`upsert_skill_file`") {
 		t.Fatalf("generated instructions contain unregistered tool: %s", instructions)
 	}
-	for _, want := range []string{"Preview convention", "`sync_skills`", "`dry_run`"} {
+	for _, want := range []string{
+		"Preview convention", "`sync_skills`", "`dry_run`",
+		"Successful installed-skill calls to `read_skill` and `read_skill_file` each record one retrieval",
+		"Retrieval is not use", "`record_skill_use` only after materially applying",
+		"`sentiment`, `situation`, `details`", "concrete `proposed_change`",
+		"remain in Upskill's local activity log",
+	} {
 		if !strings.Contains(instructions, want) {
 			t.Fatalf("generated instructions missing %q: %s", want, instructions)
 		}
@@ -248,6 +760,62 @@ func TestMCPRegistryDescriptionAndGeneratedInstructions(t *testing.T) {
 	result := initialized.Result.(map[string]any)
 	if result["instructions"] != instructions {
 		t.Fatalf("initialize instructions are not registry-generated")
+	}
+}
+
+func TestSkillActivityDocumentationContract(t *testing.T) {
+	for _, path := range []string{
+		"../../README.md",
+		"../../SPEC.md",
+		"../../docs/getting-started.md",
+		"../../docs/workflows.md",
+		"../../prompts/AGENTS.md",
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		for _, want := range []string{"--nocontent", "get_skill_stats", "record_skill_use", "record_skill_feedback"} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("%s missing %q", path, want)
+			}
+		}
+		if strings.Contains(content, "--no-content") {
+			t.Fatalf("%s uses incorrect --no-content spelling", path)
+		}
+		normalized := strings.Join(strings.Fields(content), " ")
+		distinguishesUse := strings.Contains(normalized, "retrieval is not a use") ||
+			strings.Contains(normalized, "Retrieval is not a use") ||
+			strings.Contains(normalized, "Retrieval does not mean") ||
+			strings.Contains(normalized, "retrieval also does not mean") ||
+			strings.Contains(normalized, "Retrieval never implies use") ||
+			strings.Contains(normalized, "separate events")
+		if !distinguishesUse {
+			t.Fatalf("%s does not distinguish retrieval from use", path)
+		}
+	}
+}
+
+func TestAgentPromptRequiresSkillActivityGuidance(t *testing.T) {
+	data, err := os.ReadFile("../../prompts/AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Join(strings.Fields(string(data)), " ")
+	for _, want := range []string{
+		"## Recording Skill Activity",
+		"A retrieval is not a use",
+		"only after materially",
+		"every required field",
+		"what went right or wrong",
+		"specific `proposed_change`",
+		"local activity log",
+		"Never include secrets",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("agent prompt missing %q", want)
+		}
 	}
 }
 
