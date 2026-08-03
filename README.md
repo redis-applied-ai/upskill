@@ -634,6 +634,20 @@ use `upskill` MCP tools for skill management instead of built-in skill servers.
 The prompt's `Using Skills` section tells agents that agent-local `SKILL.md`
 files are generated output, not the source to edit when a skill needs to change.
 
+### Agent Guidance Distribution
+
+Keep `prompts/AGENTS.md` as the always-on bootstrap and safety contract. An
+agent needs those instructions before it can discover Upskill's registry or
+load an Upskill usage skill, so an installable skill should complement the
+prompt, not replace it. The prompt should retain tool discovery, live-schema,
+write-target, and generated-output rules; a skill can carry longer task recipes
+and examples on demand.
+
+The repository does not yet ship that self-usage skill. Before adding one,
+generate both surfaces from one maintained source or contract-test their shared
+requirements so tool names, preview behavior, and source semantics cannot
+drift independently.
+
 ## Sync Semantics
 
 `upskill sync` updates locked base skills, builds generated output, and copies

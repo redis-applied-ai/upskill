@@ -1,6 +1,6 @@
 # Using Skills
 
-<!-- upskill-callable-tools: find_skills, read_skill, list_skill_files, read_skill_file, get_skill_stats, record_skill_use, record_skill_feedback, render_skill, list_skill_drafts, read_skill_draft, list_skill_draft_files, read_skill_draft_file, upsert_skill_draft_file, delete_skill_draft_file, render_skill_draft, promote_skill_draft -->
+<!-- upskill-callable-tools: describe_tool, find_skills, list_sources, find_source_skills, upsert_source_skill_file, check_skill_updates, read_skill, list_skill_files, read_skill_file, get_skill_stats, record_skill_use, record_skill_feedback, render_skill, sync_skills, upsert_skill_overlay_file, delete_skill_overlay_file, list_skill_overlays, create_skill_draft, list_skill_drafts, read_skill_draft, list_skill_draft_files, read_skill_draft_file, upsert_skill_draft_file, delete_skill_draft_file, delete_skill_draft, import_skill_draft_archive, import_skill_draft_file, render_skill_draft, diff_skill_draft, rebase_skill_draft, promote_skill_draft -->
 
 Use the `upskill` MCP server for skill work whenever its tools are available.
 Do not use built-in skill servers for listing, searching, reading, creating, or
@@ -29,6 +29,25 @@ Use the right write target:
 - Ask for scope only when the user's requested fix could reasonably be either
   a local customization or an upstream base-skill revision.
 
+## Discovering Tool Contracts
+
+- Start with the MCP protocol's `tools/list` result for the live Upskill tool
+  registry. Before first calling an operational tool, call `describe_tool` with
+  its exact name and construct arguments from the returned `inputSchema` and
+  `accepted_parameter_names`.
+- Treat the live schema as authoritative. Do not guess mutation parameters or
+  rely on copied examples when the registered schema differs.
+- If a tool error returns `inputSchema`, `accepted_parameter_names`, or a
+  `did_you_mean` suggestion, correct the call from that result instead of
+  trying more guessed arguments.
+- For every mutation whose schema exposes `dry_run`, call it first with
+  `dry_run: true`, inspect its targets, actions, overwrite state, canonical
+  resources, and warnings, then repeat the same approved arguments with
+  `dry_run: false`. Read or list the destination again after applying the
+  change.
+- Do not assume every mutation supports preview or that every `dry_run` default
+  is the same. Use the live schema and returned `applied` state.
+
 ## Reading Skills
 
 - Start by calling `find_skills` with no query to list available base skills and
@@ -43,8 +62,10 @@ Use the right write target:
   catalog and does not install or update anything.
 - Do not infer that a newly visible source skill is installed. New source skills
   require an explicit future install workflow outside the current MCP surface.
-- Use `read_skill`, `list_skill_files`, and `read_skill_file` to inspect base
-  or draft skill bodies and support files.
+- Use `read_skill`, `list_skill_files`, and `read_skill_file` to inspect
+  installed base or rendered skill bodies and support files. These tools also
+  accept exact `draft:<skill-name>` IDs for read-only inspection, but prefer
+  the explicit draft read tools when a mutable draft is the object of work.
 - When using a rendered skill, call `read_skill` with `rendered: true`, read the
   skill body first, then list/read any support files referenced by the skill
   before acting on it.
@@ -61,13 +82,16 @@ Use the right write target:
 - Use `get_skill_stats` or `upskill show <skill> --stats --nocontent` to inspect
   activity without recording another retrieval.
 - A retrieval is not a use. Call `record_skill_use` only after materially
-  applying the skill to the user's task. Supply a stable `idempotency_key` when
-  the call may be retried.
+  applying the skill to the user's task. Supply a stable `idempotency_key` for
+  use or feedback calls when the call may be retried.
 - After real use, call `record_skill_feedback` when you have actionable positive
   or negative feedback. Include every required field: `sentiment`, the concrete
   `situation`, `details` explaining what went right or wrong, and a specific
   `proposed_change`.
 - Feedback does not increment use. Record use separately when appropriate.
+- If an installed read returns valid content with `retrieval_recorded: false`,
+  the read still succeeded; surface its `activity_warnings`. Explicit use and
+  feedback calls fail when their event cannot be stored.
 - Statistics and feedback stay in Upskill's local activity log. They do not
   authorize or automatically cause edits to a skill, source, overlay, draft,
   rendered output, or VCS state.
@@ -76,12 +100,24 @@ Use the right write target:
 
 ## Checking And Syncing Installed Skills
 
-- Use `check_skill_updates` to compare installed skills with their locked
-  sources without writing to `store/`, rendered output, or agent output
+- Use `check_skill_updates` for an explicit, authoritative live comparison of
+  installed skills with their locked local, manual Git, or automatic Git
+  sources. It does not write to `store/`, rendered output, or agent output
   directories.
-- Use `sync_skills` when synced base skills and rendered agent outputs should be
-  refreshed. Treat its `updated_count`, `rendered_count`, and warnings as the
-  source of truth for what happened.
+- Treat update notices attached to unrelated MCP results as implicit preflight,
+  not an authoritative live check. Local sources are checked live. Manual Git
+  sources are cache-only, and a missing valid cache result means unknown, not
+  current. Automatic Git sources reuse fresh cache results and perform a
+  bounded remote revision probe after the configured time-to-live.
+- Source catalog operations such as `find_source_skills` remain live and may
+  contact their requested Git source. Do not infer that `--no-check` makes an
+  explicit update, sync, or source catalog operation cache-only.
+- Use `sync_skills` when installed base skills and rendered agent outputs should
+  be refreshed. Preview first with `dry_run: true`; after approval, repeat with
+  `dry_run: false`. Treat `applied`, `updated_count`, `rendered_count`, actions,
+  canonical resources, and warnings as the source of truth for what happened.
+- CLI `--no-check` and `UPSKILL_NO_CHECK=1` suppress only implicit preflight.
+  They do not suppress explicit live update, sync, or source catalog work.
 - To change an installed skill's update policy, reinstall it with
   `upskill add <source> --skill <name> --update-policy manual|auto`; do not edit
   the lock file directly.

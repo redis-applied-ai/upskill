@@ -819,6 +819,58 @@ func TestAgentPromptRequiresSkillActivityGuidance(t *testing.T) {
 	}
 }
 
+func TestAgentPromptRequiresCurrentToolAndPreflightGuidance(t *testing.T) {
+	data, err := os.ReadFile("../../prompts/AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Join(strings.Fields(string(data)), " ")
+	for _, want := range []string{
+		"## Discovering Tool Contracts",
+		"`tools/list`",
+		"`describe_tool`",
+		"`inputSchema`",
+		"`accepted_parameter_names`",
+		"Do not guess mutation parameters",
+		"`dry_run: true`",
+		"`dry_run: false`",
+		"Read or list the destination again",
+		"explicit draft read tools",
+		"`retrieval_recorded: false`",
+		"`activity_warnings`",
+		"explicit, authoritative live comparison",
+		"Manual Git sources are cache-only",
+		"means unknown, not current",
+		"Automatic Git sources reuse fresh cache results",
+		"`find_source_skills` remain live",
+		"suppress only implicit preflight",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("agent prompt missing %q", want)
+		}
+	}
+}
+
+func TestAgentGuidanceDistributionContract(t *testing.T) {
+	for _, path := range []string{"../../README.md", "../../SPEC.md"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := strings.Join(strings.Fields(string(data)), " ")
+		for _, want := range []string{
+			"always-on bootstrap and safety",
+			"complement",
+			"not replace",
+			"one maintained source or contract-test",
+		} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("%s missing agent-guidance strategy %q", path, want)
+			}
+		}
+	}
+}
+
 func TestCallableToolDocumentationMarkers(t *testing.T) {
 	for name, content := range map[string]string{
 		"valid":   "<!-- upskill-callable-tools: find_skills, read_skill -->",
@@ -846,6 +898,25 @@ func TestCallableToolDocumentationMarkers(t *testing.T) {
 		}
 		if err := lintCallableToolMarkers(string(content)); err != nil {
 			t.Fatalf("%s: %v", path, err)
+		}
+	}
+
+	prompt, err := os.ReadFile("../../prompts/AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := map[string]bool{}
+	for _, match := range callableToolsMarker.FindAllStringSubmatch(string(prompt), -1) {
+		if match[1] != "" {
+			continue
+		}
+		for _, name := range strings.Split(match[2], ",") {
+			marked[strings.TrimSpace(name)] = true
+		}
+	}
+	for _, name := range toolNames() {
+		if !marked[name] {
+			t.Fatalf("agent prompt callable marker missing registered tool %s", name)
 		}
 	}
 }

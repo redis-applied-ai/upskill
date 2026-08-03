@@ -1466,6 +1466,11 @@ configuration. It must instruct agents to:
 
 - Use the `upskill` MCP server for skill listing, searching, reading, and
   overlay edits.
+- Discover the live MCP registry with `tools/list`, inspect an operational
+  tool with `describe_tool`, and treat its `inputSchema` and accepted parameter
+  names as authoritative instead of guessing arguments.
+- Preview every mutation that exposes `dry_run`, inspect the returned targets
+  and warnings, apply only approved writes, and read back the destination.
 - Treat rendered agent-local skill files as generated output, not as the source
   to edit when a user asks to fix a skill.
 - Treat base skills returned by `upskill` as read-only.
@@ -1482,6 +1487,15 @@ configuration. It must instruct agents to:
 - Submit positive or negative feedback only from real use, with the situation,
   outcome details, and a concrete proposed change. Do not include secrets,
   credentials, private customer data, or unnecessary personal data.
+- Treat explicit update checks, sync, and source catalog operations as live;
+  treat generic notices as source-aware implicit preflight where local sources
+  remain live, manual Git is cache-only, and automatic Git uses its configured
+  freshness window.
+
+An installable Upskill usage skill may complement this prompt with detailed
+workflows, but it must not replace the always-on bootstrap and safety rules. If
+both surfaces ship, generate them from one maintained source or contract-test
+their shared requirements to prevent drift.
 
 ## Safety Rules
 
