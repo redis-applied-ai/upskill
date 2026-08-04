@@ -1573,8 +1573,17 @@ func TestStandaloneLibraryCommands(t *testing.T) {
 	if code := Run([]string{"update", "redis-cache", "--diff"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("update diff code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "diff SKILL.md") || !strings.Contains(stdout.String(), "Use Redis 8.2.") {
-		t.Fatalf("update diff stdout = %q", stdout.String())
+	for _, want := range []string{
+		"diff --git a/SKILL.md b/SKILL.md",
+		"--- a/SKILL.md",
+		"+++ b/SKILL.md",
+		"@@ -3,4 +3,4 @@",
+		"-Use Redis 8.",
+		"+Use Redis 8.2.",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("update diff stdout missing %q: %q", want, stdout.String())
+		}
 	}
 	stdout.Reset()
 	stderr.Reset()

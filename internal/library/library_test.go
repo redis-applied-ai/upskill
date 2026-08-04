@@ -1681,12 +1681,33 @@ func TestPreviewUpdateErrorsAndDiffHelpers(t *testing.T) {
 	writeFile(t, filepath.Join(current, "same.txt"), "same")
 	writeFile(t, filepath.Join(next, "same.txt"), "same")
 	writeFile(t, filepath.Join(next, "added.txt"), "added")
+	writeFile(t, filepath.Join(current, "changed.txt"), "one\ntwo\nthree\nold\nfive\nsix\nseven\neight\n")
+	writeFile(t, filepath.Join(next, "changed.txt"), "one\ntwo\nthree\nnew\nfive\nsix\nseven\neight\n")
 	diff, err := diffUpdateDirs(current, next)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(diff, "\n"), "added.txt") {
-		t.Fatalf("added diff = %#v", diff)
+	joinedDiff := strings.Join(diff, "\n")
+	for _, want := range []string{
+		"diff --git a/added.txt b/added.txt",
+		"--- /dev/null",
+		"+++ b/added.txt",
+		"diff --git a/changed.txt b/changed.txt",
+		"@@ -1,7 +1,7 @@",
+		"-old",
+		"+new",
+	} {
+		if !strings.Contains(joinedDiff, want) {
+			t.Fatalf("diff missing %q: %#v", want, diff)
+		}
+	}
+	if strings.Contains(joinedDiff, " eight") {
+		t.Fatalf("diff includes out-of-context content: %#v", diff)
+	}
+	for index, line := range diff {
+		if strings.Contains(line, "\n") {
+			t.Fatalf("diff line %d contains embedded newline: %q", index, line)
+		}
 	}
 	if _, err := diffUpdateDirs(filepath.Join(cfg.Home, "missing"), next); err == nil {
 		t.Fatal("missing current diff unexpectedly succeeded")
@@ -1701,7 +1722,7 @@ func TestPreviewUpdateErrorsAndDiffHelpers(t *testing.T) {
 	if err := os.Chmod(blockedFile, 0); err != nil {
 		t.Fatal(err)
 	}
-	_, readErr := readUpdateFiles(blockedRoot)
+	_, readErr := diffUpdateDirs(blockedRoot, next)
 	_ = os.Chmod(blockedFile, 0o644)
 	if readErr == nil {
 		t.Fatal("blocked read unexpectedly succeeded")

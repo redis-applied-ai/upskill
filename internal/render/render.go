@@ -23,6 +23,7 @@ import (
 	"upskill/internal/library"
 	"upskill/internal/overlay"
 	"upskill/internal/pathutil"
+	"upskill/internal/unidiff"
 )
 
 const MarkerFile = ".upskill-render.json"
@@ -709,48 +710,15 @@ func equalStrings(left []string, right []string) bool {
 }
 
 func diffDirs(base string, rendered string) (string, error) {
-	relSet := map[string]struct{}{}
-	for _, root := range []string{base, rendered} {
-		files, err := fsutil.WalkFiles(root)
-		if err != nil {
-			return "", err
-		}
-		for _, file := range files {
-			if filepath.Base(file) == MarkerFile {
-				continue
-			}
-			rel, _ := filepath.Rel(root, file)
-			relSet[rel] = struct{}{}
-		}
+	lines, err := unidiff.CompareDirs(base, rendered, unidiff.Options{
+		Ignore: func(path string) bool {
+			return filepath.Base(path) == MarkerFile
+		},
+	})
+	if err != nil || len(lines) == 0 {
+		return "", err
 	}
-	var rels []string
-	for rel := range relSet {
-		rels = append(rels, rel)
-	}
-	sort.Strings(rels)
-
-	var out strings.Builder
-	for _, rel := range rels {
-		before, _ := os.ReadFile(filepath.Join(base, rel))
-		after, _ := os.ReadFile(filepath.Join(rendered, rel))
-		if bytes.Equal(before, after) {
-			continue
-		}
-		out.WriteString("--- " + filepath.Join(base, rel) + "\n")
-		out.WriteString("+++ " + filepath.Join(rendered, rel) + "\n")
-		out.WriteString("@@\n")
-		for _, line := range strings.SplitAfter(string(before), "\n") {
-			if line != "" {
-				out.WriteString("-" + line)
-			}
-		}
-		for _, line := range strings.SplitAfter(string(after), "\n") {
-			if line != "" {
-				out.WriteString("+" + line)
-			}
-		}
-	}
-	return out.String(), nil
+	return strings.Join(lines, "\n") + "\n", nil
 }
 
 func sortedKeys(m map[string]string) []string {

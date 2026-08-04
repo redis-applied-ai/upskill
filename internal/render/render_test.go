@@ -783,8 +783,16 @@ func TestDiffDirsNoChangesAndErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(diff, "ONLY.md") || !strings.Contains(diff, "+Only rendered.") {
-		t.Fatalf("rendered-only diff = %q", diff)
+	for _, want := range []string{
+		"diff --git a/ONLY.md b/ONLY.md",
+		"--- /dev/null",
+		"+++ b/ONLY.md",
+		"@@ -0,0 +1 @@",
+		"+Only rendered.",
+	} {
+		if !strings.Contains(diff, want) {
+			t.Fatalf("rendered-only diff missing %q: %q", want, diff)
+		}
 	}
 	if got := overlayHash([]string{filepath.Join(root, "missing")}); got == "" {
 		t.Fatal("overlayHash should still return a hash")

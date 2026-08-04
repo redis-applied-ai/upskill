@@ -186,7 +186,7 @@ options:
   --agent AGENT     Render updated skills for one configured agent.
   --no-render       Update store and lock only; skip rendering.
   --check           Preview which locked skills would change.
-  --diff            Preview incoming file changes. Implies --check.
+  --diff            Preview contextual unified diffs. Implies --check.
 
 notes:
   update uses locked source metadata; it does not inspect arbitrary configured

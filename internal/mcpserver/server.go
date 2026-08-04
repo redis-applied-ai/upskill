@@ -288,7 +288,7 @@ func toolList() []map[string]any {
 		tool("check_skill_updates", "Check installed skills against their locked sources without updating them.", map[string]any{
 			"skill_id":     stringProp("Optional installed skill identifier."),
 			"skill_ids":    arrayProp("Optional installed skill identifiers."),
-			"include_diff": boolProp("Include file-level diff entries for changed skills."),
+			"include_diff": boolProp("Include contextual unified-diff lines for changed skills."),
 		}, []string{}),
 		tool("read_skill", "Read a base or generated skill entrypoint and optional file manifest. A successful installed-skill read records one retrieval; a draft read does not.", map[string]any{
 			"skill_id":      stringProp("Skill identifier."),

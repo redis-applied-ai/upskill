@@ -686,8 +686,11 @@ unless `--no-render` is used.
 local lock file, and prints changed or unchanged rows without writing to
 `store/`, `rendered/`, the lock file, or agent outputs.
 
-`--diff` implies `--check` and also prints simple file-oriented diffs for
-changed skills. It is read-only.
+`--diff` implies `--check` and also prints deterministic contextual unified
+diffs for changed skills. Text files use relative `a/` and `b/` paths, standard
+range-bearing hunk headers, and three context lines. Added and deleted files use
+`/dev/null`; binary and oversized files receive bounded summaries instead of
+raw content. It is read-only.
 
 ### `sync`
 

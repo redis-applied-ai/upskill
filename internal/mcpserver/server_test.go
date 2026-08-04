@@ -1562,6 +1562,24 @@ func TestMCPCheckSkillUpdates(t *testing.T) {
 	if !ok || len(checks) != 1 || !checks[0].Changed || checks[0].UpdatePolicy != config.UpdatePolicyAuto || len(checks[0].Diff) == 0 {
 		t.Fatalf("checks = %#v", payload["checks"])
 	}
+	diff := strings.Join(checks[0].Diff, "\n")
+	for _, want := range []string{
+		"diff --git a/SKILL.md b/SKILL.md",
+		"--- a/SKILL.md",
+		"+++ b/SKILL.md",
+		"@@ -2,4 +2,4 @@",
+		"-Old.",
+		"+New.",
+	} {
+		if !strings.Contains(diff, want) {
+			t.Fatalf("check diff missing %q: %#v", want, checks[0].Diff)
+		}
+	}
+	for index, line := range checks[0].Diff {
+		if strings.Contains(line, "\n") {
+			t.Fatalf("check diff line %d contains embedded newline: %q", index, line)
+		}
+	}
 	if got := readFile(t, filepath.Join(cfg.StoreDir, "redis", "SKILL.md")); strings.Contains(got, "New.") {
 		t.Fatalf("check mutated installed store:\n%s", got)
 	}

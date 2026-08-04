@@ -13,6 +13,7 @@ import (
 	"upskill/internal/fsutil"
 	"upskill/internal/library"
 	"upskill/internal/render"
+	"upskill/internal/unidiff"
 )
 
 var (
@@ -273,71 +274,12 @@ func copyRenderedToAgents(cfg config.Config, skill string, agent string, rendere
 }
 
 func diffDirs(base string, draftPath string) ([]string, error) {
-	baseFiles, err := readFiles(base)
-	if err != nil {
-		return nil, err
-	}
-	draftFiles, err := readFiles(draftPath)
-	if err != nil {
-		return nil, err
-	}
-	keys := map[string]struct{}{}
-	for key := range baseFiles {
-		keys[key] = struct{}{}
-	}
-	for key := range draftFiles {
-		keys[key] = struct{}{}
-	}
-	var sorted []string
-	for key := range keys {
-		sorted = append(sorted, key)
-	}
-	sort.Strings(sorted)
-	var lines []string
-	for _, key := range sorted {
-		before, hadBefore := baseFiles[key]
-		after, hasAfter := draftFiles[key]
-		if hadBefore && hasAfter && before == after {
-			continue
-		}
-		lines = append(lines, "diff "+key)
-		if hadBefore {
-			lines = append(lines, "-"+before)
-		}
-		if hasAfter {
-			lines = append(lines, "+"+after)
-		}
-	}
-	return lines, nil
-}
-
-func readFiles(root string) (map[string]string, error) {
-	files := map[string]string{}
-	if root == "" {
-		return files, nil
-	}
-	if _, err := osStat(root); os.IsNotExist(err) {
-		return files, nil
-	} else if err != nil {
-		return nil, err
-	}
-	paths, err := fsWalkFiles(root)
-	if err != nil {
-		return nil, err
-	}
-	for _, path := range paths {
-		rel, _ := filepath.Rel(root, path)
-		rel = filepath.ToSlash(rel)
-		if rel == MetadataFile || rel == render.MarkerFile {
-			continue
-		}
-		data, err := osReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		files[rel] = string(data)
-	}
-	return files, nil
+	return unidiff.CompareDirs(base, draftPath, unidiff.Options{
+		BeforeOptional: true,
+		Ignore: func(path string) bool {
+			return path == MetadataFile || filepath.Base(path) == render.MarkerFile
+		},
+	})
 }
 
 func promotionDestination(path string, skill string) (string, error) {

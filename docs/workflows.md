@@ -419,14 +419,23 @@ Use `--diff` to preview incoming file changes. It is also read-only:
 upskill update hello-skill --diff
 ```
 
-The diff output is simple and file-oriented:
+The output is a contextual unified diff with stable relative paths:
 
 ```text
 hello-skill   changed sha256:old -> sha256:new
-diff SKILL.md
--old file body
-+new file body
+diff --git a/SKILL.md b/SKILL.md
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -3,3 +3,3 @@
+ context before
+-old line
++new line
+ context after
 ```
+
+Text diffs include three context lines by default. Added and deleted files use
+`/dev/null`; binary and oversized files are summarized without dumping their
+contents. The CLI and MCP `diff` array use the same deterministic line format.
 
 Apply updates with `update`:
 

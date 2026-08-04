@@ -85,8 +85,18 @@ func TestDiffRebaseAndPromote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(diff.Lines, "\n"), "+Draft.") {
-		t.Fatalf("diff = %#v", diff)
+	joinedDiff := strings.Join(diff.Lines, "\n")
+	for _, want := range []string{
+		"diff --git a/SKILL.md b/SKILL.md",
+		"--- a/SKILL.md",
+		"+++ b/SKILL.md",
+		"@@ -1 +1 @@",
+		"-Base.",
+		"+Draft.",
+	} {
+		if !strings.Contains(joinedDiff, want) {
+			t.Fatalf("diff missing %q: %#v", want, diff)
+		}
 	}
 	rebase, err := Rebase(cfg, "demo")
 	if err != nil {
@@ -192,7 +202,8 @@ func TestDraftRenderAdditionalBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(diff.Lines, "\n"), "+New.") {
+	joinedDiff := strings.Join(diff.Lines, "\n")
+	if !strings.Contains(joinedDiff, "--- /dev/null") || !strings.Contains(joinedDiff, "+New.") {
 		t.Fatalf("new diff = %#v", diff)
 	}
 
@@ -204,12 +215,6 @@ func TestDraftRenderAdditionalBranches(t *testing.T) {
 	}
 	if len(lines) != 0 {
 		t.Fatalf("same diff = %#v", lines)
-	}
-	if files, err := readFiles(""); err != nil || len(files) != 0 {
-		t.Fatalf("empty readFiles = %#v %v", files, err)
-	}
-	if files, err := readFiles(filepath.Join(root, "missing")); err != nil || len(files) != 0 {
-		t.Fatalf("missing readFiles = %#v %v", files, err)
 	}
 
 	if _, err := Save(cfg, Metadata{Name: "orphan", Type: TypeVersion, ParentSkill: "missing", ParentHash: "sha256:old", CreatedFrom: CreatedFromBase}); err != nil {
@@ -340,9 +345,6 @@ func TestDraftRenderInjectedErrorBranches(t *testing.T) {
 	if _, err := Promote(cfg, "demo", PromoteOptions{ToPath: filepath.Join(root, "repo")}); err == nil {
 		t.Fatal("expected promote planned-copy error")
 	}
-	if _, err := readFiles(filepath.Join(root, "drafts", "demo")); err == nil {
-		t.Fatal("expected readFiles walk error")
-	}
 	fsWalkFiles = oldWalkFiles
 
 	osRemoveAll = func(string) error { return errors.New("remove failed") }
@@ -369,15 +371,6 @@ func TestDraftRenderInjectedErrorBranches(t *testing.T) {
 	fsCopyDir = oldCopyDir
 
 	osStat = func(path string) (os.FileInfo, error) {
-		if path == filepath.Join(root, "stat-error") {
-			return nil, errors.New("stat failed")
-		}
-		return oldStat(path)
-	}
-	if _, err := readFiles(filepath.Join(root, "stat-error")); err == nil {
-		t.Fatal("expected readFiles stat error")
-	}
-	osStat = func(path string) (os.FileInfo, error) {
 		if strings.HasSuffix(path, "SKILL.md") {
 			return nil, errors.New("file stat failed")
 		}
@@ -388,31 +381,10 @@ func TestDraftRenderInjectedErrorBranches(t *testing.T) {
 	}
 	osStat = oldStat
 
-	osReadFile = func(string) ([]byte, error) { return nil, errors.New("read failed") }
-	if _, err := readFiles(filepath.Join(root, "drafts", "demo")); err == nil {
-		t.Fatal("expected readFiles read error")
-	}
-	osReadFile = oldReadFile
-
-	osStat = func(path string) (os.FileInfo, error) {
-		if path == filepath.Join(root, "drafts", "demo") {
-			return nil, errors.New("base stat failed")
-		}
-		return oldStat(path)
-	}
-	if _, err := Diff(cfg, "demo"); err == nil {
-		t.Fatal("expected Diff read error")
-	}
-	if _, err := diffDirs(filepath.Join(root, "drafts", "demo"), filepath.Join(root, "same-draft")); err == nil {
+	if _, err := diffDirs(filepath.Join(root, "missing-base"), filepath.Join(root, "same-draft")); err == nil {
 		t.Fatal("expected diff base read error")
 	}
-	osStat = func(path string) (os.FileInfo, error) {
-		if path == filepath.Join(root, "same-draft") {
-			return nil, errors.New("draft stat failed")
-		}
-		return oldStat(path)
-	}
-	if _, err := diffDirs("", filepath.Join(root, "same-draft")); err == nil {
+	if _, err := diffDirs("", filepath.Join(root, "missing-draft")); err == nil {
 		t.Fatal("expected diff draft read error")
 	}
 	osStat = oldStat

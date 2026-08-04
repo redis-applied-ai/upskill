@@ -20,6 +20,7 @@ import (
 	"upskill/internal/config"
 	"upskill/internal/fsutil"
 	"upskill/internal/pathutil"
+	"upskill/internal/unidiff"
 )
 
 const LockSchemaVersion = 2
@@ -1062,60 +1063,7 @@ func HashDir(root string) (string, error) {
 }
 
 func diffUpdateDirs(current string, next string) ([]string, error) {
-	currentFiles, err := readUpdateFiles(current)
-	if err != nil {
-		return nil, err
-	}
-	nextFiles, err := readUpdateFiles(next)
-	if err != nil {
-		return nil, err
-	}
-	keys := map[string]struct{}{}
-	for key := range currentFiles {
-		keys[key] = struct{}{}
-	}
-	for key := range nextFiles {
-		keys[key] = struct{}{}
-	}
-	var sorted []string
-	for key := range keys {
-		sorted = append(sorted, key)
-	}
-	sort.Strings(sorted)
-	var lines []string
-	for _, key := range sorted {
-		before, hadBefore := currentFiles[key]
-		after, hasAfter := nextFiles[key]
-		if hadBefore && hasAfter && before == after {
-			continue
-		}
-		lines = append(lines, "diff "+key)
-		if hadBefore {
-			lines = append(lines, "-"+before)
-		}
-		if hasAfter {
-			lines = append(lines, "+"+after)
-		}
-	}
-	return lines, nil
-}
-
-func readUpdateFiles(root string) (map[string]string, error) {
-	files := map[string]string{}
-	paths, err := fsutil.WalkFiles(root)
-	if err != nil {
-		return nil, err
-	}
-	for _, path := range paths {
-		rel, _ := filepath.Rel(root, path)
-		rel = filepath.ToSlash(rel)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		files[rel] = string(data)
-	}
-	return files, nil
+	return unidiff.CompareDirs(current, next, unidiff.Options{})
 }
 
 func splitFragment(input string) (string, string, string) {

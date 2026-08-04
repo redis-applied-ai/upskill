@@ -143,8 +143,9 @@ source every time. Local sources are read directly from disk; Git sources are
 resolved from the requested upstream ref instead of from the installed store.
 
 Installed skills are separate from source catalogs. `upskill update --check`
-previews locked source changes without writing. `upskill update --diff`
-previews incoming file changes. `upskill update` applies updates, and
+previews locked source changes without writing. `upskill update --diff` prints
+contextual unified diffs with relative paths for incoming file changes.
+`upskill update` applies updates, and
 `upskill sync` updates all locked skills and renders final agent outputs.
 Upskill does not install newly discovered upstream skills automatically; run
 `upskill add <source> --skill <name>` once for each new skill you want managed.
