@@ -20,11 +20,10 @@ import (
 	"upskill/internal/library"
 	"upskill/internal/overlay"
 	"upskill/internal/render"
+	appversion "upskill/internal/version"
 )
 
 var fileManifest = library.FileManifest
-
-const serverVersion = "0.1.1"
 
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -133,7 +132,7 @@ func handle(cfg config.Config, req request) response {
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
-			"serverInfo":   map[string]any{"name": "upskill", "version": serverVersion},
+			"serverInfo":   map[string]any{"name": "upskill", "version": appversion.Current()},
 			"instructions": serverInstructions(),
 		}
 	case "tools/list":
