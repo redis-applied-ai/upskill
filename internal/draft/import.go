@@ -28,9 +28,7 @@ const (
 
 var httpGet = http.Get
 
-func noopCleanup() {
-	return
-}
+func noopCleanup() {}
 
 type ImportOptions struct {
 	ArchivePath       string
@@ -201,7 +199,7 @@ func readZip(path string) ([]archiveEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	var entries []archiveEntry
 	var total int64
 	for _, file := range reader.File {
@@ -243,7 +241,7 @@ func readZipFile(file *zip.File) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	return io.ReadAll(io.LimitReader(reader, maxSingleFile+1))
 }
 
@@ -252,12 +250,12 @@ func readTarGZ(path string) ([]archiveEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	gz, err := gzip.NewReader(file)
 	if err != nil {
 		return nil, err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	reader := tar.NewReader(gz)
 	var entries []archiveEntry
 	var total int64
@@ -281,7 +279,7 @@ func readTarGZ(path string) ([]archiveEntry, error) {
 		entry := archiveEntry{Path: filepath.ToSlash(header.Name), Dir: header.Typeflag == tar.TypeDir}
 		switch header.Typeflag {
 		case tar.TypeDir:
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if header.Size > maxSingleFile {
 				return nil, fmt.Errorf("archive file is too large: %s", header.Name)
 			}
@@ -430,7 +428,7 @@ func download(rawURL string, expected string) (string, func(), error) {
 	if err != nil {
 		return "", noopCleanup, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", noopCleanup, fmt.Errorf("download failed with status %s", resp.Status)
 	}
@@ -442,7 +440,7 @@ func download(rawURL string, expected string) (string, func(), error) {
 	if err != nil {
 		return "", noopCleanup, err
 	}
-	defer tmp.Close()
+	defer func() { _ = tmp.Close() }()
 	limit := int64(maxArchiveBytes)
 	if ext != ".zip" && ext != ".tar.gz" && ext != ".tgz" {
 		limit = maxSingleFile

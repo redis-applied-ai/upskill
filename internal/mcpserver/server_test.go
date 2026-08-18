@@ -658,9 +658,17 @@ func writeMCPZip(t *testing.T, path string, files map[string]string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Close(); err != nil {
+			t.Errorf("close zip output: %v", err)
+		}
+	}()
 	writer := zip.NewWriter(out)
-	defer writer.Close()
+	defer func() {
+		if err := writer.Close(); err != nil {
+			t.Errorf("close zip writer: %v", err)
+		}
+	}()
 	for name, content := range files {
 		file, err := writer.Create(name)
 		if err != nil {
@@ -678,6 +686,10 @@ func TestHandleProtocolMethods(t *testing.T) {
 	initResp := handle(cfg, request{ID: id, Method: "initialize"})
 	if initResp.Error != nil || initResp.Result == nil {
 		t.Fatalf("initialize response = %#v", initResp)
+	}
+	serverInfo := initResp.Result.(map[string]any)["serverInfo"].(map[string]any)
+	if serverInfo["version"] != "0.1.1" {
+		t.Fatalf("server version = %#v", serverInfo["version"])
 	}
 	toolsResp := handle(cfg, request{ID: id, Method: "tools/list"})
 	data, _ := json.Marshal(toolsResp.Result)

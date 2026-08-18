@@ -24,6 +24,8 @@ import (
 
 var fileManifest = library.FileManifest
 
+const serverVersion = "0.1.1"
+
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -131,7 +133,7 @@ func handle(cfg config.Config, req request) response {
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
-			"serverInfo":   map[string]any{"name": "upskill", "version": "0.1.0"},
+			"serverInfo":   map[string]any{"name": "upskill", "version": serverVersion},
 			"instructions": serverInstructions(),
 		}
 	case "tools/list":
@@ -174,33 +176,6 @@ func isActivityOnlyTool(name string) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func attachNotices(cfg config.Config, result any) any {
-	notices := updateNotices(cfg)
-	if len(notices) == 0 {
-		return result
-	}
-	switch value := result.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(value)+1)
-		for key, item := range value {
-			out[key] = item
-		}
-		out["notices"] = notices
-		return out
-	default:
-		data, err := json.Marshal(value)
-		if err != nil {
-			return result
-		}
-		var object map[string]any
-		if err := json.Unmarshal(data, &object); err != nil || object == nil {
-			return result
-		}
-		object["notices"] = notices
-		return object
 	}
 }
 

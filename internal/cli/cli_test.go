@@ -156,7 +156,7 @@ func installFakeEditor(t *testing.T, edited *[]string) {
 		if err != nil {
 			return err
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		_, err = file.WriteString("\nEdited by test.\n")
 		return err
 	}
@@ -2990,6 +2990,22 @@ func TestSourceCommands(t *testing.T) {
 	}
 }
 
+func TestSourceAddRejectsIncompleteSchemelessGitHubURL(t *testing.T) {
+	_, configPath := setupEnv(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"source", "add", "github.com/speakeasy-api", "--name", "speakeasy", "--subpath", "skills"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("incomplete GitHub source unexpectedly added: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "GitHub source must include owner and repository") {
+		t.Fatalf("source add stderr = %q", stderr.String())
+	}
+	if rawConfig := readTestFile(t, configPath); strings.Contains(rawConfig, "speakeasy") {
+		t.Fatalf("invalid source was saved: %s", rawConfig)
+	}
+}
+
 func TestUpsertSourceRecordPreservesIdentityMetadata(t *testing.T) {
 	source := config.NormalizeSource(config.Source{
 		Name:                "team",
@@ -3719,7 +3735,7 @@ func TestCLIDoesNotNoticeUninstalledSourceSkills(t *testing.T) {
 }
 
 func TestSyncErrors(t *testing.T) {
-	root, _ := setupEnv(t)
+	_, _ = setupEnv(t)
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"sync", "--agent"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("missing agent value code = %d", code)
@@ -3730,7 +3746,7 @@ func TestSyncErrors(t *testing.T) {
 		t.Fatalf("unknown flag code = %d", code)
 	}
 
-	root, _ = setupEnv(t)
+	root, _ := setupEnv(t)
 	writeTestFile(t, filepath.Join(root, "home", "store"), "file-not-dir", 0o644)
 	stdout.Reset()
 	stderr.Reset()

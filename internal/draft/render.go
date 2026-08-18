@@ -97,7 +97,7 @@ func Render(cfg config.Config, name string, opts RenderOptions) ([]RenderResult,
 	if err != nil {
 		return nil, err
 	}
-	defer osRemoveAll(tmpStore)
+	defer func() { _ = osRemoveAll(tmpStore) }()
 	tmpSkill := filepath.Join(tmpStore, item.StoreName)
 	if err := fsCopyDir(item.Path, tmpSkill, func(rel string, _ os.DirEntry) bool {
 		return rel == MetadataFile

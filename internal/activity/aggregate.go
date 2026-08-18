@@ -42,9 +42,10 @@ func aggregate(identity SkillIdentity, events []Event, feedbackLimit int, warnin
 			updateFirstLast(&stats.FirstUsedAt, &stats.LastUsedAt, event.Timestamp)
 		case EventFeedback:
 			stats.FeedbackCount++
-			if event.Sentiment == SentimentPositive {
+			switch event.Sentiment {
+			case SentimentPositive:
 				stats.PositiveFeedbackCount++
-			} else if event.Sentiment == SentimentNegative {
+			case SentimentNegative:
 				stats.NegativeFeedbackCount++
 			}
 			if stats.LastFeedbackAt == nil || event.Timestamp.After(*stats.LastFeedbackAt) {

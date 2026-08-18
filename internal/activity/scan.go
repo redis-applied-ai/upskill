@@ -23,7 +23,7 @@ func scanEvents(path string) (scanResult, error) {
 	if err != nil {
 		return scanResult{}, fmt.Errorf("read activity file %s: %w", path, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	result := scanResult{}
 	reader := bufio.NewReader(file)

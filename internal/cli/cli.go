@@ -1084,15 +1084,6 @@ func preflightAgent(args []string) string {
 	return ""
 }
 
-func hasCLIFlag(args []string, flag string) bool {
-	for _, arg := range args {
-		if arg == flag || strings.HasPrefix(arg, flag+"=") {
-			return true
-		}
-	}
-	return false
-}
-
 func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "upskill: unexpected argument: %s\n", args[0])
@@ -1158,7 +1149,7 @@ func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 		return 2
 	}
 	if _, ok := library.ResolveNamedSource(cfg, source); !ok {
-		canonical, key, err := library.CanonicalSource(source, "", ref, subpath)
+		canonical, _, err := library.CanonicalSource(source, "", ref, subpath)
 		if err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)
 			return 1
@@ -1166,7 +1157,7 @@ func runAdd(cfg config.Config, args []string, stdout io.Writer, stderr io.Writer
 		if cfg.Sources == nil {
 			cfg.Sources = map[string]config.Source{}
 		}
-		canonical, key, _ = upsertSourceRecord(cfg.Sources, canonical)
+		canonical, key, _ := upsertSourceRecord(cfg.Sources, canonical)
 		cfg.Sources[key] = canonical
 		if err := config.SaveSources(cfg, cfg.Sources); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)

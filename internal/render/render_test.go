@@ -602,7 +602,11 @@ func TestRenderPackageErrorBranches(t *testing.T) {
 	if err := os.Chmod(lockedDir, 0); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(lockedDir, 0o755)
+	t.Cleanup(func() {
+		if err := os.Chmod(lockedDir, 0o755); err != nil {
+			t.Errorf("restore locked directory permissions: %v", err)
+		}
+	})
 	_, _ = (Renderer{Config: cfg}).Render(Options{Skill: "redis", Agent: "codex"})
 }
 
@@ -758,7 +762,11 @@ func TestPatchAndOverlayHelperErrors(t *testing.T) {
 	if err := os.Chmod(filepath.Join(walkRoot, "closed"), 0); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(filepath.Join(walkRoot, "closed"), 0o755)
+	t.Cleanup(func() {
+		if err := os.Chmod(filepath.Join(walkRoot, "closed"), 0o755); err != nil {
+			t.Errorf("restore closed directory permissions: %v", err)
+		}
+	})
 	_ = walkExistingFiles(walkRoot, func(path, rel string) error { return nil })
 }
 

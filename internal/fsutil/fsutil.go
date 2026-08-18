@@ -31,7 +31,7 @@ func CopyDir(src string, dst string, skip func(rel string, info fs.DirEntry) boo
 	})
 }
 
-func CopyFile(src string, dst string) error {
+func CopyFile(src string, dst string) (err error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -39,13 +39,17 @@ func CopyFile(src string, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if closeErr := out.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 	_, err = io.Copy(out, in)
 	return err
 }

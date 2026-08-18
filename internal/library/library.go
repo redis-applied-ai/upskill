@@ -40,9 +40,7 @@ var (
 	readSkillFromDir = readSkill
 )
 
-func noopMaterializeCleanup() {
-	return
-}
+func noopMaterializeCleanup() {}
 
 type ParsedSource struct {
 	Input            string
@@ -232,8 +230,9 @@ func ParseSource(input string) (ParsedSource, error) {
 		return parsed, nil
 	}
 
-	if strings.HasPrefix(noFragment, "github:") {
-		noFragment = strings.TrimPrefix(noFragment, "github:")
+	noFragment = strings.TrimPrefix(noFragment, "github:")
+	if strings.HasPrefix(strings.ToLower(noFragment), "github.com/") {
+		return parseHTTPSource(parsed, "https://"+noFragment)
 	}
 
 	if strings.HasPrefix(noFragment, "git@") || strings.HasPrefix(noFragment, "ssh://") || strings.HasPrefix(noFragment, "file://") || strings.HasSuffix(noFragment, ".git") {
@@ -736,11 +735,6 @@ func CheckSkillUpdatesWithOptions(cfg config.Config, opts UpdateCheckOptions) (U
 	return UpdateCheckResult{Checks: checks, Warnings: warnings}, err
 }
 
-func checkSkillUpdatesLive(cfg config.Config, names []string, includeDiff bool) ([]UpdateCheck, error) {
-	checks, _, err := checkSkillUpdatesLiveGrouped(cfg, names, includeDiff)
-	return checks, err
-}
-
 func ListInstalled(cfg config.Config) ([]Skill, error) {
 	names, err := config.DiscoverSkills(cfg.StoreDir)
 	if err != nil {
@@ -1088,23 +1082,24 @@ func parseHTTPSource(parsed ParsedSource, raw string) (ParsedSource, error) {
 	if err != nil {
 		return ParsedSource{}, err
 	}
-	if u.Host == "github.com" {
+	if strings.EqualFold(u.Host, "github.com") {
 		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-		if len(parts) >= 2 {
-			owner, repo := parts[0], strings.TrimSuffix(parts[1], ".git")
-			parsed.Type = "git"
-			parsed.URL = fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
-			if len(parts) >= 4 && parts[2] == "tree" {
-				parsed.Ref = parts[3]
-				if len(parts) > 4 {
-					parsed.Subpath = strings.Join(parts[4:], "/")
-				}
-			}
-			if err := validateOptionalSubpath(parsed.Subpath); err != nil {
-				return ParsedSource{}, err
-			}
-			return parsed, nil
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return ParsedSource{}, fmt.Errorf("GitHub source must include owner and repository: %s", raw)
 		}
+		owner, repo := parts[0], strings.TrimSuffix(parts[1], ".git")
+		parsed.Type = "git"
+		parsed.URL = fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+		if len(parts) >= 4 && parts[2] == "tree" {
+			parsed.Ref = parts[3]
+			if len(parts) > 4 {
+				parsed.Subpath = strings.Join(parts[4:], "/")
+			}
+		}
+		if err := validateOptionalSubpath(parsed.Subpath); err != nil {
+			return ParsedSource{}, err
+		}
+		return parsed, nil
 	}
 	parsed.Type = "git"
 	parsed.URL = raw

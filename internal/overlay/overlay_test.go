@@ -142,7 +142,11 @@ func TestListGlobalOnlyAndFileCountErrors(t *testing.T) {
 	if err := os.Chmod(skillDir, 0); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(skillDir, 0o755)
+	t.Cleanup(func() {
+		if err := os.Chmod(skillDir, 0o755); err != nil {
+			t.Errorf("restore skill directory permissions: %v", err)
+		}
+	})
 	if _, err := List(cfg, "redis", ""); err == nil {
 		t.Fatal("expected skill fileCount error")
 	}
@@ -158,7 +162,11 @@ func TestListGlobalOnlyAndFileCountErrors(t *testing.T) {
 	if err := os.Chmod(agentDir, 0); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(agentDir, 0o755)
+	t.Cleanup(func() {
+		if err := os.Chmod(agentDir, 0o755); err != nil {
+			t.Errorf("restore agent directory permissions: %v", err)
+		}
+	})
 	if _, err := List(cfg, "redis", ""); err == nil {
 		t.Fatal("expected agent fileCount error")
 	}
@@ -205,7 +213,11 @@ func TestOverlayErrorBranches(t *testing.T) {
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(dir, 0o755)
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Errorf("restore overlay directory permissions: %v", err)
+		}
+	})
 	if _, err := Add(cfg, "redis", ""); err == nil {
 		t.Fatal("expected append file write error")
 	}

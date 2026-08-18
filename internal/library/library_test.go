@@ -48,6 +48,7 @@ func TestParseSourceVariants(t *testing.T) {
 		skill string
 	}{
 		{"owner/repo", "git", "https://github.com/owner/repo.git", "", "", ""},
+		{"github.com/owner/repo", "git", "https://github.com/owner/repo.git", "", "", ""},
 		{"github:owner/repo/path/to/skills@main", "git", "https://github.com/owner/repo.git", "main", "path/to/skills", ""},
 		{"owner/repo#dev@redis", "git", "https://github.com/owner/repo.git", "dev", "", "redis"},
 		{"https://github.com/owner/repo/tree/main/skills/redis", "git", "https://github.com/owner/repo.git", "main", "skills/redis", ""},
@@ -76,6 +77,11 @@ func TestParseSourceVariants(t *testing.T) {
 	}
 	if _, err := ParseSource("not a source: value"); err == nil {
 		t.Fatal("unsupported source unexpectedly parsed")
+	}
+	for _, input := range []string{"github.com/owner", "https://github.com/owner"} {
+		if _, err := ParseSource(input); err == nil {
+			t.Fatalf("incomplete GitHub source %q unexpectedly parsed", input)
+		}
 	}
 	if _, err := ApplySourceOverrides(local, "main", "../bad", "redis"); err == nil {
 		t.Fatal("unsafe subpath unexpectedly accepted")

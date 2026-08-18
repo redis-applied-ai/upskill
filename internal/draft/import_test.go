@@ -796,41 +796,6 @@ func writeUnsupportedMethodZip(t *testing.T, path string) {
 	}
 }
 
-func writeZipWithPatchedSizes(t *testing.T, path string, count int, size int) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer := zip.NewWriter(file)
-	for i := 0; i < count; i++ {
-		entry, err := writer.Create("f" + strconv.Itoa(i) + ".md")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := entry.Write([]byte("x")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	patchZipUncompressedSizes(t, data, uint32(size))
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func writeExpandedZip(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -866,18 +831,6 @@ func patchZipMethod(t *testing.T, data []byte, method uint16) {
 			binary.LittleEndian.PutUint16(data[i+8:i+10], method)
 		case "PK\x01\x02":
 			binary.LittleEndian.PutUint16(data[i+10:i+12], method)
-		}
-	}
-}
-
-func patchZipUncompressedSizes(t *testing.T, data []byte, size uint32) {
-	t.Helper()
-	for i := 0; i+28 < len(data); i++ {
-		switch string(data[i : i+4]) {
-		case "PK\x03\x04":
-			binary.LittleEndian.PutUint32(data[i+22:i+26], size)
-		case "PK\x01\x02":
-			binary.LittleEndian.PutUint32(data[i+24:i+28], size)
 		}
 	}
 }

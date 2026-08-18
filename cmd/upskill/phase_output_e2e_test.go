@@ -68,7 +68,7 @@ func TestPhaseAwareOutputFullLifecycle(t *testing.T) {
 	resultIndex := strings.Index(combined, "Result\n")
 	preflightIndex := strings.Index(combined, "\nPreflight\n")
 	auditIndex := strings.Index(combined, "\nAgent output audit\n")
-	if resultIndex < 0 || preflightIndex < 0 || auditIndex < 0 || !(resultIndex < preflightIndex && preflightIndex < auditIndex) {
+	if resultIndex < 0 || preflightIndex < 0 || auditIndex < 0 || resultIndex >= preflightIndex || preflightIndex >= auditIndex {
 		t.Fatalf("combined lifecycle order = result:%d preflight:%d audit:%d\n%s", resultIndex, preflightIndex, auditIndex, combined)
 	}
 	for _, want := range []string{

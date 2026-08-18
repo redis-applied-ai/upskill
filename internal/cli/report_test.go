@@ -784,7 +784,7 @@ func TestCLICollectorFlushesDiagnosticsOnceInLifecycleOrder(t *testing.T) {
 	resultIndex := strings.Index(output, "primary result")
 	preflightIndex := strings.Index(output, humanSectionPreflight)
 	auditIndex := strings.Index(output, humanSectionAudit)
-	if !(resultIndex < preflightIndex && preflightIndex < auditIndex) {
+	if resultIndex >= preflightIndex || preflightIndex >= auditIndex {
 		t.Fatalf("lifecycle order = result:%d preflight:%d audit:%d\n%s", resultIndex, preflightIndex, auditIndex, output)
 	}
 }
@@ -803,7 +803,7 @@ func TestCLIDefersPreflightAndAuditUntilAfterPrimaryResult(t *testing.T) {
 	if resultIndex < 0 || preflightIndex < 0 || auditIndex < 0 {
 		t.Fatalf("combined output missing lifecycle content:\n%s", output)
 	}
-	if !(resultIndex < preflightIndex && preflightIndex < auditIndex) {
+	if resultIndex >= preflightIndex || preflightIndex >= auditIndex {
 		t.Fatalf("combined lifecycle order = result:%d preflight:%d audit:%d\n%s", resultIndex, preflightIndex, auditIndex, output)
 	}
 }
