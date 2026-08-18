@@ -688,7 +688,7 @@ func TestHandleProtocolMethods(t *testing.T) {
 		t.Fatalf("initialize response = %#v", initResp)
 	}
 	serverInfo := initResp.Result.(map[string]any)["serverInfo"].(map[string]any)
-	if serverInfo["version"] != "0.1.1" {
+	if serverInfo["version"] != "dev" {
 		t.Fatalf("server version = %#v", serverInfo["version"])
 	}
 	toolsResp := handle(cfg, request{ID: id, Method: "tools/list"})

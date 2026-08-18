@@ -1,14 +1,17 @@
 package version
 
 import (
-	_ "embed"
 	"strings"
 )
 
-//go:embed VERSION
-var raw string
+var value = "dev"
 
-// Current returns the release version declared for this source tree.
+// Current returns the version injected by a release build.
 func Current() string {
-	return strings.TrimSpace(raw)
+	return value
+}
+
+// Semver returns the current version without a leading v.
+func Semver() string {
+	return strings.TrimPrefix(value, "v")
 }

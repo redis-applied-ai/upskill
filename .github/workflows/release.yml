@@ -42,12 +42,6 @@ jobs:
             exit 1
           fi
 
-          declared_version="$(tr -d '[:space:]' < internal/version/VERSION)"
-          if [[ "${tag}" != "v${declared_version}" ]]; then
-            echo "tag ${tag} does not match declared version v${declared_version}" >&2
-            exit 1
-          fi
-
           git fetch --no-tags origin main
           if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
             echo "release commit ${GITHUB_SHA} is not on main" >&2
@@ -78,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          ldflags="-s -w -X upskill/internal/cli.version=${GITHUB_REF_NAME}"
+          ldflags="-s -w -X upskill/internal/version.value=${GITHUB_REF_NAME}"
           mkdir -p dist
 
           for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64; do

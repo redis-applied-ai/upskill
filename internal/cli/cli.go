@@ -27,6 +27,7 @@ import (
 	"upskill/internal/pathutil"
 	"upskill/internal/preview"
 	"upskill/internal/render"
+	appversion "upskill/internal/version"
 )
 
 var (
@@ -40,7 +41,7 @@ var (
 	cliRunEditor    = runEditorCommand
 )
 
-var version = "dev"
+var version = appversion.Current()
 
 const (
 	helpAdd = `usage: upskill add <source> [--agent AGENT] [--skill NAME] [--ref REF] [--subpath PATH] [--update-policy manual|auto] [--no-render]

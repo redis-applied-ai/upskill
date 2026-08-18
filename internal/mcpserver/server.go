@@ -132,7 +132,7 @@ func handle(cfg config.Config, req request) response {
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
-			"serverInfo":   map[string]any{"name": "upskill", "version": appversion.Current()},
+			"serverInfo":   map[string]any{"name": "upskill", "version": appversion.Semver()},
 			"instructions": serverInstructions(),
 		}
 	case "tools/list":
