@@ -52,8 +52,9 @@ gap is that source mutation workflows are not policy-aware enough.
   edits for upstream skill changes.
 - Allow direct source edits for writable personal sources when explicitly
   requested.
-- Keep draft promotion available for team sources, with dry-run-first behavior
-  and no VCS side effects.
+- Keep draft promotion available for team sources, with no VCS side effects.
+  The CLI writes by default and offers `--dry-run` as a preview. MCP promotion
+  stays dry-run by default.
 - Preserve existing config compatibility and existing lock-file semantics.
 - Add robust tests for config parsing, manifest discovery, CLI UX, MCP API
   contracts, policy enforcement, source edit behavior, and docs/prompts.
@@ -232,10 +233,10 @@ guidance:
 
 ### `upskill draft promote`
 
-Keep current behavior:
+CLI behavior:
 
-- dry-run by default;
-- writes only when explicitly requested;
+- writes by default;
+- `--dry-run` previews planned writes without changing files;
 - rejects managed Upskill directories;
 - rejects remote sources without writable local paths;
 - does not perform VCS operations.
@@ -462,7 +463,8 @@ Testing tasks:
   known.
 - Add notices for overlay-preferred and team draft creation.
 - Add promotion policy checks.
-- Keep promotion dry-run by default for MCP and existing CLI behavior.
+- CLI promotion writes by default; `--dry-run` is opt-in.
+- Keep MCP promotion dry-run by default.
 - Preserve local-source-only promotion for named sources.
 
 Testing tasks:

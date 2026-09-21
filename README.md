@@ -112,7 +112,7 @@ upskill draft import <skill-name> --archive PATH [--sha256 SHA256] [--strip-comp
 upskill draft render <skill-name> [--agent AGENT] [--copy=true|false] [--apply-overlays]
 upskill draft diff <skill-name>
 upskill draft rebase <skill-name>
-upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--yes]
+upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run]
 upskill draft remove|rm <skill-name>
 ```
 

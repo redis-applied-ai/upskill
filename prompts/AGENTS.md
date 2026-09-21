@@ -206,6 +206,7 @@ upskill draft edit <draft-name>
 upskill draft render <draft-name> --agent <agent> --copy=false
 upskill draft diff <draft-name>
 upskill draft promote <draft-name> --to-source <source-name> --dry-run
+upskill draft promote <draft-name> --to-source <source-name>
 ```
 
 Use `--from-rendered` only when the draft should intentionally start from the

@@ -1009,10 +1009,13 @@ func TestHelpCommands(t *testing.T) {
 		t.Fatalf("draft rm help = %q", draftRemoveAliasHelp)
 	}
 	draftPromoteHelp := runHelp("draft", "promote", "--help")
-	for _, want := range []string{"Stable source ID", "--dry-run", "This is the default", "--json", "does not install or render"} {
+	for _, want := range []string{"Stable source ID", "--dry-run", "writes source files", "--json", "does not install or render"} {
 		if !strings.Contains(draftPromoteHelp, want) {
 			t.Fatalf("draft promote help missing %q: %q", want, draftPromoteHelp)
 		}
+	}
+	if strings.Contains(draftPromoteHelp, "--yes") {
+		t.Fatalf("draft promote help still documents --yes: %q", draftPromoteHelp)
 	}
 	syncHelp := runHelp("sync", "--help")
 	for _, want := range []string{"--dry-run", "without writing", "--json", "writes installed store updates"} {
@@ -2190,7 +2193,7 @@ func TestDraftRenderDiffRebasePromoteCommands(t *testing.T) {
 	assertCommonCLIPreview(t, stdout.Bytes(), "write", filepath.Join(dest, "redis", "SKILL.md"))
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"draft", "promote", "redis", "--to", dest, "--yes"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"draft", "promote", "redis", "--to", dest}, &stdout, &stderr); code != 0 {
 		t.Fatalf("draft promote code = %d stderr=%s", code, stderr.String())
 	}
 	if readTestFile(t, filepath.Join(dest, "redis", "SKILL.md")) != "Draft.\n" {
@@ -2256,6 +2259,7 @@ func TestDraftCommandErrors(t *testing.T) {
 		{"draft", "rebase", "missing"},
 		{"draft", "promote"},
 		{"draft", "promote", "missing", "--to", root},
+		{"draft", "promote", "missing", "--to", root, "--yes"},
 		{"draft", "promote", "missing", "--bad"},
 		{"draft", "remove"},
 		{"draft", "wat"},
@@ -3625,7 +3629,7 @@ func TestE2ETeamDraftPromoteLifecycle(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"draft", "promote", "redis", "--to-source", "team", "--yes"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"draft", "promote", "redis", "--to-source", "team"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("promote write code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(readTestFile(t, filepath.Join(source, "redis", "SKILL.md")), "Drafted.") {
@@ -3668,7 +3672,7 @@ func TestE2EReadOnlySourceRejections(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"draft", "promote", "redis", "--to-source", "read-only", "--yes"}, &stdout, &stderr); code == 0 {
+	if code := Run([]string{"draft", "promote", "redis", "--to-source", "read-only"}, &stdout, &stderr); code == 0 {
 		t.Fatal("read-only promotion unexpectedly succeeded")
 	}
 	if readTestFile(t, filepath.Join(root, "home", "store", "redis", "SKILL.md")) != originalStore {

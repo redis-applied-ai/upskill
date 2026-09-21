@@ -648,7 +648,7 @@ notes:
 examples:
   upskill draft rebase redis`
 
-	helpDraftPromote = `usage: upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run|--yes] [--json]
+	helpDraftPromote = `usage: upskill draft promote <skill-name> (--to PATH | --to-source NAME) [--dry-run] [--json]
 
 summary:
   Copy a draft bundle into an upstream local source checkout.
@@ -660,18 +660,17 @@ options:
   --to PATH         Destination directory in a local source checkout.
   --to-source NAME  Stable source ID, configured name, display name
                     (case-insensitive), exact source string, or normalized path.
-  --dry-run         Show planned writes without changing files. This is the default.
-  --yes             Apply promotion writes.
+  --dry-run         Show planned writes without changing files.
   --json            Print the common machine-readable preview/apply contract.
 
 notes:
-  Promotion previews source-file writes by default. With --yes it writes source
-  files. It does not install or render the promoted skill; run upskill add or
-  sync afterward when needed.
+  Promotion writes source files. It does not install or render the promoted
+  skill; run upskill add or sync afterward when needed.
+  Use --dry-run to preview the writes first.
 
 examples:
-  upskill draft promote redis --to-source Obsidian --dry-run
-  upskill draft promote redis --to ~/Documents/Notes/Memory/Skills/redis --yes`
+  upskill draft promote redis --to-source Obsidian
+  upskill draft promote redis --to ~/Documents/Notes/Memory/Skills/redis --dry-run`
 
 	helpDraftRemove = `usage: upskill draft remove|rm <skill-name>
 
@@ -2714,13 +2713,12 @@ func runDraft(cfg config.Config, args []string, stdout io.Writer, stderr io.Writ
 		}
 		toPath := ""
 		toSource := ""
-		dryRun := true
+		dryRun := false
 		jsonOut := false
 		if err := parseFlags(args[2:], map[string]func(string) error{
 			"--to":        func(v string) error { toPath = v; return nil },
 			"--to-source": func(v string) error { toSource = v; return nil },
 			"--dry-run":   func(_ string) error { dryRun = true; return nil },
-			"--yes":       func(_ string) error { dryRun = false; return nil },
 			"--json":      func(_ string) error { jsonOut = true; return nil },
 		}); err != nil {
 			fmt.Fprintf(stderr, "upskill: %v\n", err)

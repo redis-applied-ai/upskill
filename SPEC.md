@@ -884,6 +884,7 @@ Draft promotion:
   when possible; otherwise the command asks for or requires the skill subpath.
 - For new-skill drafts, the destination path must be provided or inferred from
   the checkout's skill discovery layout.
+- Promotion writes the draft bundle unless `--dry-run` is set.
 - `--dry-run` prints the file operations and diff without writing.
 - Promotion results include `base_mutated: false`, `overwrite`, and
   `next_steps`. Promoting into a source does not install the skill by itself:

@@ -796,10 +796,10 @@ Preview the promotion:
 upskill draft promote gamma-tool --to ~/src/skills/skills --dry-run
 ```
 
-Apply it:
+Copy the draft into the checkout:
 
 ```bash
-upskill draft promote gamma-tool --to ~/src/skills/skills --yes
+upskill draft promote gamma-tool --to ~/src/skills/skills
 ```
 
 Commit and open the PR:
@@ -827,7 +827,7 @@ If the destination is a named local source, prefer `--to-source`:
 
 ```bash
 upskill draft promote gamma-tool --to-source personal --dry-run
-upskill draft promote gamma-tool --to-source personal --yes
+upskill draft promote gamma-tool --to-source personal
 upskill add personal --skill gamma-tool
 ```
 
