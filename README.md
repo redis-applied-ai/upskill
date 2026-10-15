@@ -683,3 +683,11 @@ agent, base path, overlay paths, overlay hash, and timestamp.
   once for new skills.
 - Template customization files are full `.j2` files. They are not JSON or YAML
   variable maps.
+
+### MCP overlay argument validation
+
+`upsert_skill_overlay_file` and `delete_skill_overlay_file` publish and validate
+an `operation` enum: `append`, `root_append`, `files`, `replace`, `template`, and
+`patch`. Use `files` to add an overlay file, and `dry_run: true` to preview it.
+Invalid choices return `invalid_tool_arguments` before file operations. Source
+arguments must identify a configured source from `list_sources`.

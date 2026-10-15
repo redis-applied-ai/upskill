@@ -353,7 +353,7 @@ func toolList() []map[string]any {
 			"skill_id":       stringProp("Skill identifier."),
 			"skill_name":     stringProp("Fallback skill name when skill_id is omitted."),
 			"agent":          stringProp("Optional agent-specific customization name."),
-			"operation":      stringProp("Customization operation: append, root_append, files, replace, template, or patch."),
+			"operation":      overlayOperationProp(),
 			"path":           stringProp("Relative overlay path."),
 			"content":        stringProp("Plain-text file content."),
 			"base64_content": stringProp("Base64-encoded file content."),
@@ -362,7 +362,7 @@ func toolList() []map[string]any {
 		tool("delete_skill_overlay_file", "Delete one overlay file. Use dry_run first to confirm the target. This never deletes base skills.", map[string]any{
 			"skill_id":  stringProp("Skill identifier."),
 			"agent":     stringProp("Optional agent-specific overlay name."),
-			"operation": stringProp("Overlay operation: append, root_append, files, replace, template, or patch."),
+			"operation": overlayOperationProp(),
 			"path":      stringProp("Relative overlay path."),
 			"dry_run":   boolPropDefault("Preview the deletion target without changing files. Defaults to false for backward compatibility.", false),
 		}, []string{"skill_id", "path"}),
@@ -1109,4 +1109,12 @@ func EncodeForTest(message any) []byte {
 
 func DecodeBase64ForTest(value string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(value)
+}
+
+func overlayOperationProp() map[string]any {
+	return map[string]any{
+		"type":        "string",
+		"description": "Overlay operation. Use files to add a file; defaults to append.",
+		"enum":        []string{"append", "root_append", "files", "replace", "template", "patch"},
+	}
 }

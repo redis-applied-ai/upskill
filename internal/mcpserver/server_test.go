@@ -2992,3 +2992,38 @@ func successfulToolPayload(t *testing.T, cfg config.Config, name string, args ma
 	}
 	return payload
 }
+
+func TestOverlayOperationSchemaAndValidation(t *testing.T) {
+	for _, name := range []string{"upsert_skill_overlay_file", "delete_skill_overlay_file"} {
+		definition, _ := findToolDefinition(name)
+		property := toolProperties(definition)["operation"].(map[string]any)
+		choices := property["enum"].([]string)
+		if len(choices) != 6 {
+			t.Fatalf("missing operation choices: %v", choices)
+		}
+		for _, operation := range choices {
+			args := map[string]any{"skill_id": "test", "path": "WRITE_TEST.md", "operation": operation, "dry_run": true}
+			if name == "upsert_skill_overlay_file" {
+				args["content"] = "preview"
+			}
+			if err := validateToolArguments(name, args); err != nil {
+				t.Fatal(err)
+			}
+		}
+		args := map[string]any{"skill_id": "test", "path": "WRITE_TEST.md", "operation": "private-invalid-value", "dry_run": true}
+		if name == "upsert_skill_overlay_file" {
+			args["content"] = "preview"
+		}
+		err := validateToolArguments(name, args)
+		if err == nil {
+			t.Fatal("invalid operation was accepted")
+		}
+		payload := toolCallErrorPayload(name, nil, err)
+		if payload["error"] != "invalid_tool_arguments" {
+			t.Fatalf("unexpected payload: %v", payload)
+		}
+		if strings.Contains(err.Error(), "private-invalid-value") {
+			t.Fatal("echoed argument value")
+		}
+	}
+}

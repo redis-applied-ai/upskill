@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -68,6 +69,12 @@ func validateToolArguments(name string, args map[string]any) error {
 		expected, _ := property["type"].(string)
 		if expected != "" && !matchesSchemaType(value, expected) {
 			return argumentValidationError{message: fmt.Sprintf("parameter %q must be %s", parameter, expected)}
+		}
+		if choices, ok := property["enum"].([]string); ok {
+			selected, _ := value.(string)
+			if !slices.Contains(choices, selected) {
+				return argumentValidationError{message: fmt.Sprintf("parameter %q must be one of %s", parameter, quotedList(choices))}
+			}
 		}
 	}
 	return nil
